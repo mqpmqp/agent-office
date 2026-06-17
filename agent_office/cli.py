@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from .adapters.base import AdapterError, AdapterInvocation
+from .adapters.registry import get_adapter
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +78,17 @@ def validate_task_id(task_id: str) -> None:
         raise AgentOfficeError("TASK_ID is invalid.")
 
 
+def reset_task(task_id: str) -> None:
+    validate_task_id(task_id)
+    paths = task_paths(task_id)
+    resolved_root = paths.root.resolve()
+    resolved_tasks_root = TASKS_ROOT.resolve()
+    if resolved_tasks_root not in resolved_root.parents:
+        raise AgentOfficeError(f"Refusing to reset task outside tasks root: {paths.root}")
+    if paths.root.exists():
+        shutil.rmtree(paths.root)
+
+
 def load_task(paths: TaskPaths) -> dict[str, Any]:
     if not paths.task_json.exists():
         raise AgentOfficeError(f"Task does not exist: {paths.root}")
@@ -107,11 +123,50 @@ def require_state(task: dict[str, Any], allowed: set[str]) -> None:
         raise AgentOfficeError(f"Task is terminal: {state}")
 
 
-def require_mock(mock: bool, command: str) -> None:
-    if not mock:
-        raise AgentOfficeError(
-            f"{command} currently supports --mock only. Provider adapters are intentionally not wired in the MVP."
-        )
+def resolve_mode(args: argparse.Namespace, role: str) -> str:
+    mock = bool(getattr(args, "mock", False))
+    real = bool(getattr(args, "real", False))
+    if mock and real:
+        raise AgentOfficeError("Use only one of --mock or --real.")
+    if real:
+        return "real"
+    if mock:
+        return "mock"
+    if role in {"context", "implement", "run-demo"}:
+        env_mode = os.environ.get("AGENTOFFICE_AGENT_MODE", "mock").strip().lower()
+        if env_mode == "real":
+            return "real"
+    return "mock"
+
+
+def require_mock_mode(args: argparse.Namespace, role: str) -> None:
+    if resolve_mode(args, role) == "real":
+        raise AgentOfficeError(f"{role} real adapter is not implemented in this phase. Use --mock.")
+
+
+def build_invocation(args: argparse.Namespace, paths: TaskPaths) -> AdapterInvocation:
+    timeout = getattr(args, "timeout", None)
+    if timeout is not None and timeout <= 0:
+        raise AgentOfficeError("--timeout must be a positive integer.")
+    return AdapterInvocation(
+        task_id=args.task_id,
+        project_root=PROJECT_ROOT,
+        paths=paths,
+        timeout_seconds=timeout,
+        max_rework_rounds=MAX_REWORK_ROUNDS,
+        final_for_claude_limit=FINAL_FOR_CLAUDE_LIMIT,
+    )
+
+
+def run_adapter(role: str, args: argparse.Namespace, paths: TaskPaths):
+    mode = resolve_mode(args, role)
+    adapter_name = getattr(args, "adapter", None)
+    try:
+        adapter = get_adapter(role, mode, adapter_name)
+        method = getattr(adapter, role)
+        return method(build_invocation(args, paths))
+    except AdapterError as exc:
+        raise AgentOfficeError(str(exc)) from exc
 
 
 def write_file(path: Path, content: str) -> None:
@@ -176,36 +231,16 @@ Describe the user request here before running real providers.
 
 
 def cmd_context(args: argparse.Namespace) -> int:
-    require_mock(args.mock, "context")
     paths = task_paths(args.task_id)
     task = load_task(paths)
     require_state(task, {"CREATED", "REQUEST_CHANGES"})
-    write_file(
-        paths.gemini_context,
-        f"""# Gemini Context Summary
-
-Mode: mock
-
-## Compressed Repository Context
-
-- Project uses file-based task collaboration under `.ai/tasks/{args.task_id}/`.
-- No free-form AI chat is allowed; every agent has a fixed job and fixed artifact.
-- Claude token budget is protected by forcing Claude to read only `final-for-claude.md`.
-
-## Relevant Constraints
-
-- Max rework rounds: {MAX_REWORK_ROUNDS}
-- Final summary limit: {FINAL_FOR_CLAUDE_LIMIT} characters
-- Real secrets must not be read or printed.
-""",
-    )
-    transition(paths, task, "CONTEXT_READY", "Gemini mock context generated.")
+    result = run_adapter("context", args, paths)
+    transition(paths, task, "CONTEXT_READY", result.detail)
     print("state=CONTEXT_READY")
     return 0
 
 
 def cmd_implement(args: argparse.Namespace) -> int:
-    require_mock(args.mock, "implement")
     paths = task_paths(args.task_id)
     task = load_task(paths)
     require_state(task, {"CONTEXT_READY", "REQUEST_CHANGES"})
@@ -213,70 +248,19 @@ def cmd_implement(args: argparse.Namespace) -> int:
         if int(task.get("rework_rounds", 0)) >= MAX_REWORK_ROUNDS:
             raise AgentOfficeError("Max rework rounds reached.")
         task["rework_rounds"] = int(task.get("rework_rounds", 0)) + 1
-    write_file(
-        paths.codex_report,
-        f"""# Codex Implementation Report
-
-Mode: mock
-
-## Work Completed
-
-- Created deterministic MVP artifacts for task `{args.task_id}`.
-- Preserved the task directory protocol.
-- Did not call external providers or read secrets.
-
-## Verification
-
-- Mock implementation completed.
-- Patch artifact generated.
-""",
-    )
-    write_file(
-        paths.patch_diff,
-        f"""diff --git a/mock-target.txt b/mock-target.txt
-new file mode 100644
---- /dev/null
-+++ b/mock-target.txt
-@@ -0,0 +1,3 @@
-+Task: {args.task_id}
-+Implemented-by: Codex mock
-+Status: deterministic MVP artifact
-""",
-    )
-    transition(paths, task, "IMPLEMENTED", "Codex mock implementation generated.")
+    result = run_adapter("implement", args, paths)
+    transition(paths, task, "IMPLEMENTED", result.detail)
     print("state=IMPLEMENTED")
     return 0
 
 
 def cmd_redteam(args: argparse.Namespace) -> int:
-    require_mock(args.mock, "redteam")
+    require_mock_mode(args, "redteam")
     paths = task_paths(args.task_id)
     task = load_task(paths)
     require_state(task, {"IMPLEMENTED"})
-    write_file(
-        paths.grok_review,
-        f"""# Grok Build Red-Team Review
-
-Mode: mock
-
-## Verdict
-
-PASS_FOR_CLAUDE_SUMMARY
-
-## Findings
-
-- No uncontrolled multi-agent chat detected.
-- Required artifacts are present.
-- Claude is restricted to the final compressed artifact.
-- No secret access is required in mock mode.
-
-## Residual Risks
-
-- Real provider adapters are intentionally absent in the MVP.
-- Production use needs queue locking and provider-specific authentication hardening.
-""",
-    )
-    transition(paths, task, "REVIEWED", "Grok Build mock red-team review generated.")
+    result = run_adapter("redteam", args, paths)
+    transition(paths, task, "REVIEWED", result.detail)
     print("state=REVIEWED")
     return 0
 
@@ -335,7 +319,7 @@ Claude receives only this preview, not the full repository or full logs.
 
 
 def cmd_summarize(args: argparse.Namespace) -> int:
-    require_mock(args.mock, "summarize")
+    require_mock_mode(args, "summarize")
     paths = task_paths(args.task_id)
     task = load_task(paths)
     require_state(task, {"REVIEWED"})
@@ -346,38 +330,16 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
 
 def cmd_final(args: argparse.Namespace) -> int:
-    require_mock(args.mock, "final")
+    require_mock_mode(args, "final")
     paths = task_paths(args.task_id)
     task = load_task(paths)
     require_state(task, {"SUMMARIZED"})
-    final_text = paths.final_for_claude.read_text(encoding="utf-8")
-    decision = "APPROVED"
-    if "FORCE_REQUEST_CHANGES" in final_text:
-        decision = "REQUEST_CHANGES"
-    elif "FORCE_REJECT" in final_text:
-        decision = "REJECTED"
+    result = run_adapter("final", args, paths)
+    decision = result.decision
+    if decision not in {"APPROVED", "REQUEST_CHANGES", "REJECTED"}:
+        raise AgentOfficeError("Final adapter returned an invalid decision.")
     append_history(task, "SUMMARIZED->CLAUDE_DECIDED", "Claude mock read final-for-claude.md only.")
-    write_file(
-        paths.claude_decision,
-        f"""# Claude Decision
-
-Mode: mock
-
-Decision: {decision}
-
-## Scope Read By Claude
-
-- Read: `final-for-claude.md`
-- Did not read: full repository
-- Did not read: full logs
-- Did not read: full diff
-
-## Rationale
-
-The compressed artifact was sufficient for a mock MVP decision.
-""",
-    )
-    transition(paths, task, decision, f"Claude mock decision: {decision}.")
+    transition(paths, task, decision, result.detail)
     print(f"state={decision}")
     return 0
 
@@ -406,7 +368,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_run_demo(args: argparse.Namespace) -> int:
-    require_mock(args.mock, "run-demo")
+    demo_mode = resolve_mode(args, "run-demo")
+    validate_task_id(args.task_id)
+    if args.reset:
+        reset_task(args.task_id)
+        print(f"reset task: {args.task_id}")
     demo_steps: list[tuple[str, Callable[[argparse.Namespace], int]]] = [
         ("new", cmd_new),
         ("context", cmd_context),
@@ -417,7 +383,15 @@ def cmd_run_demo(args: argparse.Namespace) -> int:
         ("status", cmd_status),
     ]
     for name, fn in demo_steps:
-        step_args = argparse.Namespace(task_id=args.task_id, mock=True)
+        real_step = demo_mode == "real" and name == "implement"
+        step_args = argparse.Namespace(
+            task_id=args.task_id,
+            mock=not real_step,
+            real=real_step,
+            adapter=getattr(args, "adapter", None),
+            timeout=getattr(args, "timeout", None),
+            reset=False,
+        )
         if name == "new" and task_paths(args.task_id).root.exists():
             print(f"skip new: task already exists ({args.task_id})")
             continue
@@ -445,6 +419,15 @@ def build_parser() -> argparse.ArgumentParser:
         step = sub.add_parser(name, help=help_text)
         step.add_argument("task_id")
         step.add_argument("--mock", action="store_true", help="Use deterministic mock provider output.")
+        step.add_argument("--real", action="store_true", help="Use the configured real adapter where supported.")
+        step.add_argument(
+            "--adapter",
+            choices=["mock", "codex", "gemini"],
+            help="Adapter name. Real mode supports gemini for context and codex for implement.",
+        )
+        step.add_argument("--timeout", type=int, help="Adapter timeout in seconds.")
+        if name == "run-demo":
+            step.add_argument("--reset", action="store_true", help="Delete an existing task with this ID before running.")
         step.set_defaults(func=func)
 
     p = sub.add_parser("status", help="Print task state and artifact presence.")
@@ -465,4 +448,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

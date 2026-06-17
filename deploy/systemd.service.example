@@ -1,0 +1,13 @@
+[Unit]
+Description=AgentOffice mock orchestrator
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/agent-office
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m agent_office run-demo SYSTEMD-SMOKE --mock --reset
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

@@ -18,6 +18,6 @@ if [[ -z "$PYTHON" ]]; then
 fi
 
 TASK_ID="${1:-demo-task}"
-"$PYTHON" -m agent_office run-demo "$TASK_ID" --mock
+"$PYTHON" -m agent_office run-demo "$TASK_ID" --mock --reset
 
 echo "smoke test ok: $TASK_ID"

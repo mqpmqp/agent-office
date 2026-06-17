@@ -1,46 +1,16 @@
-# secrets
 .env
 .env.*
 !.env.example
-*.key
-*.pem
-*.secret
-*token*
-
-# runtime
-logs/
-*.log
-tmp/
-.cache/
-.data/
-state/
-runs/
-
-# python
 __pycache__/
+**pycache**/
 *.pyc
-.venv/
-venv/
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# node
-node_modules/
-dist/
-build/
-.next/
-
-# ai artifacts
+.ai/tasks/
+.ai/finalize/
 .ai/runs/
 .ai/logs/
 .ai/tmp/
-
-# OS/editor
-.DS_Store
-.vscode/
-.idea/
-
-# local ai runtime artifacts
-.ai/tasks/
-.ai/logs/
-.ai/tmp/
-.ai/finalize/

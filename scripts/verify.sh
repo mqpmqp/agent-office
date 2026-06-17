@@ -17,16 +17,11 @@ if [[ -z "$PYTHON" ]]; then
   fi
 fi
 
-TASK_ID="verify-task-$(date +%s)"
+TASK_ID="VERIFY-DEMO"
 
-"$PYTHON" -m py_compile agent_office/*.py
+"$PYTHON" -m compileall -q agent_office
 "$PYTHON" -m agent_office --help >/dev/null
-"$PYTHON" -m agent_office new "$TASK_ID"
-"$PYTHON" -m agent_office context "$TASK_ID" --mock
-"$PYTHON" -m agent_office implement "$TASK_ID" --mock
-"$PYTHON" -m agent_office redteam "$TASK_ID" --mock
-"$PYTHON" -m agent_office summarize "$TASK_ID" --mock
-"$PYTHON" -m agent_office final "$TASK_ID" --mock
+"$PYTHON" -m agent_office run-demo "$TASK_ID" --mock --reset
 "$PYTHON" -m agent_office status "$TASK_ID"
 
 echo "verify ok"

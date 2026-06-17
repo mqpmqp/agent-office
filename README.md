@@ -56,7 +56,9 @@ python -m agent_office --help
 ```bash
 agent-office new <TASK_ID>
 agent-office context <TASK_ID> --mock
+agent-office context <TASK_ID> --real --adapter gemini --timeout 120
 agent-office implement <TASK_ID> --mock
+agent-office implement <TASK_ID> --real --adapter codex --timeout 1200
 agent-office redteam <TASK_ID> --mock
 agent-office summarize <TASK_ID> --mock
 agent-office final <TASK_ID> --mock
@@ -96,6 +98,20 @@ or:
 python -m agent_office run-demo demo-task --mock
 ```
 
+Repeat the same demo safely with `--reset`:
+
+```bash
+python -m agent_office run-demo demo-task --mock --reset
+```
+
+`--reset` deletes only `.ai/tasks/<TASK_ID>/` for the task being run, then recreates the deterministic mock workflow from scratch. It does not relax the state machine and does not affect other task directories.
+
+To clean demo tasks manually:
+
+```bash
+rm -rf .ai/tasks/DEMO-*
+```
+
 ## Verify
 
 ```bash
@@ -103,10 +119,104 @@ bash scripts/verify.sh
 bash scripts/smoke-test.sh demo-task
 ```
 
+Both scripts are repeatable. `smoke-test.sh` runs the requested task with `--reset`; `verify.sh` uses a fixed local verification task and resets it before each run.
+
+## Gemini Context Adapter
+
+Mock mode remains the default context path:
+
+```bash
+python -m agent_office context <TASK_ID> --mock
+```
+
+The real Gemini adapter is available only for the `context` stage. Gemini does not modify code. It receives the task brief plus a safe project file-tree summary and allowed docs, then must write:
+
+```text
+.ai/tasks/<TASK_ID>/gemini-context.md
+```
+
+The generated file must include these sections:
+
+```text
+# Relevant Files
+# Why These Files Matter
+# Test Entry Points
+# Implementation Hints
+# Risks
+```
+
+To enable the real Gemini adapter:
+
+```bash
+export AGENTOFFICE_AGENT_MODE=real
+export AGENTOFFICE_GEMINI_CMD=gemini
+export AGENTOFFICE_GEMINI_TIMEOUT_SECONDS=120
+export AGENTOFFICE_GEMINI_MAX_FILES=80
+export AGENTOFFICE_GEMINI_MAX_OUTPUT_CHARS=12000
+python -m agent_office context <TASK_ID> --real --adapter gemini --timeout 120
+```
+
+`AGENTOFFICE_GEMINI_CMD` must be a single executable name or path, without shell syntax or extra arguments. AgentOffice runs it with `shell=False`, sends the prompt on stdin, captures stdout/stderr, and writes sanitized logs under `.ai/logs/<TASK_ID>/`.
+
+The adapter refuses real execution when `AGENTOFFICE_GEMINI_CMD` is empty. It also fails if the command exits successfully but does not write a non-empty `gemini-context.md`.
+
+Rollback to mock mode:
+
+```bash
+unset AGENTOFFICE_GEMINI_CMD
+export AGENTOFFICE_AGENT_MODE=mock
+python -m agent_office context <TASK_ID> --mock
+```
+
+## Codex Adapter
+
+Mock mode remains the default and safest path:
+
+```bash
+python -m agent_office implement <TASK_ID> --mock
+```
+
+The real Codex adapter is available only for the `implement` stage. `context`, `redteam`, and `final` still use mock providers in this phase.
+
+To enable the real Codex adapter, set an executable command in the environment:
+
+```bash
+export AGENTOFFICE_AGENT_MODE=real
+export AGENTOFFICE_CODEX_CMD=codex
+export AGENTOFFICE_CODEX_TIMEOUT_SECONDS=1200
+python -m agent_office implement <TASK_ID> --real --adapter codex --timeout 1200
+```
+
+`AGENTOFFICE_CODEX_CMD` must be a single executable name or path, without shell syntax or extra arguments. AgentOffice runs it with `shell=False`, sends the task prompt on stdin, captures stdout/stderr, writes sanitized logs under `.ai/logs/<TASK_ID>/`, and requires the adapter to produce both:
+
+```text
+.ai/tasks/<TASK_ID>/codex-report.md
+.ai/tasks/<TASK_ID>/patch.diff
+```
+
+If the real command is missing or does not produce a non-empty `patch.diff`, the task does not transition to `IMPLEMENTED`.
+
+Rollback to mock mode:
+
+```bash
+unset AGENTOFFICE_CODEX_CMD
+export AGENTOFFICE_AGENT_MODE=mock
+python -m agent_office run-demo DEMO-FINAL --mock --reset
+```
+
+## Docs
+
+- `docs/architecture.md`: system shape and role boundaries.
+- `docs/task-protocol.md`: `.ai/tasks/<TASK_ID>/` file protocol.
+- `docs/agent-roles.md`: Gemini, Codex, Grok Build, and Claude Code responsibilities.
+- `docs/plans/gemini-adapter-implementation-plan.md`: Gemini adapter plan and Phase 2 notes.
+- `docs/real-agent-integration-plan.md`: real adapter rollout plan and Phase status.
+- `deploy/deploy.md`: VPS deployment notes for a human operator.
+- `deploy/systemd.service.example`: example unit file only.
+
 ## MVP Boundaries
 
-- Real provider calls are intentionally not implemented.
+- Real provider calls are intentionally limited to Gemini `context` and Codex `implement` adapters when explicitly enabled.
 - No real keys are read or printed.
-- Provider adapters can be added later behind the same artifact protocol.
+- Grok Build and Claude Code real adapters can be added later behind the same artifact protocol.
 - The orchestrator owns task state, queue discipline, logs, and artifact management.
-
