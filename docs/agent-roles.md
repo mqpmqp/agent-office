@@ -91,7 +91,33 @@ Claude Code is the final decision role. To protect tokens and keep decisions sco
 
 Claude does not read the full repository, full logs, full patch, `.env`, or provider credentials. It writes `claude-decision.md` with `APPROVED`, `REQUEST_CHANGES`, or `REJECTED`.
 
-Claude remains mock-only in Phase 2. A future real Claude adapter must still read only `final-for-claude.md`.
+Phase 4 adds a real Claude adapter for the `final` stage only. It reads only `.ai/tasks/<TASK_ID>/final-for-claude.md`.
+
+Forbidden inputs:
+
+- repository scan
+- `.env`
+- `.ai/logs/`
+- `patch.diff`
+- `codex-report.md`
+- `grok-review.md`
+- `gemini-context.md`
+
+Required output:
+
+- `.ai/tasks/<TASK_ID>/claude-decision.md`
+
+Required fields:
+
+- `DECISION: APPROVE | REQUEST_CHANGES | REJECT`
+- `REASONS:`
+- `MUST_FIX:`
+- `NICE_TO_HAVE:`
+- `NEXT_ACTION_FOR_CODEX:`
+
+Claude token use is controlled by `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`. If `final-for-claude.md` is too long, Claude fails and the operator must re-run summarize with stronger compression. Claude never reads extra files to compensate.
+
+If Claude returns `REQUEST_CHANGES`, `NEXT_ACTION_FOR_CODEX` is the handoff content for the next Codex iteration. The existing maximum of 2 rework rounds remains in force.
 
 ## Orchestrator
 
@@ -109,6 +135,6 @@ Doctor currently reports:
 - `codex`: implement adapter configuration state
 - `gemini`: context adapter configuration state
 - `grok`: red-team adapter configuration state
-- `claude`: final judge adapter not implemented
+- `claude`: final judge adapter configuration state
 
-Future Claude adapter configuration should be added to doctor before it is enabled for real execution.
+Doctor reports Claude configuration without executing `AGENTOFFICE_CLAUDE_CMD`.

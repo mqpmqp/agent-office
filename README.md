@@ -63,6 +63,7 @@ agent-office redteam <TASK_ID> --mock
 agent-office redteam <TASK_ID> --real --adapter grok --timeout 120
 agent-office summarize <TASK_ID> --mock
 agent-office final <TASK_ID> --mock
+agent-office final <TASK_ID> --real --adapter claude --timeout 120
 agent-office status <TASK_ID>
 agent-office run-demo <TASK_ID> --mock
 agent-office adapters
@@ -142,10 +143,11 @@ python -m agent_office doctor
 python -m agent_office doctor --adapter codex
 python -m agent_office doctor --adapter gemini
 python -m agent_office doctor --adapter grok
+python -m agent_office doctor --adapter claude
 python -m agent_office doctor --json
 ```
 
-`doctor` does not read `.env`, does not execute real Codex, Gemini, or Grok commands, does not create tasks, and does not print environment variable values. It reports only `configured=true` or `configured=false`.
+`doctor` does not read `.env`, does not execute real Codex, Gemini, Grok, or Claude commands, does not create tasks, and does not print environment variable values. It reports only `configured=true` or `configured=false`.
 
 ## Gemini Context Adapter
 
@@ -283,6 +285,62 @@ export AGENTOFFICE_AGENT_MODE=mock
 python -m agent_office redteam <TASK_ID> --mock
 ```
 
+## Claude Final Judge Adapter
+
+Mock mode remains the default final decision path:
+
+```bash
+python -m agent_office final <TASK_ID> --mock
+```
+
+The real Claude adapter is available only for the `final` stage. Claude reads only:
+
+```text
+.ai/tasks/<TASK_ID>/final-for-claude.md
+```
+
+Claude does not read the repository, `.env`, logs, `patch.diff`, `codex-report.md`, `grok-review.md`, or `gemini-context.md`. Those upstream artifacts must already be compressed by the `summarize` stage into `final-for-claude.md`.
+
+The real Claude adapter must write:
+
+```text
+.ai/tasks/<TASK_ID>/claude-decision.md
+```
+
+The generated decision must include:
+
+```text
+DECISION: APPROVE | REQUEST_CHANGES | REJECT
+
+REASONS:
+MUST_FIX:
+NICE_TO_HAVE:
+NEXT_ACTION_FOR_CODEX:
+```
+
+To enable the real Claude adapter:
+
+```bash
+export AGENTOFFICE_AGENT_MODE=real
+export AGENTOFFICE_CLAUDE_CMD=claude
+export AGENTOFFICE_CLAUDE_TIMEOUT_SECONDS=120
+export AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS=12000
+export AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS=8000
+python -m agent_office final <TASK_ID> --real --adapter claude --timeout 120
+```
+
+`AGENTOFFICE_CLAUDE_CMD` must be a single executable name or path, without shell syntax or extra arguments. If `final-for-claude.md` exceeds `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`, the adapter fails and asks the operator to re-run summarize with stronger compression. It never reads additional files to compensate.
+
+Rollback to mock mode:
+
+```bash
+unset AGENTOFFICE_CLAUDE_CMD
+export AGENTOFFICE_AGENT_MODE=mock
+python -m agent_office final <TASK_ID> --mock
+```
+
+When Claude returns `DECISION: REQUEST_CHANGES`, the `NEXT_ACTION_FOR_CODEX` section should be used as the next Codex input. The existing max rework limit remains 2 rounds.
+
 ## Docs
 
 - `docs/architecture.md`: system shape and role boundaries.
@@ -296,7 +354,6 @@ python -m agent_office redteam <TASK_ID> --mock
 
 ## MVP Boundaries
 
-- Real provider calls are intentionally limited to Gemini `context`, Codex `implement`, and Grok `redteam` adapters when explicitly enabled.
+- Real provider calls are intentionally limited to Gemini `context`, Codex `implement`, Grok `redteam`, and Claude `final` adapters when explicitly enabled.
 - No real keys are read or printed.
-- Claude Code real adapter can be added later behind the same artifact protocol.
 - The orchestrator owns task state, queue discipline, logs, and artifact management.

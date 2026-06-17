@@ -5,7 +5,7 @@ AgentOffice is a local, file-based coordinator for a four-agent workflow. The MV
 ## Components
 
 - `agent_office/cli.py`: command-line orchestrator, task state machine, artifact writer, and adapter dispatcher.
-- `agent_office/adapters/`: mock adapter plus opt-in real Gemini context, Codex implement, and Grok red-team adapters.
+- `agent_office/adapters/`: mock adapter plus opt-in real Gemini context, Codex implement, Grok red-team, and Claude final judge adapters.
 - `agent_office/doctor.py`: safe adapter and project diagnostics that never execute real providers.
 - `.ai/tasks/<TASK_ID>/`: per-task workspace owned by the orchestrator.
 - `scripts/smoke-test.sh`: repeatable end-to-end mock workflow check.
@@ -25,11 +25,13 @@ AgentOffice is a local, file-based coordinator for a four-agent workflow. The MV
 
 Mock mode writes deterministic artifacts and never calls real provider APIs. It is used for local verification, VPS smoke tests, and protocol development.
 
-The Phase 1 real Codex adapter preserves the same command surface and file protocol for `implement` only. Phase 2 adds a real Gemini adapter for `context` only. Phase 3 adds a real Grok adapter for `redteam` only. Provider-specific authentication, browser state, or API calls belong behind adapter boundaries and must not be written into task artifacts.
+The Phase 1 real Codex adapter preserves the same command surface and file protocol for `implement` only. Phase 2 adds a real Gemini adapter for `context` only. Phase 3 adds a real Grok adapter for `redteam` only. Phase 4 adds a real Claude adapter for `final` only. Provider-specific authentication, browser state, or API calls belong behind adapter boundaries and must not be written into task artifacts.
 
 Gemini is read-only against source code. It receives `brief.md`, a safe project file-tree summary, and allowed docs such as `README.md`, `docs/`, and `AGENTS.md` when present. It must not read `.env`, key files, token files, secret files, runtime task outputs, or unrelated project directories.
 
 Grok is read-only against source code and repository state. It reviews only task artifacts: `brief.md`, `codex-report.md`, and `patch.diff`. It must not scan the full repository, modify code, or generate patches.
+
+Claude is read-only against all upstream context except `final-for-claude.md`. It must not read the repository, logs, full diffs, or other task artifacts. Token use is controlled by enforcing `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`.
 
 ## Token Control
 
@@ -37,6 +39,6 @@ Claude Code is intentionally constrained to `final-for-claude.md`, capped by the
 
 ## Adapter Diagnostics
 
-`python -m agent_office adapters` lists supported adapters. `python -m agent_office doctor` checks project structure, `.gitignore` safety rules, scripts, registry contents, and whether Codex/Gemini/Grok environment variables are present.
+`python -m agent_office adapters` lists supported adapters. `python -m agent_office doctor` checks project structure, `.gitignore` safety rules, scripts, registry contents, and whether Codex/Gemini/Grok/Claude environment variables are present.
 
 Doctor does not read `.env`, execute adapter commands, create tasks, or print environment variable values.

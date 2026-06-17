@@ -81,6 +81,47 @@ The output must contain:
 
 If `grok-review.md` is missing, empty, or missing required sections, the task remains in its previous state and does not transition to `REVIEWED`.
 
+## Real Claude Final Judge Protocol
+
+When explicitly enabled, the Claude adapter affects only the `final` stage:
+
+```bash
+python -m agent_office final <TASK_ID> --real --adapter claude --timeout 120
+```
+
+Input:
+
+- `.ai/tasks/<TASK_ID>/final-for-claude.md`
+
+Forbidden inputs:
+
+- repository scan
+- `.env`
+- `.ai/logs/`
+- `patch.diff`
+- `codex-report.md`
+- `grok-review.md`
+- `gemini-context.md`
+
+Output:
+
+- `.ai/tasks/<TASK_ID>/claude-decision.md`
+
+The output must contain:
+
+```text
+DECISION: APPROVE | REQUEST_CHANGES | REJECT
+
+REASONS:
+MUST_FIX:
+NICE_TO_HAVE:
+NEXT_ACTION_FOR_CODEX:
+```
+
+If `claude-decision.md` is missing, empty, too large, or lacks a valid `DECISION:` field, the task remains `SUMMARIZED` and does not transition to `APPROVED`, `REQUEST_CHANGES`, or `REJECTED`.
+
+Claude input length is capped by `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`. When the input is too long, the adapter fails and asks for stronger summarize-stage compression.
+
 ## State Machine
 
 ```text
@@ -117,4 +158,4 @@ python -m agent_office doctor --json
 ```
 
 The diagnostic layer checks configuration and project structure only. It does not execute real Codex/Gemini commands and does not read `.env`.
-It also reports Grok configuration state without executing `AGENTOFFICE_GROK_CMD`.
+It also reports Grok and Claude configuration state without executing `AGENTOFFICE_GROK_CMD` or `AGENTOFFICE_CLAUDE_CMD`.

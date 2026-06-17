@@ -39,7 +39,7 @@ python3 -m agent_office doctor --json
 - Required `.gitignore` runtime artifact rules.
 - Whether `scripts/verify.sh` and `scripts/smoke-test.sh` exist.
 - Whether the adapter registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`.
-- Whether Codex, Gemini, and Grok adapter environment variables are configured.
+- Whether Codex, Gemini, Grok, and Claude adapter environment variables are configured.
 
 ## Configuration State
 
@@ -62,6 +62,13 @@ Grok variables checked:
 - `AGENTOFFICE_GROK_CMD`
 - `AGENTOFFICE_GROK_TIMEOUT_SECONDS`
 
+Claude variables checked:
+
+- `AGENTOFFICE_CLAUDE_CMD`
+- `AGENTOFFICE_CLAUDE_TIMEOUT_SECONDS`
+- `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`
+- `AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS`
+
 ## Why Values Are Not Printed
 
 Provider command environments may sit next to credentials in operator shells. Doctor deliberately avoids reading `.env` and avoids printing variable values so secrets cannot leak into terminal history, chat logs, CI logs, or `.ai/` artifacts.
@@ -74,19 +81,20 @@ Doctor does not:
 - execute `AGENTOFFICE_CODEX_CMD`
 - execute `AGENTOFFICE_GEMINI_CMD`
 - execute `AGENTOFFICE_GROK_CMD`
+- execute `AGENTOFFICE_CLAUDE_CMD`
 - create tasks
 - write `.ai/tasks/`
 - scan unrelated projects
 - access `/opt/binance-futures-local-bot`
 - modify system directories
 
-## Next Phase: Claude Final Judge
+## Next Phase: Full Dry Run
 
-Before adding a Claude final judge adapter, doctor should show:
+After adding Claude final judge, doctor should show:
 
 - registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`
 - mock workflow still passes `scripts/verify.sh`
-- Codex, Gemini, and Grok configuration state is clear
+- Codex, Gemini, Grok, and Claude configuration state is clear
 - runtime artifact ignore rules are present
 
-Claude should remain a final judge only and must read only `final-for-claude.md`.
+The next phase should run controlled end-to-end dry runs with explicit real adapter commands while keeping mock mode as the default fallback.

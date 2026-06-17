@@ -337,7 +337,7 @@ def cmd_final(args: argparse.Namespace) -> int:
     decision = result.decision
     if decision not in {"APPROVED", "REQUEST_CHANGES", "REJECTED"}:
         raise AgentOfficeError("Final adapter returned an invalid decision.")
-    append_history(task, "SUMMARIZED->CLAUDE_DECIDED", "Claude mock read final-for-claude.md only.")
+    append_history(task, "SUMMARIZED->CLAUDE_DECIDED", "Claude final adapter read final-for-claude.md only.")
     transition(paths, task, decision, result.detail)
     print(f"state={decision}")
     return 0
@@ -435,8 +435,8 @@ def build_parser() -> argparse.ArgumentParser:
         step.add_argument("--real", action="store_true", help="Use the configured real adapter where supported.")
         step.add_argument(
             "--adapter",
-            choices=["mock", "codex", "gemini", "grok"],
-            help="Adapter name. Real mode supports gemini for context, codex for implement, and grok for redteam.",
+            choices=["mock", "codex", "gemini", "grok", "claude"],
+            help="Adapter name. Real mode supports gemini for context, codex for implement, grok for redteam, and claude for final.",
         )
         step.add_argument("--timeout", type=int, help="Adapter timeout in seconds.")
         if name == "run-demo":

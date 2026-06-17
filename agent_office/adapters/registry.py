@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .base import AdapterUnavailable, AgentAdapter
+from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .gemini import GeminiAdapter
 from .grok import GrokAdapter
@@ -13,7 +14,7 @@ def adapter_catalog() -> dict[str, dict[str, object]]:
         "codex": {"roles": ["implement"], "real": True},
         "gemini": {"roles": ["context"], "real": True},
         "grok": {"roles": ["redteam"], "real": True},
-        "claude": {"roles": ["final"], "real": True, "implemented": False},
+        "claude": {"roles": ["final"], "real": True},
     }
 
 
@@ -33,7 +34,9 @@ def get_adapter(role: str, mode: str, adapter_name: str | None) -> AgentAdapter:
             return GrokAdapter()
         raise AdapterUnavailable("Real redteam requires --adapter grok. Use --mock for the safe redteam path.")
     if role == "final":
-        raise AdapterUnavailable("Claude final judge real adapter is not implemented yet. Use --mock.")
+        if adapter_name == "claude":
+            return ClaudeAdapter()
+        raise AdapterUnavailable("Real final requires --adapter claude. Use --mock for the safe final path.")
     if adapter_name == "mock":
         return MockAdapter()
     raise AdapterUnavailable(f"No real adapter is available for role `{role}`. Use --mock.")

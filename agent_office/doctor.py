@@ -35,6 +35,12 @@ GROK_ENV = [
     "AGENTOFFICE_GROK_CMD",
     "AGENTOFFICE_GROK_TIMEOUT_SECONDS",
 ]
+CLAUDE_ENV = [
+    "AGENTOFFICE_CLAUDE_CMD",
+    "AGENTOFFICE_CLAUDE_TIMEOUT_SECONDS",
+    "AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS",
+    "AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS",
+]
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,8 @@ def adapter_configured(name: str) -> bool:
         return env_configured("AGENTOFFICE_GEMINI_CMD")
     if name == "grok":
         return env_configured("AGENTOFFICE_GROK_CMD")
+    if name == "claude":
+        return env_configured("AGENTOFFICE_CLAUDE_CMD")
     return False
 
 
@@ -112,6 +120,8 @@ def adapter_env(name: str) -> list[EnvCheck]:
         names = GEMINI_ENV
     elif name == "grok":
         names = GROK_ENV
+    elif name == "claude":
+        names = CLAUDE_ENV
     else:
         names = []
     return [EnvCheck(env_name, env_configured(env_name)) for env_name in names]
