@@ -74,3 +74,15 @@ python -m agent_office run-demo DEMO-FINAL --mock --reset
 `--reset` deletes only the matching task directory under `.ai/tasks/` after validating the task ID. It does not delete other protocol files or any source code.
 
 Generated task directories are runtime artifacts and are ignored by git.
+
+## Doctor Protocol
+
+Doctor commands do not create or modify task directories:
+
+```bash
+python -m agent_office adapters
+python -m agent_office doctor
+python -m agent_office doctor --json
+```
+
+The diagnostic layer checks configuration and project structure only. It does not execute real Codex/Gemini commands and does not read `.env`.

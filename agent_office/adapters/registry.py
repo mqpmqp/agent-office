@@ -6,6 +6,14 @@ from .gemini import GeminiAdapter
 from .mock import MockAdapter
 
 
+def adapter_catalog() -> dict[str, dict[str, object]]:
+    return {
+        "mock": {"roles": ["context", "implement", "redteam", "final"], "real": False},
+        "codex": {"roles": ["implement"], "real": True},
+        "gemini": {"roles": ["context"], "real": True},
+    }
+
+
 def get_adapter(role: str, mode: str, adapter_name: str | None) -> AgentAdapter:
     if mode == "mock":
         return MockAdapter()

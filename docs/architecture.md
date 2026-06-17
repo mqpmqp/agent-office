@@ -6,6 +6,7 @@ AgentOffice is a local, file-based coordinator for a four-agent workflow. The MV
 
 - `agent_office/cli.py`: command-line orchestrator, task state machine, artifact writer, and adapter dispatcher.
 - `agent_office/adapters/`: mock adapter plus opt-in real Gemini context and Codex implement adapters.
+- `agent_office/doctor.py`: safe adapter and project diagnostics that never execute real providers.
 - `.ai/tasks/<TASK_ID>/`: per-task workspace owned by the orchestrator.
 - `scripts/smoke-test.sh`: repeatable end-to-end mock workflow check.
 - `scripts/verify.sh`: repeatable baseline verification for packaging and VPS upload.
@@ -31,3 +32,9 @@ Gemini is read-only against source code. It receives `brief.md`, a safe project 
 ## Token Control
 
 Claude Code is intentionally constrained to `final-for-claude.md`, capped by the orchestrator. This keeps final review cheap and predictable, and prevents Claude from re-reading full repository context, full logs, or full diffs.
+
+## Adapter Diagnostics
+
+`python -m agent_office adapters` lists supported adapters. `python -m agent_office doctor` checks project structure, `.gitignore` safety rules, scripts, registry contents, and whether Codex/Gemini environment variables are present.
+
+Doctor does not read `.env`, execute adapter commands, create tasks, or print environment variable values.

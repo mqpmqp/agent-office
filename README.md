@@ -64,6 +64,11 @@ agent-office summarize <TASK_ID> --mock
 agent-office final <TASK_ID> --mock
 agent-office status <TASK_ID>
 agent-office run-demo <TASK_ID> --mock
+agent-office adapters
+agent-office doctor
+agent-office doctor --adapter codex
+agent-office doctor --adapter gemini
+agent-office doctor --json
 ```
 
 ## State Machine
@@ -120,6 +125,25 @@ bash scripts/smoke-test.sh demo-task
 ```
 
 Both scripts are repeatable. `smoke-test.sh` runs the requested task with `--reset`; `verify.sh` uses a fixed local verification task and resets it before each run.
+
+## Adapter Diagnostics
+
+List supported adapters without executing real providers:
+
+```bash
+python -m agent_office adapters
+```
+
+Check project and adapter configuration:
+
+```bash
+python -m agent_office doctor
+python -m agent_office doctor --adapter codex
+python -m agent_office doctor --adapter gemini
+python -m agent_office doctor --json
+```
+
+`doctor` does not read `.env`, does not execute real Codex or Gemini commands, does not create tasks, and does not print environment variable values. It reports only `configured=true` or `configured=false`.
 
 ## Gemini Context Adapter
 
@@ -209,6 +233,7 @@ python -m agent_office run-demo DEMO-FINAL --mock --reset
 - `docs/architecture.md`: system shape and role boundaries.
 - `docs/task-protocol.md`: `.ai/tasks/<TASK_ID>/` file protocol.
 - `docs/agent-roles.md`: Gemini, Codex, Grok Build, and Claude Code responsibilities.
+- `docs/adapter-doctor.md`: safe adapter diagnostics.
 - `docs/plans/gemini-adapter-implementation-plan.md`: Gemini adapter plan and Phase 2 notes.
 - `docs/real-agent-integration-plan.md`: real adapter rollout plan and Phase status.
 - `deploy/deploy.md`: VPS deployment notes for a human operator.

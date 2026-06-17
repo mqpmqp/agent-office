@@ -75,3 +75,15 @@ Claude remains mock-only in Phase 2. A future real Claude adapter must still rea
 The CLI owns task creation, state transitions, artifact paths, reset behavior, and mock-mode verification. Future provider adapters should plug into the orchestrator without changing the task protocol.
 
 The orchestrator masks token/key/secret-like values in adapter logs and keeps runtime artifacts under ignored `.ai/` subdirectories.
+
+## Adapter Doctor
+
+The doctor role is diagnostic only. It checks whether adapters are known to the registry and whether their environment variables are present, but it never executes the adapter commands.
+
+Doctor currently reports:
+
+- `mock`: built-in and always configured
+- `codex`: implement adapter configuration state
+- `gemini`: context adapter configuration state
+
+Future Grok and Claude adapters should be added to doctor before they are enabled for real execution.

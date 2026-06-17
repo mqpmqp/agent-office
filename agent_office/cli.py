@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from .adapters.base import AdapterError, AdapterInvocation
 from .adapters.registry import get_adapter
+from .doctor import collect_doctor, doctor_json, format_adapters, format_doctor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -367,6 +368,20 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_adapters(args: argparse.Namespace) -> int:
+    print(format_adapters(PROJECT_ROOT))
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    report = collect_doctor(PROJECT_ROOT, adapter_filter=args.adapter)
+    if args.json:
+        print(doctor_json(report))
+    else:
+        print(format_doctor(report))
+    return 0
+
+
 def cmd_run_demo(args: argparse.Namespace) -> int:
     demo_mode = resolve_mode(args, "run-demo")
     validate_task_id(args.task_id)
@@ -433,6 +448,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("status", help="Print task state and artifact presence.")
     p.add_argument("task_id")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("adapters", help="List supported adapters without executing them.")
+    p.set_defaults(func=cmd_adapters)
+
+    p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
+    p.add_argument("--adapter", choices=["mock", "codex", "gemini"], help="Limit adapter diagnostics to one adapter.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_doctor)
     return parser
 
 
