@@ -21,6 +21,8 @@ Check one adapter:
 ```bash
 python3 -m agent_office doctor --adapter codex
 python3 -m agent_office doctor --adapter gemini
+python3 -m agent_office doctor --adapter grok
+python3 -m agent_office doctor --adapter claude
 ```
 
 Produce machine-readable output:
@@ -36,8 +38,8 @@ python3 -m agent_office doctor --json
 - Whether `agent_office` can be imported.
 - Required `.gitignore` runtime artifact rules.
 - Whether `scripts/verify.sh` and `scripts/smoke-test.sh` exist.
-- Whether the adapter registry contains `mock`, `codex`, and `gemini`.
-- Whether Codex and Gemini adapter environment variables are configured.
+- Whether the adapter registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`.
+- Whether Codex, Gemini, and Grok adapter environment variables are configured.
 
 ## Configuration State
 
@@ -55,6 +57,11 @@ Gemini variables checked:
 - `AGENTOFFICE_GEMINI_MAX_FILES`
 - `AGENTOFFICE_GEMINI_MAX_OUTPUT_CHARS`
 
+Grok variables checked:
+
+- `AGENTOFFICE_GROK_CMD`
+- `AGENTOFFICE_GROK_TIMEOUT_SECONDS`
+
 ## Why Values Are Not Printed
 
 Provider command environments may sit next to credentials in operator shells. Doctor deliberately avoids reading `.env` and avoids printing variable values so secrets cannot leak into terminal history, chat logs, CI logs, or `.ai/` artifacts.
@@ -66,19 +73,20 @@ Doctor does not:
 - read `.env`
 - execute `AGENTOFFICE_CODEX_CMD`
 - execute `AGENTOFFICE_GEMINI_CMD`
+- execute `AGENTOFFICE_GROK_CMD`
 - create tasks
 - write `.ai/tasks/`
 - scan unrelated projects
 - access `/opt/binance-futures-local-bot`
 - modify system directories
 
-## Next Phase: Grok Adapter
+## Next Phase: Claude Final Judge
 
-Before adding a Grok adapter, doctor should show:
+Before adding a Claude final judge adapter, doctor should show:
 
-- registry contains `mock`, `codex`, and `gemini`
+- registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`
 - mock workflow still passes `scripts/verify.sh`
-- Codex and Gemini configuration state is clear
+- Codex, Gemini, and Grok configuration state is clear
 - runtime artifact ignore rules are present
 
-The Grok phase should add a read-only `redteam` adapter and then extend doctor to report Grok configuration without executing the Grok command.
+Claude should remain a final judge only and must read only `final-for-claude.md`.

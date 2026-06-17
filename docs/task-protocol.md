@@ -50,6 +50,37 @@ The output must contain:
 
 If `gemini-context.md` is missing, empty, too unsafe, or missing required sections, the task remains in its previous state and does not transition to `CONTEXT_READY`.
 
+## Real Grok Red-Team Protocol
+
+When explicitly enabled, the Grok adapter affects only the `redteam` stage:
+
+```bash
+python -m agent_office redteam <TASK_ID> --real --adapter grok --timeout 120
+```
+
+Inputs:
+
+- `.ai/tasks/<TASK_ID>/brief.md`
+- `.ai/tasks/<TASK_ID>/codex-report.md`
+- `.ai/tasks/<TASK_ID>/patch.diff`
+
+Output:
+
+- `.ai/tasks/<TASK_ID>/grok-review.md`
+
+The output must contain:
+
+```text
+# Blocking Issues
+# Non-blocking Issues
+# Missing Tests
+# Security Risks
+# Performance Risks
+# Verdict
+```
+
+If `grok-review.md` is missing, empty, or missing required sections, the task remains in its previous state and does not transition to `REVIEWED`.
+
 ## State Machine
 
 ```text
@@ -86,3 +117,4 @@ python -m agent_office doctor --json
 ```
 
 The diagnostic layer checks configuration and project structure only. It does not execute real Codex/Gemini commands and does not read `.env`.
+It also reports Grok configuration state without executing `AGENTOFFICE_GROK_CMD`.

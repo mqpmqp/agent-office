@@ -31,6 +31,10 @@ GEMINI_ENV = [
     "AGENTOFFICE_GEMINI_MAX_FILES",
     "AGENTOFFICE_GEMINI_MAX_OUTPUT_CHARS",
 ]
+GROK_ENV = [
+    "AGENTOFFICE_GROK_CMD",
+    "AGENTOFFICE_GROK_TIMEOUT_SECONDS",
+]
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ def collect_doctor(project_root: Path, adapter_filter: str | None = None) -> dic
         name: {
             "roles": data["roles"],
             "real": data["real"],
+            "implemented": data.get("implemented", True),
             "configured": adapter_configured(name),
             "env": [env.__dict__ for env in adapter_env(name)],
         }
@@ -77,7 +82,7 @@ def collect_doctor(project_root: Path, adapter_filter: str | None = None) -> dic
             "smoke_test_sh": (project_root / "scripts" / "smoke-test.sh").exists(),
         },
         "registry": {
-            "contains": {name: name in catalog for name in ["mock", "codex", "gemini"]},
+            "contains": {name: name in catalog for name in ["mock", "codex", "gemini", "grok", "claude"]},
             "adapters": adapters,
         },
         "safe": {
@@ -95,6 +100,8 @@ def adapter_configured(name: str) -> bool:
         return env_configured("AGENTOFFICE_CODEX_CMD")
     if name == "gemini":
         return env_configured("AGENTOFFICE_GEMINI_CMD")
+    if name == "grok":
+        return env_configured("AGENTOFFICE_GROK_CMD")
     return False
 
 
@@ -103,6 +110,8 @@ def adapter_env(name: str) -> list[EnvCheck]:
         names = CODEX_ENV
     elif name == "gemini":
         names = GEMINI_ENV
+    elif name == "grok":
+        names = GROK_ENV
     else:
         names = []
     return [EnvCheck(env_name, env_configured(env_name)) for env_name in names]
@@ -133,8 +142,11 @@ def format_adapters(project_root: Path) -> str:
     for name, data in catalog.items():
         configured = adapter_configured(name)
         roles = ", ".join(data["roles"])
-        mode = "real" if data["real"] else "mock"
-        lines.append(f"- {name}: mode={mode}; roles={roles}; configured={str(configured).lower()}")
+        if data.get("implemented", True) is False:
+            status = "not implemented"
+        else:
+            status = "real" if data["real"] else "mock"
+        lines.append(f"- {name}: mode={status}; roles={roles}; configured={str(configured).lower()}")
     return "\n".join(lines)
 
 
@@ -158,7 +170,7 @@ def format_doctor(report: dict[str, Any]) -> str:
     for name, data in report["registry"]["adapters"].items():
         roles = ", ".join(data["roles"])
         lines.append(
-            f"  - {name}: real={bool_text(data['real'])}; roles={roles}; configured={bool_text(data['configured'])}"
+            f"  - {name}: real={bool_text(data['real'])}; implemented={bool_text(data.get('implemented', True))}; roles={roles}; configured={bool_text(data['configured'])}"
         )
         for env in data["env"]:
             lines.append(f"    - {env['name']}: configured={bool_text(env['configured'])}")

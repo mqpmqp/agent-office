@@ -60,6 +60,7 @@ agent-office context <TASK_ID> --real --adapter gemini --timeout 120
 agent-office implement <TASK_ID> --mock
 agent-office implement <TASK_ID> --real --adapter codex --timeout 1200
 agent-office redteam <TASK_ID> --mock
+agent-office redteam <TASK_ID> --real --adapter grok --timeout 120
 agent-office summarize <TASK_ID> --mock
 agent-office final <TASK_ID> --mock
 agent-office status <TASK_ID>
@@ -140,10 +141,11 @@ Check project and adapter configuration:
 python -m agent_office doctor
 python -m agent_office doctor --adapter codex
 python -m agent_office doctor --adapter gemini
+python -m agent_office doctor --adapter grok
 python -m agent_office doctor --json
 ```
 
-`doctor` does not read `.env`, does not execute real Codex or Gemini commands, does not create tasks, and does not print environment variable values. It reports only `configured=true` or `configured=false`.
+`doctor` does not read `.env`, does not execute real Codex, Gemini, or Grok commands, does not create tasks, and does not print environment variable values. It reports only `configured=true` or `configured=false`.
 
 ## Gemini Context Adapter
 
@@ -228,6 +230,59 @@ export AGENTOFFICE_AGENT_MODE=mock
 python -m agent_office run-demo DEMO-FINAL --mock --reset
 ```
 
+## Grok Red-Team Adapter
+
+Mock mode remains the default review path:
+
+```bash
+python -m agent_office redteam <TASK_ID> --mock
+```
+
+The real Grok adapter is available only for the `redteam` stage. Grok does not modify code, does not generate patches, and does not scan the full repository. It reads only:
+
+```text
+.ai/tasks/<TASK_ID>/brief.md
+.ai/tasks/<TASK_ID>/codex-report.md
+.ai/tasks/<TASK_ID>/patch.diff
+```
+
+It must write:
+
+```text
+.ai/tasks/<TASK_ID>/grok-review.md
+```
+
+The generated review must include:
+
+```text
+# Blocking Issues
+# Non-blocking Issues
+# Missing Tests
+# Security Risks
+# Performance Risks
+# Verdict
+```
+
+To enable the real Grok adapter:
+
+```bash
+export AGENTOFFICE_AGENT_MODE=real
+export AGENTOFFICE_GROK_CMD=grok
+export AGENTOFFICE_GROK_TIMEOUT_SECONDS=120
+export AGENTOFFICE_GROK_MAX_OUTPUT_CHARS=12000
+python -m agent_office redteam <TASK_ID> --real --adapter grok --timeout 120
+```
+
+`AGENTOFFICE_GROK_CMD` must be a single executable name or path, without shell syntax or extra arguments. If it is empty, real Grok execution is refused and the operator should use `--mock`.
+
+Rollback to mock mode:
+
+```bash
+unset AGENTOFFICE_GROK_CMD
+export AGENTOFFICE_AGENT_MODE=mock
+python -m agent_office redteam <TASK_ID> --mock
+```
+
 ## Docs
 
 - `docs/architecture.md`: system shape and role boundaries.
@@ -241,7 +296,7 @@ python -m agent_office run-demo DEMO-FINAL --mock --reset
 
 ## MVP Boundaries
 
-- Real provider calls are intentionally limited to Gemini `context` and Codex `implement` adapters when explicitly enabled.
+- Real provider calls are intentionally limited to Gemini `context`, Codex `implement`, and Grok `redteam` adapters when explicitly enabled.
 - No real keys are read or printed.
-- Grok Build and Claude Code real adapters can be added later behind the same artifact protocol.
+- Claude Code real adapter can be added later behind the same artifact protocol.
 - The orchestrator owns task state, queue discipline, logs, and artifact management.

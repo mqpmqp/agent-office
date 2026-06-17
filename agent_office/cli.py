@@ -256,7 +256,6 @@ def cmd_implement(args: argparse.Namespace) -> int:
 
 
 def cmd_redteam(args: argparse.Namespace) -> int:
-    require_mock_mode(args, "redteam")
     paths = task_paths(args.task_id)
     task = load_task(paths)
     require_state(task, {"IMPLEMENTED"})
@@ -331,7 +330,6 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
 
 def cmd_final(args: argparse.Namespace) -> int:
-    require_mock_mode(args, "final")
     paths = task_paths(args.task_id)
     task = load_task(paths)
     require_state(task, {"SUMMARIZED"})
@@ -437,8 +435,8 @@ def build_parser() -> argparse.ArgumentParser:
         step.add_argument("--real", action="store_true", help="Use the configured real adapter where supported.")
         step.add_argument(
             "--adapter",
-            choices=["mock", "codex", "gemini"],
-            help="Adapter name. Real mode supports gemini for context and codex for implement.",
+            choices=["mock", "codex", "gemini", "grok"],
+            help="Adapter name. Real mode supports gemini for context, codex for implement, and grok for redteam.",
         )
         step.add_argument("--timeout", type=int, help="Adapter timeout in seconds.")
         if name == "run-demo":
@@ -453,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_adapters)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
-    p.add_argument("--adapter", choices=["mock", "codex", "gemini"], help="Limit adapter diagnostics to one adapter.")
+    p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_doctor)
     return parser

@@ -58,6 +58,29 @@ The command is configured with `AGENTOFFICE_CODEX_CMD` and is executed without s
 
 Grok Build acts as the red-team reviewer. It reads the relevant implementation artifacts, identifies issues, and writes `grok-review.md`. It should not approve work by default when safety, reproducibility, or protocol rules are unclear.
 
+Phase 3 adds a real Grok adapter for the `redteam` stage only. Grok does not modify code, does not generate patches, and does not scan the full repository.
+
+Inputs:
+
+- `.ai/tasks/<TASK_ID>/brief.md`
+- `.ai/tasks/<TASK_ID>/codex-report.md`
+- `.ai/tasks/<TASK_ID>/patch.diff`
+
+Output:
+
+- `.ai/tasks/<TASK_ID>/grok-review.md`
+
+Required output sections:
+
+- `# Blocking Issues`
+- `# Non-blocking Issues`
+- `# Missing Tests`
+- `# Security Risks`
+- `# Performance Risks`
+- `# Verdict`
+
+The command is configured with `AGENTOFFICE_GROK_CMD` and executed without shell expansion. If no command is configured, AgentOffice refuses the real call and tells the operator to use `--mock`.
+
 ## Claude Code
 
 Claude Code is the final decision role. To protect tokens and keep decisions scoped, Claude reads only:
@@ -85,5 +108,7 @@ Doctor currently reports:
 - `mock`: built-in and always configured
 - `codex`: implement adapter configuration state
 - `gemini`: context adapter configuration state
+- `grok`: red-team adapter configuration state
+- `claude`: final judge adapter not implemented
 
-Future Grok and Claude adapters should be added to doctor before they are enabled for real execution.
+Future Claude adapter configuration should be added to doctor before it is enabled for real execution.
