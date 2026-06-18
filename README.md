@@ -182,7 +182,7 @@ python -m agent_office context <TASK_ID> --real --adapter gemini
 
 The task continues with mock output and records `fallback_used=true` in the transition detail. If `fallback_to_mock=false`, the workflow fails safely.
 
-Non-dry-run command-based execution is rejected for Codex, Grok, and Claude unless both flags are explicit:
+Non-dry-run provider execution is rejected unless it is explicitly allowed for that adapter. Command-based adapters also require explicit command permission:
 
 ```bash
 export AGENTOFFICE_CODEX_DRY_RUN=false
@@ -190,7 +190,7 @@ export AGENTOFFICE_CODEX_ALLOW_NON_DRY_RUN=true
 export AGENTOFFICE_CODEX_CAN_EXECUTE_COMMANDS=true
 ```
 
-Use the equivalent `AGENTOFFICE_CODEX_*`, `AGENTOFFICE_GROK_*`, and `AGENTOFFICE_CLAUDE_*` variables for the other adapters. This staged gate does not read `.env` and does not print environment values.
+Use the equivalent `AGENTOFFICE_CODEX_*`, `AGENTOFFICE_GROK_*`, and `AGENTOFFICE_CLAUDE_*` variables for the other adapters where applicable. This staged gate does not read `.env` and does not print environment values.
 
 ## Gemini Context Adapter
 
@@ -305,50 +305,70 @@ Mock mode remains the default review path:
 python -m agent_office redteam <TASK_ID> --mock
 ```
 
-The real Grok adapter is available only for the `redteam` stage. Grok does not modify code, does not generate patches, and does not scan the full repository. It reads only:
+The real Grok adapter is available only for the `redteam` stage. In P5-04 it is review-only dry-run. Grok does not modify code, does not generate patches, does not apply patches, does not execute commands, and does not call the xAI/Grok network API while `dry_run=true`.
+
+Grok primarily reviews:
 
 ```text
-.ai/tasks/<TASK_ID>/brief.md
-.ai/tasks/<TASK_ID>/codex-report.md
-.ai/tasks/<TASK_ID>/patch.diff
+.ai/context/gemini-context.md
+.ai/codex/patch.diff
+.ai/codex/codex-report.md
+.ai/codex/metadata.json
 ```
 
-It must write:
+It writes only:
 
 ```text
-.ai/tasks/<TASK_ID>/grok-review.md
+.ai/grok/redteam-report.md
+.ai/grok/metadata.json
 ```
 
 The generated review must include:
 
 ```text
-# Blocking Issues
-# Non-blocking Issues
-# Missing Tests
-# Security Risks
-# Performance Risks
-# Verdict
+# Grok Redteam Report
+## Review Summary
+## Inputs Reviewed
+## Patch Risk Assessment
+## Safety Issues
+## Logic Issues
+## Missing Tests
+## Security Concerns
+## Possible Regression Risks
+## Recommendation
 ```
 
-To enable the real Grok adapter:
+The recommendation is exactly one of:
+
+```text
+PASS_TO_CLAUDE
+REQUEST_CODEX_REVISION
+BLOCK
+```
+
+To enable Grok real redteam dry-run:
 
 ```bash
 export AGENTOFFICE_AGENT_MODE=real
 export AGENTOFFICE_GROK_MODE=real
 export AGENTOFFICE_GROK_DRY_RUN=true
 export AGENTOFFICE_GROK_FALLBACK_TO_MOCK=true
-export AGENTOFFICE_GROK_CMD=grok
+export XAI_API_KEY=replace-with-real-key-outside-git
 export AGENTOFFICE_GROK_TIMEOUT_SECONDS=120
+export AGENTOFFICE_GROK_MAX_INPUT_CHARS=24000
 export AGENTOFFICE_GROK_MAX_OUTPUT_CHARS=12000
 python -m agent_office redteam <TASK_ID> --real --adapter grok --timeout 120
 ```
 
-`AGENTOFFICE_GROK_CMD` must be a single executable name or path, without shell syntax or extra arguments. If it is empty, real Grok execution is refused and the operator should use `--mock`.
+Dry-run validates `XAI_API_KEY` presence but sends no network request. If `XAI_API_KEY` is missing and `AGENTOFFICE_GROK_FALLBACK_TO_MOCK=true`, the workflow continues with deterministic mock review and records `fallback_used=true`.
+
+If no patch is available, Grok fails safely or falls back to mock depending on configuration. It must not invent a patch. Do not apply patches automatically and do not enable all real adapters at once.
 
 Rollback to mock mode:
 
 ```bash
-unset AGENTOFFICE_GROK_CMD
+unset XAI_API_KEY
+export AGENTOFFICE_GROK_MODE=mock
 export AGENTOFFICE_AGENT_MODE=mock
 python -m agent_office redteam <TASK_ID> --mock
 ```

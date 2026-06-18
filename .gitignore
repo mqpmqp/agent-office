@@ -16,3 +16,4 @@ __pycache__/
 .ai/tmp/
 .ai/context/
 .ai/codex/
+.ai/grok/

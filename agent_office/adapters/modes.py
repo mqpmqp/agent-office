@@ -103,11 +103,23 @@ ADAPTER_MODE_SPECS: dict[str, dict[str, object]] = {
         "timeout_seconds": 120,
         "max_input_chars": 24000,
         "max_output_chars": 12000,
-        "required_env": ("AGENTOFFICE_GROK_CMD",),
+        "required_env": ("XAI_API_KEY",),
         "can_read_files": True,
         "can_write_files": True,
-        "allowed_input_files": ("brief.md", "codex-report.md", "patch.diff"),
-        "allowed_output_files": ("grok-review.md",),
+        "allowed_input_files": (
+            ".ai/context/gemini-context.md",
+            ".ai/codex/patch.diff",
+            ".ai/codex/codex-report.md",
+            ".ai/codex/metadata.json",
+            "README.md",
+            "AGENTS.md",
+            "docs/**",
+            ".env.example",
+        ),
+        "allowed_output_files": (
+            ".ai/grok/redteam-report.md",
+            ".ai/grok/metadata.json",
+        ),
     },
     "claude": {
         "role": "final",
@@ -212,7 +224,7 @@ def validate_adapter_mode(
                 f"{config.name} real mode without dry_run requires "
                 f"AGENTOFFICE_{config.name.upper()}_ALLOW_NON_DRY_RUN=true."
             )
-        if config.name not in {"gemini", "codex"} and not config.dry_run and not config.can_execute_commands:
+        if config.name not in {"gemini", "codex", "grok"} and not config.dry_run and not config.can_execute_commands:
             errors.append(
                 f"{config.name} command execution requires "
                 f"AGENTOFFICE_{config.name.upper()}_CAN_EXECUTE_COMMANDS=true."

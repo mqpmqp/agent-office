@@ -80,8 +80,10 @@ Gemini variables checked:
 
 Grok variables checked:
 
-- `AGENTOFFICE_GROK_CMD`
+- `XAI_API_KEY`
 - `AGENTOFFICE_GROK_TIMEOUT_SECONDS`
+- `AGENTOFFICE_GROK_MAX_INPUT_CHARS`
+- `AGENTOFFICE_GROK_MAX_OUTPUT_CHARS`
 
 Claude variables checked:
 
@@ -92,7 +94,7 @@ Claude variables checked:
 
 ## Why Values Are Not Printed
 
-Provider command environments may sit next to credentials in operator shells. Gemini uses `GEMINI_API_KEY` and Codex uses `OPENAI_API_KEY` for future real network access. Doctor deliberately avoids reading `.env` and avoids printing variable values so secrets cannot leak into terminal history, chat logs, CI logs, or `.ai/` artifacts.
+Provider command environments may sit next to credentials in operator shells. Gemini uses `GEMINI_API_KEY`, Codex uses `OPENAI_API_KEY`, and Grok uses `XAI_API_KEY` for future real network access. Doctor deliberately avoids reading `.env` and avoids printing variable values so secrets cannot leak into terminal history, chat logs, CI logs, or `.ai/` artifacts.
 
 ## Safety Guarantees
 
@@ -103,7 +105,8 @@ Doctor does not:
 - send Codex network requests
 - execute Gemini commands
 - send Gemini network requests
-- execute `AGENTOFFICE_GROK_CMD`
+- execute Grok commands
+- send Grok network requests
 - execute `AGENTOFFICE_CLAUDE_CMD`
 - create tasks
 - write `.ai/tasks/`
@@ -149,9 +152,28 @@ doctor should show Codex `env_ok=true` and `status=ok`. The implement command ca
 
 No real OpenAI/Codex API request is sent while `dry_run=true`. The patch is a proposal only; AgentOffice does not apply it, run commands, or commit it. Patch validation rejects env edits, secret additions, private-key paths, guard-test deletion, weakened safety defaults, all-real adapter activation, and unsafe live trading action markers.
 
+## Grok Real Redteam Review-Only Dry-Run
+
+P5-04 adds a staged Grok redteam dry-run. When:
+
+```bash
+export AGENTOFFICE_GROK_MODE=real
+export AGENTOFFICE_GROK_DRY_RUN=true
+export XAI_API_KEY=replace-with-real-key-outside-git
+```
+
+doctor should show Grok `env_ok=true` and `status=ok`. The redteam command can then generate:
+
+```text
+.ai/grok/redteam-report.md
+.ai/grok/metadata.json
+```
+
+No real xAI/Grok API request is sent while `dry_run=true`. Grok is review-only: it does not modify source files, apply patches, commit, execute commands, or run shell. Recommendation values are limited to `PASS_TO_CLAUDE`, `REQUEST_CODEX_REVISION`, and `BLOCK`.
+
 ## Next Phase: Full Dry Run
 
-After adding Gemini context dry-run and Codex patch-only dry-run, doctor should show:
+After adding Gemini context dry-run, Codex patch-only dry-run, and Grok review-only dry-run, doctor should show:
 
 - registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`
 - mock workflow still passes `scripts/verify.sh`
