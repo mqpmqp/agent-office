@@ -191,11 +191,11 @@ def run_real_adapter(role: str, args: argparse.Namespace, paths: TaskPaths, adap
         reason = "; ".join(validation.errors)
         return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
 
-    if config.dry_run:
+    if config.name != "gemini" and config.dry_run:
         reason = f"{config.name} adapter dry_run=true; real command was not executed."
         return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
 
-    if not config.can_execute_commands:
+    if config.name != "gemini" and not config.can_execute_commands:
         reason = (
             f"{config.name} adapter cannot execute commands unless "
             f"AGENTOFFICE_{config.name.upper()}_CAN_EXECUTE_COMMANDS=true."
@@ -225,7 +225,7 @@ def maybe_fallback_to_mock(
     method = getattr(mock, role)
     result = method(build_invocation(args, paths))
     metadata = dict(result.metadata)
-    metadata.update({"fallback_used": "true", "real_adapter": adapter_name, "fallback_reason": safe_reason})
+    metadata.update({"fallback_used": True, "real_adapter": adapter_name, "fallback_reason": safe_reason})
     return AdapterResult(
         detail=f"{result.detail} fallback_used=true; real_adapter={adapter_name}; reason={safe_reason}",
         decision=result.decision,

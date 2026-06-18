@@ -41,7 +41,7 @@ class AdapterResult:
     decision: str | None = None
     stdout: str = ""
     stderr: str = ""
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 class AgentAdapter(ABC):
@@ -85,4 +85,3 @@ def read_text(path: Path, max_chars: int | None = None) -> str:
     if max_chars is not None and len(text) > max_chars:
         return text[:max_chars] + "\n...[truncated]..."
     return text
-

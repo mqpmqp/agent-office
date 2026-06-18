@@ -54,11 +54,23 @@ ADAPTER_MODE_SPECS: dict[str, dict[str, object]] = {
         "timeout_seconds": 120,
         "max_input_chars": 20000,
         "max_output_chars": 12000,
-        "required_env": ("AGENTOFFICE_GEMINI_CMD",),
+        "required_env": ("GEMINI_API_KEY",),
         "can_read_files": True,
         "can_write_files": True,
-        "allowed_input_files": ("brief.md", "README.md", "docs/**", "AGENTS.md"),
-        "allowed_output_files": ("gemini-context.md",),
+        "allowed_input_files": (
+            "brief.md",
+            "README.md",
+            "AGENTS.md",
+            "SPEC.md",
+            "docs/**",
+            "agent_office/**",
+            "tests/**",
+            "scripts/**",
+            "pyproject.toml",
+            "requirements.txt",
+            ".env.example",
+        ),
+        "allowed_output_files": (".ai/context/gemini-context.md",),
     },
     "codex": {
         "role": "implement",
@@ -185,7 +197,7 @@ def validate_adapter_mode(
                 f"{config.name} real mode without dry_run requires "
                 f"AGENTOFFICE_{config.name.upper()}_ALLOW_NON_DRY_RUN=true."
             )
-        if not config.dry_run and not config.can_execute_commands:
+        if config.name != "gemini" and not config.dry_run and not config.can_execute_commands:
             errors.append(
                 f"{config.name} command execution requires "
                 f"AGENTOFFICE_{config.name.upper()}_CAN_EXECUTE_COMMANDS=true."

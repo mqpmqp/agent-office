@@ -22,15 +22,17 @@ REQUIRED_GITIGNORE_PATTERNS = [
     ".ai/logs/",
     ".ai/tmp/",
     ".ai/finalize/",
+    ".ai/context/",
 ]
 CODEX_ENV = [
     "AGENTOFFICE_CODEX_CMD",
     "AGENTOFFICE_CODEX_TIMEOUT_SECONDS",
 ]
 GEMINI_ENV = [
-    "AGENTOFFICE_GEMINI_CMD",
+    "GEMINI_API_KEY",
     "AGENTOFFICE_GEMINI_TIMEOUT_SECONDS",
     "AGENTOFFICE_GEMINI_MAX_FILES",
+    "AGENTOFFICE_GEMINI_MAX_INPUT_CHARS",
     "AGENTOFFICE_GEMINI_MAX_OUTPUT_CHARS",
 ]
 GROK_ENV = [
@@ -116,7 +118,7 @@ def adapter_configured(name: str) -> bool:
     if name == "codex":
         return env_configured("AGENTOFFICE_CODEX_CMD")
     if name == "gemini":
-        return env_configured("AGENTOFFICE_GEMINI_CMD")
+        return env_configured("GEMINI_API_KEY")
     if name == "grok":
         return env_configured("AGENTOFFICE_GROK_CMD")
     if name == "claude":

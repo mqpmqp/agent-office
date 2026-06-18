@@ -70,9 +70,10 @@ Codex variables checked:
 
 Gemini variables checked:
 
-- `AGENTOFFICE_GEMINI_CMD`
+- `GEMINI_API_KEY`
 - `AGENTOFFICE_GEMINI_TIMEOUT_SECONDS`
 - `AGENTOFFICE_GEMINI_MAX_FILES`
+- `AGENTOFFICE_GEMINI_MAX_INPUT_CHARS`
 - `AGENTOFFICE_GEMINI_MAX_OUTPUT_CHARS`
 
 Grok variables checked:
@@ -89,7 +90,7 @@ Claude variables checked:
 
 ## Why Values Are Not Printed
 
-Provider command environments may sit next to credentials in operator shells. Doctor deliberately avoids reading `.env` and avoids printing variable values so secrets cannot leak into terminal history, chat logs, CI logs, or `.ai/` artifacts.
+Provider command environments may sit next to credentials in operator shells, and Gemini uses `GEMINI_API_KEY` for future real network access. Doctor deliberately avoids reading `.env` and avoids printing variable values so secrets cannot leak into terminal history, chat logs, CI logs, or `.ai/` artifacts.
 
 ## Safety Guarantees
 
@@ -97,7 +98,8 @@ Doctor does not:
 
 - read `.env`
 - execute `AGENTOFFICE_CODEX_CMD`
-- execute `AGENTOFFICE_GEMINI_CMD`
+- execute Gemini commands
+- send Gemini network requests
 - execute `AGENTOFFICE_GROK_CMD`
 - execute `AGENTOFFICE_CLAUDE_CMD`
 - create tasks
@@ -106,13 +108,31 @@ Doctor does not:
 - access `/opt/binance-futures-local-bot`
 - modify system directories
 
+## Gemini Real Context Dry-Run
+
+P5-02 adds a staged Gemini real context dry-run. When:
+
+```bash
+export AGENTOFFICE_GEMINI_MODE=real
+export AGENTOFFICE_GEMINI_DRY_RUN=true
+export GEMINI_API_KEY=replace-with-real-key-outside-git
+```
+
+doctor should show Gemini `env_ok=true` and `status=ok`. The context command can then generate:
+
+```text
+.ai/context/gemini-context.md
+```
+
+No real Gemini API request is sent while `dry_run=true`. If `GEMINI_API_KEY` is missing, doctor marks only Gemini as `env_failed`; other adapters remain unaffected. If `AGENTOFFICE_GEMINI_FALLBACK_TO_MOCK=true`, the workflow can continue through mock context and records `fallback_used=true`.
+
 ## Next Phase: Full Dry Run
 
-After adding Claude final judge, doctor should show:
+After adding Gemini context dry-run, doctor should show:
 
 - registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`
 - mock workflow still passes `scripts/verify.sh`
 - Codex, Gemini, Grok, and Claude configuration state is clear
 - runtime artifact ignore rules are present
 
-The next phase should run controlled end-to-end dry runs with explicit real adapter commands while keeping mock mode as the default fallback.
+The next phase should continue controlled end-to-end dry runs while keeping mock mode as the default fallback. Do not enable all adapters at once.

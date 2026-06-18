@@ -39,12 +39,12 @@ class AdapterModeTests(unittest.TestCase):
         validation = validate_adapter_mode(config, env)
         self.assertEqual(validation.status, "env_failed")
         self.assertFalse(validation.env_ok)
-        self.assertIn("AGENTOFFICE_GEMINI_CMD", validation.errors[0])
+        self.assertIn("GEMINI_API_KEY", validation.errors[0])
 
     def test_gemini_real_dry_run_with_env_validates(self) -> None:
         env = {
             "AGENTOFFICE_GEMINI_MODE": "real",
-            "AGENTOFFICE_GEMINI_CMD": "gemini",
+            "GEMINI_API_KEY": "fake-key",
             "AGENTOFFICE_GEMINI_DRY_RUN": "true",
         }
         config = load_adapter_mode_config("gemini", env)
@@ -57,7 +57,7 @@ class AdapterModeTests(unittest.TestCase):
     def test_real_mode_without_dry_run_rejected_unless_allowed(self) -> None:
         env = {
             "AGENTOFFICE_GEMINI_MODE": "real",
-            "AGENTOFFICE_GEMINI_CMD": "gemini",
+            "GEMINI_API_KEY": "fake-key",
             "AGENTOFFICE_GEMINI_DRY_RUN": "false",
         }
         config = load_adapter_mode_config("gemini", env)
@@ -73,19 +73,19 @@ class AdapterModeTests(unittest.TestCase):
 
     def test_no_adapter_can_execute_commands_unless_explicitly_allowed(self) -> None:
         env = {
-            "AGENTOFFICE_GEMINI_MODE": "real",
-            "AGENTOFFICE_GEMINI_CMD": "gemini",
-            "AGENTOFFICE_GEMINI_DRY_RUN": "false",
-            "AGENTOFFICE_GEMINI_ALLOW_NON_DRY_RUN": "true",
+            "AGENTOFFICE_CODEX_MODE": "real",
+            "AGENTOFFICE_CODEX_CMD": "codex",
+            "AGENTOFFICE_CODEX_DRY_RUN": "false",
+            "AGENTOFFICE_CODEX_ALLOW_NON_DRY_RUN": "true",
         }
-        config = load_adapter_mode_config("gemini", env)
+        config = load_adapter_mode_config("codex", env)
         validation = validate_adapter_mode(config, env)
         self.assertFalse(config.can_execute_commands)
         self.assertTrue(any("CAN_EXECUTE_COMMANDS" in error for error in validation.errors))
 
         explicit_env = dict(env)
-        explicit_env["AGENTOFFICE_GEMINI_CAN_EXECUTE_COMMANDS"] = "true"
-        explicit_config = load_adapter_mode_config("gemini", explicit_env)
+        explicit_env["AGENTOFFICE_CODEX_CAN_EXECUTE_COMMANDS"] = "true"
+        explicit_config = load_adapter_mode_config("codex", explicit_env)
         explicit_validation = validate_adapter_mode(explicit_config, explicit_env)
         self.assertTrue(explicit_config.can_execute_commands)
         self.assertFalse(any("CAN_EXECUTE_COMMANDS" in error for error in explicit_validation.errors))
@@ -115,7 +115,7 @@ class AdapterModeTests(unittest.TestCase):
             result = run_adapter("context", args, paths)
             context_exists = paths.gemini_context.exists()
 
-        self.assertEqual(result.metadata["fallback_used"], "true")
+        self.assertEqual(result.metadata["fallback_used"], True)
         self.assertIn("fallback_used=true", result.detail)
         self.assertTrue(context_exists)
 

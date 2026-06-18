@@ -169,10 +169,10 @@ All provider adapters default to `mode=mock`. Passing `--real` is not enough to 
 
 ```bash
 export AGENTOFFICE_GEMINI_MODE=real
-export AGENTOFFICE_GEMINI_CMD=gemini
+export GEMINI_API_KEY=replace-with-real-key-outside-git
 ```
 
-When an adapter is in `mode=real`, `dry_run` defaults to `true`. In dry-run mode AgentOffice validates configuration but does not execute the provider command. To keep a workflow moving during staged tests, set fallback explicitly:
+When an adapter is in `mode=real`, `dry_run` defaults to `true`. In dry-run mode AgentOffice validates configuration but does not send a provider request. To keep a workflow moving during staged tests, set fallback explicitly:
 
 ```bash
 export AGENTOFFICE_GEMINI_DRY_RUN=true
@@ -182,12 +182,12 @@ python -m agent_office context <TASK_ID> --real --adapter gemini
 
 The task continues with mock output and records `fallback_used=true` in the transition detail. If `fallback_to_mock=false`, the workflow fails safely.
 
-Non-dry-run command execution is rejected unless both flags are explicit:
+Non-dry-run command-based execution is rejected for Codex, Grok, and Claude unless both flags are explicit:
 
 ```bash
-export AGENTOFFICE_GEMINI_DRY_RUN=false
-export AGENTOFFICE_GEMINI_ALLOW_NON_DRY_RUN=true
-export AGENTOFFICE_GEMINI_CAN_EXECUTE_COMMANDS=true
+export AGENTOFFICE_CODEX_DRY_RUN=false
+export AGENTOFFICE_CODEX_ALLOW_NON_DRY_RUN=true
+export AGENTOFFICE_CODEX_CAN_EXECUTE_COMMANDS=true
 ```
 
 Use the equivalent `AGENTOFFICE_CODEX_*`, `AGENTOFFICE_GROK_*`, and `AGENTOFFICE_CLAUDE_*` variables for the other adapters. This staged gate does not read `.env` and does not print environment values.
@@ -200,44 +200,54 @@ Mock mode remains the default context path:
 python -m agent_office context <TASK_ID> --mock
 ```
 
-The real Gemini adapter is available only for the `context` stage. Gemini does not modify code. It receives the task brief plus a safe project file-tree summary and allowed docs, then must write:
+The real Gemini adapter is available only for the `context` stage. In P5-02 it supports a safe dry-run path. Gemini does not modify code, does not execute commands, and does not make final decisions. It receives the task brief plus selected safe project context, then writes:
 
 ```text
-.ai/tasks/<TASK_ID>/gemini-context.md
+.ai/context/gemini-context.md
 ```
 
 The generated file must include these sections:
 
 ```text
-# Relevant Files
-# Why These Files Matter
-# Test Entry Points
-# Implementation Hints
-# Risks
+# Gemini Context
+## Task Summary
+## Relevant Project Facts
+## Current Architecture
+## Safety Boundaries
+## Files Reviewed
+## Suggested Implementation Notes
+## Risks / Unknowns
+## Non-Goals
 ```
 
-To enable the real Gemini adapter:
+To enable Gemini real context dry-run:
 
 ```bash
 export AGENTOFFICE_AGENT_MODE=real
 export AGENTOFFICE_GEMINI_MODE=real
 export AGENTOFFICE_GEMINI_DRY_RUN=true
 export AGENTOFFICE_GEMINI_FALLBACK_TO_MOCK=true
-export AGENTOFFICE_GEMINI_CMD=gemini
+export GEMINI_API_KEY=replace-with-real-key-outside-git
 export AGENTOFFICE_GEMINI_TIMEOUT_SECONDS=120
 export AGENTOFFICE_GEMINI_MAX_FILES=80
+export AGENTOFFICE_GEMINI_MAX_INPUT_CHARS=20000
 export AGENTOFFICE_GEMINI_MAX_OUTPUT_CHARS=12000
 python -m agent_office context <TASK_ID> --real --adapter gemini --timeout 120
 ```
 
-`AGENTOFFICE_GEMINI_CMD` must be a single executable name or path, without shell syntax or extra arguments. AgentOffice runs it with `shell=False`, sends the prompt on stdin, captures stdout/stderr, and writes sanitized logs under `.ai/logs/<TASK_ID>/`.
+Dry-run validates `GEMINI_API_KEY` presence but sends no network request. The adapter metadata records `dry_run=true`, `real_request_sent=false`, and `output_path=.ai/context/gemini-context.md`.
 
-The adapter refuses real execution when `AGENTOFFICE_GEMINI_CMD` is empty. It also fails if the command exits successfully but does not write a non-empty `gemini-context.md`.
+The adapter refuses real mode when `GEMINI_API_KEY` is missing unless `AGENTOFFICE_GEMINI_FALLBACK_TO_MOCK=true`. With fallback enabled, the workflow continues with the deterministic mock context and records `fallback_used=true`.
+
+Allowed input is limited to the task brief and safe project files such as `README.md`, `AGENTS.md`, `SPEC.md`, `docs/**`, `agent_office/**`, `tests/**`, `scripts/**`, `pyproject.toml`, `requirements.txt`, and `.env.example`. Gemini must not read `.env`, key files, token files, secret files, `.ai/logs/**`, `.ai/tmp/**`, `.ai/tasks/**`, backup archives, or unrelated projects.
+
+Non-dry-run Gemini network calls remain guarded. Set `AGENTOFFICE_GEMINI_DRY_RUN=false` and `AGENTOFFICE_GEMINI_ALLOW_NON_DRY_RUN=true` only for a separately reviewed real API rollout.
 
 Rollback to mock mode:
 
 ```bash
-unset AGENTOFFICE_GEMINI_CMD
+unset GEMINI_API_KEY
+export AGENTOFFICE_GEMINI_MODE=mock
 export AGENTOFFICE_AGENT_MODE=mock
 python -m agent_office context <TASK_ID> --mock
 ```

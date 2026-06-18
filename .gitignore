@@ -14,3 +14,4 @@ __pycache__/
 .ai/runs/
 .ai/logs/
 .ai/tmp/
+.ai/context/
