@@ -35,7 +35,7 @@ Safety rules:
 - Do not access `/opt/binance-futures-local-bot`.
 - Do not modify source files or system directories.
 
-The command is configured with `AGENTOFFICE_GEMINI_CMD` and executed without shell expansion. If no command is configured, AgentOffice refuses the real call and tells the operator to use `--mock`.
+P5 Gemini real mode is a dry-run adapter gated by `GEMINI_API_KEY`. It does not execute shell commands or send a real network request while `AGENTOFFICE_GEMINI_DRY_RUN=true`.
 
 ## Codex
 
@@ -52,7 +52,7 @@ It must write:
 - `.ai/tasks/<TASK_ID>/codex-report.md`
 - `.ai/tasks/<TASK_ID>/patch.diff`
 
-The command is configured with `AGENTOFFICE_CODEX_CMD` and is executed without shell expansion. If no command is configured, AgentOffice refuses the real call and tells the operator to use `--mock`.
+P5 Codex real mode is a patch-only dry-run adapter gated by `OPENAI_API_KEY`. It does not directly modify source files, apply patches, execute shell commands, or send a real network request while `AGENTOFFICE_CODEX_DRY_RUN=true`.
 
 ## Grok Build
 
@@ -79,45 +79,59 @@ Required output sections:
 - `# Performance Risks`
 - `# Verdict`
 
-The command is configured with `AGENTOFFICE_GROK_CMD` and executed without shell expansion. If no command is configured, AgentOffice refuses the real call and tells the operator to use `--mock`.
+P5 Grok real mode is a review-only dry-run adapter gated by `XAI_API_KEY`. It does not modify code, generate patches, apply patches, execute shell commands, or send a real network request while `AGENTOFFICE_GROK_DRY_RUN=true`.
 
 ## Claude Code
 
-Claude Code is the final decision role. To protect tokens and keep decisions scoped, Claude reads only:
+Claude Code is the final decision role. In mock mode, Claude reads only:
 
 ```text
 .ai/tasks/<TASK_ID>/final-for-claude.md
 ```
 
-Claude does not read the full repository, full logs, full patch, `.env`, or provider credentials. It writes `claude-decision.md` with `APPROVED`, `REQUEST_CHANGES`, or `REJECTED`.
+Claude does not read the full repository, full logs, `.env`, or provider credentials. Mock mode writes `claude-decision.md` with `APPROVED`, `REQUEST_CHANGES`, or `REJECTED`.
 
-Phase 4 adds a real Claude adapter for the `final` stage only. It reads only `.ai/tasks/<TASK_ID>/final-for-claude.md`.
+P5-05 adds a staged real Claude final judge adapter for the `final` stage only. It is final-decision dry-run by default and does not send a real Anthropic request while `AGENTOFFICE_CLAUDE_DRY_RUN=true`.
+
+Allowed dry-run inputs:
+
+- `.ai/finalize/final-for-claude.md`
+- `.ai/tasks/<TASK_ID>/final-for-claude.md`
+- `.ai/context/gemini-context.md`
+- `.ai/codex/patch.diff`
+- `.ai/codex/codex-report.md`
+- `.ai/codex/metadata.json`
+- `.ai/grok/redteam-report.md`
+- `.ai/grok/metadata.json`
 
 Forbidden inputs:
 
 - repository scan
 - `.env`
 - `.ai/logs/`
-- `patch.diff`
-- `codex-report.md`
-- `grok-review.md`
-- `gemini-context.md`
+- `.ai/tmp/`
+- private keys, token files, and secret files
+- unrelated projects
 
 Required output:
 
-- `.ai/tasks/<TASK_ID>/claude-decision.md`
+- `.ai/claude/final-judge.md`
+- `.ai/claude/metadata.json`
 
-Required fields:
+Required report sections:
 
-- `DECISION: APPROVE | REQUEST_CHANGES | REJECT`
-- `REASONS:`
-- `MUST_FIX:`
-- `NICE_TO_HAVE:`
-- `NEXT_ACTION_FOR_CODEX:`
+- `# Claude Final Judge`
+- `## Decision`
+- `## Reasons`
+- `## Required Changes`
+- `## Risk Flags`
+- `## Evidence Reviewed`
+- `## Safety Notes`
+- `## Non-Goals`
 
-Claude token use is controlled by `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`. If `final-for-claude.md` is too long, Claude fails and the operator must re-run summarize with stronger compression. Claude never reads extra files to compensate.
+Decision values are exactly `APPROVE`, `REQUEST_CHANGES`, or `REJECT`. The orchestrator maps them to task states `APPROVED`, `REQUEST_CHANGES`, or `REJECTED`.
 
-If Claude returns `REQUEST_CHANGES`, `NEXT_ACTION_FOR_CODEX` is the handoff content for the next Codex iteration. The existing maximum of 2 rework rounds remains in force.
+Claude token use is controlled by `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`. Claude must not apply changes, generate patches, commit, execute commands, or run shell. If Claude returns `REQUEST_CHANGES`, the required changes and risk flags are the handoff content for the next Codex iteration. The existing maximum of 2 rework rounds remains in force.
 
 ## Orchestrator
 
@@ -127,7 +141,7 @@ The orchestrator masks token/key/secret-like values in adapter logs and keeps ru
 
 ## Adapter Doctor
 
-The doctor role is diagnostic only. It checks whether adapters are known to the registry and whether their environment variables are present, but it never executes the adapter commands.
+The doctor role is diagnostic only. It checks whether adapters are known to the registry and whether their environment variables are present, but it never executes adapters, sends provider requests, or prints values.
 
 Doctor currently reports:
 
@@ -137,4 +151,4 @@ Doctor currently reports:
 - `grok`: red-team adapter configuration state
 - `claude`: final judge adapter configuration state
 
-Doctor reports Claude configuration without executing `AGENTOFFICE_CLAUDE_CMD`.
+Doctor reports Claude configuration by checking whether `ANTHROPIC_API_KEY` is present without printing its value.

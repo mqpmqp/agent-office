@@ -23,12 +23,13 @@ The agents do not freely chat. Every task is coordinated through files under:
 
 ## Claude Token Rule
 
-Claude reads only `final-for-claude.md`.
+Mock Claude reads only `final-for-claude.md`. P5-05 adds a staged real Claude final judge dry-run that can also review bounded staged artifacts under `.ai/context/`, `.ai/codex/`, and `.ai/grok/`.
 
 - Claude does not read the full repository.
 - Claude does not read full logs.
 - Claude does not read the full diff.
 - `final-for-claude.md` is capped at 4000 characters.
+- Claude final judge dry-run writes only `.ai/claude/final-judge.md` and `.ai/claude/metadata.json`.
 - Each task allows at most 2 rework rounds.
 
 ## Install
@@ -63,13 +64,16 @@ agent-office redteam <TASK_ID> --mock
 agent-office redteam <TASK_ID> --real --adapter grok --timeout 120
 agent-office summarize <TASK_ID> --mock
 agent-office final <TASK_ID> --mock
-agent-office final <TASK_ID> --real --adapter claude --timeout 120
+agent-office final <TASK_ID> --real --adapter claude --dry-run --timeout 120
+agent-office judge <TASK_ID> --real --adapter claude --dry-run --timeout 120
 agent-office status <TASK_ID>
 agent-office run-demo <TASK_ID> --mock
 agent-office adapters
 agent-office doctor
 agent-office doctor --adapter codex
 agent-office doctor --adapter gemini
+agent-office doctor --adapter grok
+agent-office doctor --adapter claude
 agent-office doctor --adapters
 agent-office doctor --json
 python -m agent_office.doctor --adapters
@@ -182,15 +186,14 @@ python -m agent_office context <TASK_ID> --real --adapter gemini
 
 The task continues with mock output and records `fallback_used=true` in the transition detail. If `fallback_to_mock=false`, the workflow fails safely.
 
-Non-dry-run provider execution is rejected unless it is explicitly allowed for that adapter. Command-based adapters also require explicit command permission:
+Non-dry-run provider execution is rejected unless it is explicitly allowed for that adapter:
 
 ```bash
 export AGENTOFFICE_CODEX_DRY_RUN=false
 export AGENTOFFICE_CODEX_ALLOW_NON_DRY_RUN=true
-export AGENTOFFICE_CODEX_CAN_EXECUTE_COMMANDS=true
 ```
 
-Use the equivalent `AGENTOFFICE_CODEX_*`, `AGENTOFFICE_GROK_*`, and `AGENTOFFICE_CLAUDE_*` variables for the other adapters where applicable. This staged gate does not read `.env` and does not print environment values.
+Use the equivalent `AGENTOFFICE_CODEX_*`, `AGENTOFFICE_GROK_*`, and `AGENTOFFICE_CLAUDE_*` variables for the other adapters where applicable. The P5 dry-run adapters do not execute shell commands by default. This staged gate does not read `.env` and does not print environment values.
 
 ## Gemini Context Adapter
 
@@ -381,56 +384,85 @@ Mock mode remains the default final decision path:
 python -m agent_office final <TASK_ID> --mock
 ```
 
-The real Claude adapter is available only for the `final` stage. Claude reads only:
+The real Claude adapter is available only for the `final` stage. P5-05 supports final-decision dry-run only. It does not send Anthropic API requests while `dry_run=true`.
+
+Claude may review:
 
 ```text
+.ai/finalize/final-for-claude.md
+.ai/context/gemini-context.md
+.ai/codex/patch.diff
+.ai/codex/codex-report.md
+.ai/codex/metadata.json
+.ai/grok/redteam-report.md
+.ai/grok/metadata.json
 .ai/tasks/<TASK_ID>/final-for-claude.md
 ```
 
-Claude does not read the repository, `.env`, logs, `patch.diff`, `codex-report.md`, `grok-review.md`, or `gemini-context.md`. Those upstream artifacts must already be compressed by the `summarize` stage into `final-for-claude.md`.
+If `final-for-claude.md` is missing, the `judge` command can build a minimal final packet from existing staged Gemini/Codex/Grok artifacts. It does not invent missing evidence.
 
-The real Claude adapter must write:
+Claude must not modify source files, apply patches, commit, execute commands, run shell, or read `.env`, key files, token files, secret files, logs, tmp files, or unrelated projects.
 
-```text
-.ai/tasks/<TASK_ID>/claude-decision.md
-```
-
-The generated decision must include:
+The real Claude dry-run adapter writes only:
 
 ```text
-DECISION: APPROVE | REQUEST_CHANGES | REJECT
-
-REASONS:
-MUST_FIX:
-NICE_TO_HAVE:
-NEXT_ACTION_FOR_CODEX:
+.ai/claude/final-judge.md
+.ai/claude/metadata.json
 ```
 
-To enable the real Claude adapter:
+The generated report includes:
+
+```text
+# Claude Final Judge
+## Decision
+## Reasons
+## Required Changes
+## Risk Flags
+## Evidence Reviewed
+## Safety Notes
+## Non-Goals
+```
+
+The decision is exactly one of:
+
+```text
+APPROVE
+REQUEST_CHANGES
+REJECT
+```
+
+The task state maps those to `APPROVED`, `REQUEST_CHANGES`, or `REJECTED`.
+
+To enable Claude real final judge dry-run:
 
 ```bash
 export AGENTOFFICE_AGENT_MODE=real
 export AGENTOFFICE_CLAUDE_MODE=real
 export AGENTOFFICE_CLAUDE_DRY_RUN=true
 export AGENTOFFICE_CLAUDE_FALLBACK_TO_MOCK=true
-export AGENTOFFICE_CLAUDE_CMD=claude
+export ANTHROPIC_API_KEY=replace-with-real-key-outside-git
 export AGENTOFFICE_CLAUDE_TIMEOUT_SECONDS=120
-export AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS=12000
-export AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS=8000
-python -m agent_office final <TASK_ID> --real --adapter claude --timeout 120
+export AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS=16000
+export AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS=12000
+python -m agent_office judge <TASK_ID> --real --adapter claude --dry-run --timeout 120
 ```
 
-`AGENTOFFICE_CLAUDE_CMD` must be a single executable name or path, without shell syntax or extra arguments. If `final-for-claude.md` exceeds `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`, the adapter fails and asks the operator to re-run summarize with stronger compression. It never reads additional files to compensate.
+Dry-run validates `ANTHROPIC_API_KEY` presence but sends no network request. Metadata records `dry_run=true`, `real_request_sent=false`, `fallback_used=false`, `decision`, `risk_flags`, and `report_path=.ai/claude/final-judge.md`.
+
+If `ANTHROPIC_API_KEY` is missing and `AGENTOFFICE_CLAUDE_FALLBACK_TO_MOCK=true`, the workflow continues with deterministic mock final output and records `fallback_used=true`. If fallback is false, the workflow fails safely.
+
+Non-dry-run Claude API calls remain guarded and are not implemented in P5-05. Set `AGENTOFFICE_CLAUDE_DRY_RUN=false` and `AGENTOFFICE_CLAUDE_ALLOW_NON_DRY_RUN=true` only in a separately reviewed future phase with mocked tests first.
 
 Rollback to mock mode:
 
 ```bash
-unset AGENTOFFICE_CLAUDE_CMD
+unset ANTHROPIC_API_KEY
+export AGENTOFFICE_CLAUDE_MODE=mock
 export AGENTOFFICE_AGENT_MODE=mock
 python -m agent_office final <TASK_ID> --mock
 ```
 
-When Claude returns `DECISION: REQUEST_CHANGES`, the `NEXT_ACTION_FOR_CODEX` section should be used as the next Codex input. The existing max rework limit remains 2 rounds.
+When Claude returns `REQUEST_CHANGES`, use the required changes and risk flags as the next Codex input. The existing max rework limit remains 2 rounds.
 
 ## Docs
 

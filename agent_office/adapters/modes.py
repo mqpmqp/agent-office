@@ -124,13 +124,26 @@ ADAPTER_MODE_SPECS: dict[str, dict[str, object]] = {
     "claude": {
         "role": "final",
         "timeout_seconds": 120,
-        "max_input_chars": 12000,
-        "max_output_chars": 8000,
-        "required_env": ("AGENTOFFICE_CLAUDE_CMD",),
+        "max_input_chars": 16000,
+        "max_output_chars": 12000,
+        "required_env": ("ANTHROPIC_API_KEY",),
         "can_read_files": True,
         "can_write_files": True,
-        "allowed_input_files": ("final-for-claude.md",),
-        "allowed_output_files": ("claude-decision.md",),
+        "allowed_input_files": (
+            ".ai/finalize/final-for-claude.md",
+            ".ai/context/gemini-context.md",
+            ".ai/codex/patch.diff",
+            ".ai/codex/codex-report.md",
+            ".ai/codex/metadata.json",
+            ".ai/grok/redteam-report.md",
+            ".ai/grok/metadata.json",
+            "docs/**",
+            ".ai/tasks/<TASK_ID>/final-for-claude.md",
+        ),
+        "allowed_output_files": (
+            ".ai/claude/final-judge.md",
+            ".ai/claude/metadata.json",
+        ),
     },
 }
 
@@ -223,11 +236,6 @@ def validate_adapter_mode(
             errors.append(
                 f"{config.name} real mode without dry_run requires "
                 f"AGENTOFFICE_{config.name.upper()}_ALLOW_NON_DRY_RUN=true."
-            )
-        if config.name not in {"gemini", "codex", "grok"} and not config.dry_run and not config.can_execute_commands:
-            errors.append(
-                f"{config.name} command execution requires "
-                f"AGENTOFFICE_{config.name.upper()}_CAN_EXECUTE_COMMANDS=true."
             )
     else:
         env_ok = True

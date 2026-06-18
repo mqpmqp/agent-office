@@ -83,24 +83,24 @@ class AdapterModeTests(unittest.TestCase):
         allowed_validation = validate_adapter_mode(allowed_config, allowed_env)
         self.assertFalse(any("ALLOW_NON_DRY_RUN" in error for error in allowed_validation.errors))
 
-    def test_no_adapter_can_execute_commands_unless_explicitly_allowed(self) -> None:
+    def test_no_adapter_can_execute_commands_by_default(self) -> None:
         env = {
+            "AGENTOFFICE_GEMINI_MODE": "real",
+            "AGENTOFFICE_CODEX_MODE": "real",
+            "AGENTOFFICE_GROK_MODE": "real",
             "AGENTOFFICE_CLAUDE_MODE": "real",
-            "AGENTOFFICE_CLAUDE_CMD": "claude",
-            "AGENTOFFICE_CLAUDE_DRY_RUN": "false",
-            "AGENTOFFICE_CLAUDE_ALLOW_NON_DRY_RUN": "true",
+            "GEMINI_API_KEY": "fake-gemini-key",
+            "OPENAI_API_KEY": "fake-openai-key",
+            "XAI_API_KEY": "fake-xai-key",
+            "ANTHROPIC_API_KEY": "fake-anthropic-key",
         }
-        config = load_adapter_mode_config("claude", env)
-        validation = validate_adapter_mode(config, env)
-        self.assertFalse(config.can_execute_commands)
-        self.assertTrue(any("CAN_EXECUTE_COMMANDS" in error for error in validation.errors))
+        registry = load_adapter_mode_registry(env)
+        self.assertTrue(all(not config.can_execute_commands for config in registry.values()))
 
         explicit_env = dict(env)
         explicit_env["AGENTOFFICE_CLAUDE_CAN_EXECUTE_COMMANDS"] = "true"
         explicit_config = load_adapter_mode_config("claude", explicit_env)
-        explicit_validation = validate_adapter_mode(explicit_config, explicit_env)
         self.assertTrue(explicit_config.can_execute_commands)
-        self.assertFalse(any("CAN_EXECUTE_COMMANDS" in error for error in explicit_validation.errors))
 
     def test_fallback_to_mock_works(self) -> None:
         env = {

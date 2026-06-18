@@ -25,6 +25,7 @@ REQUIRED_GITIGNORE_PATTERNS = [
     ".ai/context/",
     ".ai/codex/",
     ".ai/grok/",
+    ".ai/claude/",
 ]
 CODEX_ENV = [
     "OPENAI_API_KEY",
@@ -46,7 +47,7 @@ GROK_ENV = [
     "AGENTOFFICE_GROK_MAX_OUTPUT_CHARS",
 ]
 CLAUDE_ENV = [
-    "AGENTOFFICE_CLAUDE_CMD",
+    "ANTHROPIC_API_KEY",
     "AGENTOFFICE_CLAUDE_TIMEOUT_SECONDS",
     "AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS",
     "AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS",
@@ -128,7 +129,7 @@ def adapter_configured(name: str) -> bool:
     if name == "grok":
         return env_configured("XAI_API_KEY")
     if name == "claude":
-        return env_configured("AGENTOFFICE_CLAUDE_CMD")
+        return env_configured("ANTHROPIC_API_KEY")
     return False
 
 

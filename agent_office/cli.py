@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TASKS_ROOT = PROJECT_ROOT / ".ai" / "tasks"
 FINAL_FOR_CLAUDE_LIMIT = 4000
 MAX_REWORK_ROUNDS = 2
+DRY_RUN_REAL_ADAPTERS = {"gemini", "codex", "grok", "claude"}
 
 STATES = {
     "CREATED",
@@ -178,36 +179,40 @@ def run_real_adapter(role: str, args: argparse.Namespace, paths: TaskPaths, adap
     config_name = adapter_name if adapter_name not in {None, "mock"} else adapter_for_role(role)
     if not config_name:
         raise AgentOfficeError(f"No staged real adapter is registered for role `{role}`. Use --mock.")
-    config = load_adapter_mode_config(config_name)
-    if config.role != role:
-        raise AgentOfficeError(f"Adapter `{config.name}` is registered for role `{config.role}`, not `{role}`.")
-    if config.mode != "real":
-        raise AgentOfficeError(
-            f"{config.name} adapter mode is `{config.mode}`. Set AGENTOFFICE_{config.name.upper()}_MODE=real explicitly or use --mock."
-        )
-
-    validation = validate_adapter_mode(config)
-    if validation.errors:
-        reason = "; ".join(validation.errors)
-        return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
-
-    if config.name not in {"gemini", "codex", "grok"} and config.dry_run:
-        reason = f"{config.name} adapter dry_run=true; real command was not executed."
-        return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
-
-    if config.name not in {"gemini", "codex", "grok"} and not config.can_execute_commands:
-        reason = (
-            f"{config.name} adapter cannot execute commands unless "
-            f"AGENTOFFICE_{config.name.upper()}_CAN_EXECUTE_COMMANDS=true."
-        )
-        return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
-
+    dry_run_var = f"AGENTOFFICE_{config_name.upper()}_DRY_RUN"
+    previous_dry_run = os.environ.get(dry_run_var)
+    if bool(getattr(args, "dry_run", False)):
+        os.environ[dry_run_var] = "true"
     try:
-        adapter = get_adapter(role, "real", config.name)
-        method = getattr(adapter, role)
-        return method(build_invocation(args, paths))
-    except AdapterError as exc:
-        return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, str(exc))
+        config = load_adapter_mode_config(config_name)
+        if config.role != role:
+            raise AgentOfficeError(f"Adapter `{config.name}` is registered for role `{config.role}`, not `{role}`.")
+        if config.mode != "real":
+            raise AgentOfficeError(
+                f"{config.name} adapter mode is `{config.mode}`. Set AGENTOFFICE_{config.name.upper()}_MODE=real explicitly or use --mock."
+            )
+
+        validation = validate_adapter_mode(config)
+        if validation.errors:
+            reason = "; ".join(validation.errors)
+            return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
+
+        if config.name not in DRY_RUN_REAL_ADAPTERS and config.dry_run:
+            reason = f"{config.name} adapter dry_run=true; real command was not executed."
+            return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
+
+        try:
+            adapter = get_adapter(role, "real", config.name)
+            method = getattr(adapter, role)
+            return method(build_invocation(args, paths))
+        except AdapterError as exc:
+            return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, str(exc))
+    finally:
+        if bool(getattr(args, "dry_run", False)):
+            if previous_dry_run is None:
+                os.environ.pop(dry_run_var, None)
+            else:
+                os.environ[dry_run_var] = previous_dry_run
 
 
 def maybe_fallback_to_mock(
@@ -408,6 +413,16 @@ def cmd_final(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_judge(args: argparse.Namespace) -> int:
+    paths = task_paths(args.task_id)
+    task = load_task(paths)
+    require_state(task, {"REVIEWED", "SUMMARIZED"})
+    if task["state"] == "REVIEWED":
+        write_file(paths.final_for_claude, build_final_summary(paths, task))
+        transition(paths, task, "SUMMARIZED", "Orchestrator wrote Claude-only compressed summary for judge.")
+    return cmd_final(args)
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     paths = task_paths(args.task_id)
     task = load_task(paths)
@@ -492,6 +507,7 @@ def cmd_run_demo(args: argparse.Namespace) -> int:
             adapter=getattr(args, "adapter", None),
             timeout=getattr(args, "timeout", None),
             reset=False,
+            dry_run=False,
         )
         if name == "new" and task_paths(args.task_id).root.exists():
             print(f"skip new: task already exists ({args.task_id})")
@@ -515,6 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("redteam", "Generate Grok Build red-team artifact.", cmd_redteam),
         ("summarize", "Generate Claude-only final summary.", cmd_summarize),
         ("final", "Generate Claude final decision.", cmd_final),
+        ("judge", "Generate Claude final judge decision.", cmd_judge),
         ("run-demo", "Run the full mock workflow.", cmd_run_demo),
     ]:
         step = sub.add_parser(name, help=help_text)
@@ -527,6 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="Adapter name. Real mode supports gemini for context, codex for implement, grok for redteam, and claude for final.",
         )
         step.add_argument("--timeout", type=int, help="Adapter timeout in seconds.")
+        step.add_argument("--dry-run", action="store_true", help="Force staged real adapter dry-run mode for this command.")
         if name == "run-demo":
             step.add_argument("--reset", action="store_true", help="Delete an existing task with this ID before running.")
         step.set_defaults(func=func)

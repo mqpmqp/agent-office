@@ -19,6 +19,17 @@ Each task lives under:
 - `final-for-claude.md`: the only file Claude Code should read.
 - `claude-decision.md`: final decision output.
 
+P5 staged dry-run adapters also write ignored global runtime artifacts:
+
+- `.ai/context/gemini-context.md`
+- `.ai/codex/patch.diff`
+- `.ai/codex/codex-report.md`
+- `.ai/codex/metadata.json`
+- `.ai/grok/redteam-report.md`
+- `.ai/grok/metadata.json`
+- `.ai/claude/final-judge.md`
+- `.ai/claude/metadata.json`
+
 ## Real Gemini Context Protocol
 
 When explicitly enabled, the Gemini adapter affects only the `context` stage:
@@ -86,41 +97,53 @@ If `grok-review.md` is missing, empty, or missing required sections, the task re
 When explicitly enabled, the Claude adapter affects only the `final` stage:
 
 ```bash
-python -m agent_office final <TASK_ID> --real --adapter claude --timeout 120
+python -m agent_office final <TASK_ID> --real --adapter claude --dry-run --timeout 120
+python -m agent_office judge <TASK_ID> --real --adapter claude --dry-run --timeout 120
 ```
 
-Input:
+P5-05 implements final-decision dry-run only. No real Anthropic request is sent while `dry_run=true`.
 
+Inputs:
+
+- `.ai/finalize/final-for-claude.md`, if present
 - `.ai/tasks/<TASK_ID>/final-for-claude.md`
+- `.ai/context/gemini-context.md`
+- `.ai/codex/patch.diff`
+- `.ai/codex/codex-report.md`
+- `.ai/codex/metadata.json`
+- `.ai/grok/redteam-report.md`
+- `.ai/grok/metadata.json`
 
 Forbidden inputs:
 
 - repository scan
 - `.env`
 - `.ai/logs/`
-- `patch.diff`
-- `codex-report.md`
-- `grok-review.md`
-- `gemini-context.md`
+- `.ai/tmp/`
+- private keys, token files, or secret files
+- unrelated projects
 
 Output:
 
-- `.ai/tasks/<TASK_ID>/claude-decision.md`
+- `.ai/claude/final-judge.md`
+- `.ai/claude/metadata.json`
 
-The output must contain:
+The report must contain:
 
 ```text
-DECISION: APPROVE | REQUEST_CHANGES | REJECT
-
-REASONS:
-MUST_FIX:
-NICE_TO_HAVE:
-NEXT_ACTION_FOR_CODEX:
+# Claude Final Judge
+## Decision
+## Reasons
+## Required Changes
+## Risk Flags
+## Evidence Reviewed
+## Safety Notes
+## Non-Goals
 ```
 
-If `claude-decision.md` is missing, empty, too large, or lacks a valid `DECISION:` field, the task remains `SUMMARIZED` and does not transition to `APPROVED`, `REQUEST_CHANGES`, or `REJECTED`.
+The decision is exactly one of `APPROVE`, `REQUEST_CHANGES`, or `REJECT`, mapped by the orchestrator to `APPROVED`, `REQUEST_CHANGES`, or `REJECTED`.
 
-Claude input length is capped by `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`. When the input is too long, the adapter fails and asks for stronger summarize-stage compression.
+If `.ai/claude/final-judge.md` or `.ai/claude/metadata.json` is missing, empty, too large, or lacks a valid decision, the task remains `SUMMARIZED` and does not transition to a terminal state. Claude input length is capped by `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`.
 
 ## State Machine
 
@@ -157,5 +180,5 @@ python -m agent_office doctor
 python -m agent_office doctor --json
 ```
 
-The diagnostic layer checks configuration and project structure only. It does not execute real Codex/Gemini commands and does not read `.env`.
-It also reports Grok and Claude configuration state without executing `AGENTOFFICE_GROK_CMD` or `AGENTOFFICE_CLAUDE_CMD`.
+The diagnostic layer checks configuration and project structure only. It does not execute real adapters, send provider requests, or read `.env`.
+It reports Gemini, Codex, Grok, and Claude configuration state without printing environment variable values.

@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import os
-import re
-import shlex
-import subprocess
+import json
+import time
+from pathlib import Path
+from typing import Any
 
 from .base import AdapterInvocation, AdapterResult, AdapterUnavailable, AgentAdapter, mask_secrets, read_text, write_file
+from .modes import load_adapter_mode_config, validate_adapter_mode
 
 
-DEFAULT_CLAUDE_TIMEOUT_SECONDS = 120
-DEFAULT_CLAUDE_MAX_INPUT_CHARS = 12000
-DEFAULT_CLAUDE_MAX_OUTPUT_CHARS = 8000
-DECISION_RE = re.compile(r"(?im)^DECISION:\s*(APPROVE|REQUEST_CHANGES|REJECT)\s*$")
+CLAUDE_OUTPUT_DIR = Path(".ai") / "claude"
+CLAUDE_REPORT_OUTPUT = ".ai/claude/final-judge.md"
+CLAUDE_METADATA_OUTPUT = ".ai/claude/metadata.json"
+VALID_DECISIONS = {"APPROVE", "REQUEST_CHANGES", "REJECT"}
 DECISION_TO_STATE = {
     "APPROVE": "APPROVED",
     "REQUEST_CHANGES": "REQUEST_CHANGES",
@@ -23,200 +24,298 @@ class ClaudeAdapter(AgentAdapter):
     name = "claude"
 
     def final(self, invocation: AdapterInvocation) -> AdapterResult:
-        command = self._command_from_env()
-        timeout = invocation.timeout_seconds or self._timeout_from_env()
-        max_input_chars = self._max_input_chars_from_env()
-        max_output_chars = self._max_output_chars_from_env()
-        final_text = read_text(invocation.paths.final_for_claude)
-        log_dir = invocation.project_root / ".ai" / "logs" / invocation.task_id
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "claude-adapter.log"
-        error_path = log_dir / "claude-adapter-error.md"
+        started = time.monotonic()
+        config = load_adapter_mode_config("claude")
+        validation = validate_adapter_mode(config)
+        if validation.errors:
+            raise AdapterUnavailable("; ".join(validation.errors))
+        if not config.dry_run:
+            return self._send_real_request(invocation, config, validation)
 
-        if not final_text.strip():
-            self._write_failure(error_path, "missing final-for-claude.md", "Claude input is missing or empty.", "", "")
-            raise AdapterUnavailable("Claude input final-for-claude.md is missing or empty.")
-        if len(final_text) > max_input_chars:
-            self._write_failure(
-                error_path,
-                "input too large",
-                f"final-for-claude.md is {len(final_text)} chars; max is {max_input_chars}. Run summarize with stronger compression.",
-                "",
-                "",
-            )
-            raise AdapterUnavailable(
-                "Claude input exceeds AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS. Run summarize with stronger compression."
-            )
+        inputs = self._load_final_inputs(invocation, config.max_input_chars)
+        decision = self._decide(inputs)
+        risk_flags = self._risk_flags(inputs)
+        report_text = self._build_report(invocation, inputs, decision, risk_flags)
+        if len(report_text) > config.max_output_chars:
+            suffix = "\n\n[TRUNCATED BY AGENTOFFICE CLAUDE DRY-RUN ADAPTER]\n"
+            report_text = report_text[: max(0, config.max_output_chars - len(suffix))] + suffix
 
-        if invocation.paths.claude_decision.exists():
-            invocation.paths.claude_decision.unlink()
-
-        try:
-            completed = subprocess.run(
-                command,
-                input=self._build_prompt(invocation, final_text),
-                text=True,
-                capture_output=True,
-                cwd=str(invocation.project_root),
-                timeout=timeout,
-                shell=False,
-                env=os.environ.copy(),
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = mask_secrets(exc.stdout or "")
-            stderr = mask_secrets(exc.stderr or "")
-            self._write_failure(error_path, "timeout", f"Claude command exceeded {timeout} seconds.", stdout, stderr)
-            raise AdapterUnavailable(
-                f"Claude adapter timed out after {timeout} seconds. Use --mock or increase --timeout."
-            ) from exc
-        except OSError as exc:
-            message = mask_secrets(str(exc))
-            self._write_failure(error_path, "execution error", message, "", "")
-            raise AdapterUnavailable(f"Claude adapter could not start: {message}. Use --mock to run the safe path.") from exc
-
-        stdout = mask_secrets(completed.stdout)
-        stderr = mask_secrets(completed.stderr)
-        write_file(
-            log_path,
-            f"""# Claude Adapter Log
-
-Command: `{command[0]}`
-Return code: {completed.returncode}
-
-## Stdout
-
-```text
-{stdout[:8000]}
-```
-
-## Stderr
-
-```text
-{stderr[:8000]}
-```
-""",
-        )
-
-        if completed.returncode != 0:
-            self._write_failure(error_path, "non-zero exit", f"Return code: {completed.returncode}", stdout, stderr)
-            raise AdapterUnavailable(
-                f"Claude adapter failed with exit code {completed.returncode}. See sanitized log in .ai/logs/{invocation.task_id}/."
-            )
-
-        if not invocation.paths.claude_decision.exists():
-            self._write_failure(error_path, "missing claude-decision.md", "Real Claude did not write claude-decision.md.", stdout, stderr)
-            raise AdapterUnavailable("Real Claude completed but did not generate claude-decision.md.")
-
-        decision_text = invocation.paths.claude_decision.read_text(encoding="utf-8")
-        if not decision_text.strip():
-            self._write_failure(error_path, "empty claude-decision.md", "Real Claude wrote an empty claude-decision.md.", stdout, stderr)
-            raise AdapterUnavailable("Real Claude generated an empty claude-decision.md.")
-        if len(decision_text) > max_output_chars:
-            self._write_failure(
-                error_path,
-                "output too large",
-                f"claude-decision.md is {len(decision_text)} chars; max is {max_output_chars}.",
-                stdout,
-                stderr,
-            )
-            raise AdapterUnavailable("Real Claude generated claude-decision.md that exceeds AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS.")
-
-        match = DECISION_RE.search(decision_text)
-        if not match:
-            self._write_failure(error_path, "missing decision", "claude-decision.md does not contain DECISION: APPROVE | REQUEST_CHANGES | REJECT.", stdout, stderr)
-            raise AdapterUnavailable("Real Claude generated claude-decision.md without a valid DECISION field.")
-
-        decision = DECISION_TO_STATE[match.group(1)]
-        return AdapterResult(
-            f"Claude real adapter decision: {decision}.",
+        metadata = self._metadata(
+            validation_env_ok=validation.env_ok,
+            validation_status=validation.status,
             decision=decision,
-            stdout=stdout,
-            stderr=stderr,
-            metadata={"log": str(log_path.relative_to(invocation.project_root))},
+            risk_flags=risk_flags,
+            started=started,
+            input_chars=sum(len(value) for value in inputs.values()),
+            output_chars=len(report_text),
+            error=None,
+        )
+        self._safe_write_text(invocation.project_root, claude_report_path(invocation.project_root), report_text)
+        self._safe_write_json(invocation.project_root, claude_metadata_path(invocation.project_root), metadata)
+
+        return AdapterResult(
+            f"Claude real final judge dry-run decision: {decision}.",
+            decision=DECISION_TO_STATE[decision],
+            metadata=metadata,
         )
 
-    def _command_from_env(self) -> list[str]:
-        raw = os.environ.get("AGENTOFFICE_CLAUDE_CMD", "").strip()
-        if not raw:
-            raise AdapterUnavailable(
-                "Claude real adapter is not configured. Set AGENTOFFICE_CLAUDE_CMD to an executable name/path or use --mock."
-            )
-        if any(ch in raw for ch in "\n\r\t;&|<>`$"):
-            raise AdapterUnavailable("AGENTOFFICE_CLAUDE_CMD must be a single executable name/path without shell syntax.")
-        parts = shlex.split(raw)
-        if len(parts) != 1:
-            raise AdapterUnavailable("AGENTOFFICE_CLAUDE_CMD must not include arguments. Adapter arguments are controlled.")
-        return parts
+    def _send_real_request(self, invocation, config, validation) -> AdapterResult:
+        raise AdapterUnavailable(
+            "Claude non-dry-run API calls are not implemented in P5-05. "
+            "Set AGENTOFFICE_CLAUDE_DRY_RUN=true or use --mock."
+        )
 
-    def _timeout_from_env(self) -> int:
-        return self._positive_int_env("AGENTOFFICE_CLAUDE_TIMEOUT_SECONDS", DEFAULT_CLAUDE_TIMEOUT_SECONDS)
+    def _load_final_inputs(self, invocation: AdapterInvocation, max_input_chars: int) -> dict[str, str]:
+        project_root = invocation.project_root
+        final_packet_path = project_root / ".ai" / "finalize" / "final-for-claude.md"
+        if not final_packet_path.exists() and invocation.paths.final_for_claude.exists():
+            final_packet_path = invocation.paths.final_for_claude
 
-    def _max_input_chars_from_env(self) -> int:
-        return self._positive_int_env("AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS", DEFAULT_CLAUDE_MAX_INPUT_CHARS)
+        context_path = project_root / ".ai" / "context" / "gemini-context.md"
+        if not context_path.exists() and invocation.paths.gemini_context.exists():
+            context_path = invocation.paths.gemini_context
 
-    def _max_output_chars_from_env(self) -> int:
-        return self._positive_int_env("AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS", DEFAULT_CLAUDE_MAX_OUTPUT_CHARS)
+        codex_patch_path = project_root / ".ai" / "codex" / "patch.diff"
+        if not codex_patch_path.exists() and invocation.paths.patch_diff.exists():
+            codex_patch_path = invocation.paths.patch_diff
 
-    def _positive_int_env(self, name: str, default: int) -> int:
-        raw = os.environ.get(name, "").strip()
-        if not raw:
-            return default
-        try:
-            value = int(raw)
-        except ValueError as exc:
-            raise AdapterUnavailable(f"{name} must be an integer.") from exc
-        if value <= 0:
-            raise AdapterUnavailable(f"{name} must be positive.")
-        return value
+        codex_report_path = project_root / ".ai" / "codex" / "codex-report.md"
+        if not codex_report_path.exists() and invocation.paths.codex_report.exists():
+            codex_report_path = invocation.paths.codex_report
 
-    def _build_prompt(self, invocation: AdapterInvocation, final_text: str) -> str:
-        decision_path = self._display_path(invocation, invocation.paths.claude_decision)
-        return f"""You are the real Claude final judge adapter for AgentOffice task `{invocation.task_id}`.
+        grok_report_path = project_root / ".ai" / "grok" / "redteam-report.md"
+        if not grok_report_path.exists() and invocation.paths.grok_review.exists():
+            grok_report_path = invocation.paths.grok_review
 
-Rules:
-- Final judge only. Do not modify code.
-- Read only the compressed input included below from final-for-claude.md.
-- Do not read the repository, `.env`, logs, patch.diff, codex-report.md, grok-review.md, or gemini-context.md.
-- Do not generate patches.
-- Write the final decision artifact to `{decision_path}`.
-- The output must include:
-  - DECISION: APPROVE | REQUEST_CHANGES | REJECT
-  - REASONS:
-  - MUST_FIX:
-  - NICE_TO_HAVE:
-  - NEXT_ACTION_FOR_CODEX:
-- If you cannot complete safely, exit non-zero and explain why.
+        raw_inputs = {
+            "final_packet": mask_secrets(read_text(final_packet_path, 8000)),
+            "gemini_context": mask_secrets(read_text(context_path, 6000)),
+            "codex_patch": mask_secrets(read_text(codex_patch_path, 8000)),
+            "codex_report": mask_secrets(read_text(codex_report_path, 6000)),
+            "codex_metadata": mask_secrets(read_text(project_root / ".ai" / "codex" / "metadata.json", 4000)),
+            "grok_report": mask_secrets(read_text(grok_report_path, 6000)),
+            "grok_metadata": mask_secrets(read_text(project_root / ".ai" / "grok" / "metadata.json", 4000)),
+        }
+        if not raw_inputs["final_packet"]:
+            raw_inputs["final_packet"] = self._build_minimal_final_packet(invocation, raw_inputs)
 
-final-for-claude.md:
-{final_text}
+        if not any(value.strip() for value in raw_inputs.values()):
+            raise AdapterUnavailable("Claude final judge dry-run has no evidence to review.")
+
+        clipped: dict[str, str] = {}
+        consumed = 0
+        for name, value in raw_inputs.items():
+            remaining = max_input_chars - consumed
+            if remaining <= 0:
+                clipped[name] = ""
+                continue
+            clipped_value = value[:remaining]
+            clipped[name] = clipped_value
+            consumed += len(clipped_value)
+        return clipped
+
+    def _build_minimal_final_packet(self, invocation: AdapterInvocation, inputs: dict[str, str]) -> str:
+        available = [
+            name
+            for name in ("gemini_context", "codex_patch", "codex_report", "codex_metadata", "grok_report", "grok_metadata")
+            if inputs.get(name, "").strip()
+        ]
+        missing = [
+            name
+            for name in ("gemini_context", "codex_patch", "codex_report", "codex_metadata", "grok_report", "grok_metadata")
+            if not inputs.get(name, "").strip()
+        ]
+        available_text = "\n".join(f"- {name}" for name in available) if available else "- None."
+        missing_text = "\n".join(f"- {name}" for name in missing) if missing else "- None."
+        return f"""# Final For Claude
+
+Task `{invocation.task_id}` did not have a prebuilt final-for-claude.md packet.
+AgentOffice built this minimal evidence index from existing staged artifacts.
+
+## Evidence Available
+
+{available_text}
+
+## Evidence Missing
+
+{missing_text}
+
+## Constraint
+
+Claude must make a final review decision only and must not apply changes.
 """
 
-    def _display_path(self, invocation: AdapterInvocation, path) -> str:
+    def _decide(self, inputs: dict[str, str]) -> str:
+        combined = "\n".join(inputs.values()).upper()
+        grok_metadata = self._parse_json(inputs.get("grok_metadata", ""))
+        recommendation = str(grok_metadata.get("recommendation", "")).upper()
+        if "FORCE_REJECT" in combined or recommendation == "BLOCK":
+            return "REJECT"
+        if "FORCE_REQUEST_CHANGES" in combined or recommendation == "REQUEST_CODEX_REVISION":
+            return "REQUEST_CHANGES"
+        if "BLOCKING ISSUES" in combined and "NONE" not in combined:
+            return "REQUEST_CHANGES"
+        return "APPROVE"
+
+    def _risk_flags(self, inputs: dict[str, str]) -> list[str]:
+        flags: list[str] = []
+        grok_metadata = self._parse_json(inputs.get("grok_metadata", ""))
+        raw_flags = grok_metadata.get("risk_flags", [])
+        if isinstance(raw_flags, list):
+            flags.extend(str(flag) for flag in raw_flags if str(flag).strip())
+        if not inputs.get("final_packet", "").strip():
+            flags.append("missing_final_packet")
+        if not inputs.get("grok_report", "").strip():
+            flags.append("missing_grok_report")
+        return sorted(set(flags))
+
+    def _build_report(
+        self,
+        invocation: AdapterInvocation,
+        inputs: dict[str, str],
+        decision: str,
+        risk_flags: list[str],
+    ) -> str:
+        if decision not in VALID_DECISIONS:
+            decision = "REQUEST_CHANGES"
+        flags_text = "\n".join(f"- {flag}" for flag in risk_flags) if risk_flags else "- None."
+        evidence = self._evidence_reviewed(inputs)
+        required_changes = "- None." if decision == "APPROVE" else "- Address the risk flags and rerun the staged review loop."
+        reasons = self._decision_reasons(decision, inputs, risk_flags)
+        return f"""# Claude Final Judge
+
+Mode: real dry-run
+Adapter: claude
+Role: final_judge
+Final-judge-only: true
+Real request sent: false
+
+## Decision
+
+{decision}
+
+## Reasons
+
+{reasons}
+
+## Required Changes
+
+{required_changes}
+
+## Risk Flags
+
+{flags_text}
+
+## Evidence Reviewed
+
+{evidence}
+
+## Safety Notes
+
+- Claude made the final review decision only and did not apply changes.
+- Claude did not modify source files.
+- Claude did not generate or apply patches.
+- Claude did not execute commands or shell.
+- Claude did not send a real Anthropic API request.
+- Claude did not read `.env`, private keys, token files, or secret files.
+
+## Non-Goals
+
+- No Gemini, Codex, or Grok behavior changes.
+- No source mutation.
+- No git commit, deployment action, or patch application.
+- No non-dry-run Claude API transport in P5-05.
+"""
+
+    def _decision_reasons(self, decision: str, inputs: dict[str, str], risk_flags: list[str]) -> str:
+        if decision == "APPROVE":
+            return "- Available staged evidence does not require a deterministic dry-run block."
+        if decision == "REJECT":
+            return "- Grok or the final packet indicates a blocking condition."
+        if risk_flags:
+            return "- Staged evidence contains risk flags that require another implementation pass."
+        if not inputs.get("grok_report", "").strip():
+            return "- Grok review evidence is missing, so changes should be requested."
+        return "- The final packet explicitly requested changes."
+
+    def _evidence_reviewed(self, inputs: dict[str, str]) -> str:
+        labels = [
+            ("final_packet", ".ai/finalize/final-for-claude.md or .ai/tasks/<TASK_ID>/final-for-claude.md"),
+            ("gemini_context", ".ai/context/gemini-context.md or .ai/tasks/<TASK_ID>/gemini-context.md"),
+            ("codex_patch", ".ai/codex/patch.diff or .ai/tasks/<TASK_ID>/patch.diff"),
+            ("codex_report", ".ai/codex/codex-report.md or .ai/tasks/<TASK_ID>/codex-report.md"),
+            ("codex_metadata", ".ai/codex/metadata.json"),
+            ("grok_report", ".ai/grok/redteam-report.md or .ai/tasks/<TASK_ID>/grok-review.md"),
+            ("grok_metadata", ".ai/grok/metadata.json"),
+        ]
+        return "\n".join(f"- {label}: {'present' if inputs.get(name, '').strip() else 'missing'}" for name, label in labels)
+
+    def _metadata(
+        self,
+        validation_env_ok: bool,
+        validation_status: str,
+        decision: str,
+        risk_flags: list[str],
+        started: float,
+        input_chars: int,
+        output_chars: int,
+        error: str | None,
+    ) -> dict[str, object]:
+        if decision not in VALID_DECISIONS:
+            decision = "REQUEST_CHANGES"
+        return {
+            "adapter": "claude",
+            "role": "final_judge",
+            "mode": "real",
+            "dry_run": True,
+            "fallback_used": False,
+            "real_request_sent": False,
+            "report_path": CLAUDE_REPORT_OUTPUT,
+            "env_ok": validation_env_ok,
+            "status": validation_status,
+            "decision": decision,
+            "risk_flags": risk_flags,
+            "error": error,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "estimated_cost_usd": None,
+            "input_chars": input_chars,
+            "output_chars": output_chars,
+        }
+
+    def _safe_write_text(self, project_root: Path, path: Path, content: str) -> None:
+        self._assert_allowed_output(project_root, path)
+        write_file(path, mask_secrets(content))
+
+    def _safe_write_json(self, project_root: Path, path: Path, data: dict[str, object]) -> None:
+        self._assert_allowed_output(project_root, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def _assert_allowed_output(self, project_root: Path, path: Path) -> None:
+        allowed = {
+            claude_report_path(project_root).resolve(),
+            claude_metadata_path(project_root).resolve(),
+        }
+        if path.resolve() not in allowed:
+            raise AdapterUnavailable("Claude adapter refused to write outside .ai/claude allowed files.")
+
+    def _parse_json(self, text: str) -> dict[str, Any]:
+        if not text.strip():
+            return {}
         try:
-            return str(path.relative_to(invocation.project_root))
-        except ValueError:
-            return str(path)
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
-    def _write_failure(self, path, reason: str, detail: str, stdout: str, stderr: str) -> None:
-        write_file(
-            path,
-            f"""# Claude Adapter Error
 
-Reason: {mask_secrets(reason)}
+def claude_output_dir(project_root: Path) -> Path:
+    return project_root / CLAUDE_OUTPUT_DIR
 
-Detail: {mask_secrets(detail)}
 
-## Sanitized Stdout
+def claude_report_path(project_root: Path) -> Path:
+    return project_root / CLAUDE_REPORT_OUTPUT
 
-```text
-{mask_secrets(stdout)[:8000]}
-```
 
-## Sanitized Stderr
-
-```text
-{mask_secrets(stderr)[:8000]}
-```
-""",
-        )
+def claude_metadata_path(project_root: Path) -> Path:
+    return project_root / CLAUDE_METADATA_OUTPUT

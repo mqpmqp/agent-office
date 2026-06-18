@@ -87,14 +87,14 @@ Grok variables checked:
 
 Claude variables checked:
 
-- `AGENTOFFICE_CLAUDE_CMD`
+- `ANTHROPIC_API_KEY`
 - `AGENTOFFICE_CLAUDE_TIMEOUT_SECONDS`
 - `AGENTOFFICE_CLAUDE_MAX_INPUT_CHARS`
 - `AGENTOFFICE_CLAUDE_MAX_OUTPUT_CHARS`
 
 ## Why Values Are Not Printed
 
-Provider command environments may sit next to credentials in operator shells. Gemini uses `GEMINI_API_KEY`, Codex uses `OPENAI_API_KEY`, and Grok uses `XAI_API_KEY` for future real network access. Doctor deliberately avoids reading `.env` and avoids printing variable values so secrets cannot leak into terminal history, chat logs, CI logs, or `.ai/` artifacts.
+Provider environments may contain credentials in operator shells. Gemini uses `GEMINI_API_KEY`, Codex uses `OPENAI_API_KEY`, Grok uses `XAI_API_KEY`, and Claude uses `ANTHROPIC_API_KEY` for future real network access. Doctor deliberately avoids reading `.env` and avoids printing variable values so secrets cannot leak into terminal history, chat logs, CI logs, or `.ai/` artifacts.
 
 ## Safety Guarantees
 
@@ -107,7 +107,8 @@ Doctor does not:
 - send Gemini network requests
 - execute Grok commands
 - send Grok network requests
-- execute `AGENTOFFICE_CLAUDE_CMD`
+- execute Claude commands
+- send Claude network requests
 - create tasks
 - write `.ai/tasks/`
 - scan unrelated projects
@@ -171,9 +172,30 @@ doctor should show Grok `env_ok=true` and `status=ok`. The redteam command can t
 
 No real xAI/Grok API request is sent while `dry_run=true`. Grok is review-only: it does not modify source files, apply patches, commit, execute commands, or run shell. Recommendation values are limited to `PASS_TO_CLAUDE`, `REQUEST_CODEX_REVISION`, and `BLOCK`.
 
+## Claude Real Final Judge Dry-Run
+
+P5-05 adds a staged Claude final judge dry-run. When:
+
+```bash
+export AGENTOFFICE_CLAUDE_MODE=real
+export AGENTOFFICE_CLAUDE_DRY_RUN=true
+export ANTHROPIC_API_KEY=replace-with-real-key-outside-git
+```
+
+doctor should show Claude `env_ok=true` and `status=ok`. The final or judge command can then generate:
+
+```text
+.ai/claude/final-judge.md
+.ai/claude/metadata.json
+```
+
+No real Anthropic/Claude API request is sent while `dry_run=true`. Claude is final-judge-only: it does not modify source files, apply patches, commit, execute commands, or run shell. Decision values are limited to `APPROVE`, `REQUEST_CHANGES`, and `REJECT`.
+
+If `ANTHROPIC_API_KEY` is missing, doctor marks only Claude as `env_failed`; other adapters remain unaffected. If `AGENTOFFICE_CLAUDE_FALLBACK_TO_MOCK=true`, the workflow can continue through mock final output and records `fallback_used=true`.
+
 ## Next Phase: Full Dry Run
 
-After adding Gemini context dry-run, Codex patch-only dry-run, and Grok review-only dry-run, doctor should show:
+After adding Gemini context dry-run, Codex patch-only dry-run, Grok review-only dry-run, and Claude final-decision dry-run, doctor should show:
 
 - registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`
 - mock workflow still passes `scripts/verify.sh`
