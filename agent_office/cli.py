@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .adapters.base import AdapterError, AdapterInvocation
+from .adapters.base import AdapterError, AdapterInvocation, AdapterResult, mask_secrets
+from .adapters.mock import MockAdapter
+from .adapters.modes import adapter_for_role, load_adapter_mode_config, validate_adapter_mode
 from .adapters.registry import get_adapter
-from .doctor import collect_doctor, doctor_json, format_adapters, format_doctor
+from .doctor import bool_text, collect_doctor, doctor_json, format_adapters, format_doctor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -162,12 +164,75 @@ def build_invocation(args: argparse.Namespace, paths: TaskPaths) -> AdapterInvoc
 def run_adapter(role: str, args: argparse.Namespace, paths: TaskPaths):
     mode = resolve_mode(args, role)
     adapter_name = getattr(args, "adapter", None)
+    if mode == "real":
+        return run_real_adapter(role, args, paths, adapter_name)
     try:
         adapter = get_adapter(role, mode, adapter_name)
         method = getattr(adapter, role)
         return method(build_invocation(args, paths))
     except AdapterError as exc:
         raise AgentOfficeError(str(exc)) from exc
+
+
+def run_real_adapter(role: str, args: argparse.Namespace, paths: TaskPaths, adapter_name: str | None) -> AdapterResult:
+    config_name = adapter_name if adapter_name not in {None, "mock"} else adapter_for_role(role)
+    if not config_name:
+        raise AgentOfficeError(f"No staged real adapter is registered for role `{role}`. Use --mock.")
+    config = load_adapter_mode_config(config_name)
+    if config.role != role:
+        raise AgentOfficeError(f"Adapter `{config.name}` is registered for role `{config.role}`, not `{role}`.")
+    if config.mode != "real":
+        raise AgentOfficeError(
+            f"{config.name} adapter mode is `{config.mode}`. Set AGENTOFFICE_{config.name.upper()}_MODE=real explicitly or use --mock."
+        )
+
+    validation = validate_adapter_mode(config)
+    if validation.errors:
+        reason = "; ".join(validation.errors)
+        return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
+
+    if config.dry_run:
+        reason = f"{config.name} adapter dry_run=true; real command was not executed."
+        return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
+
+    if not config.can_execute_commands:
+        reason = (
+            f"{config.name} adapter cannot execute commands unless "
+            f"AGENTOFFICE_{config.name.upper()}_CAN_EXECUTE_COMMANDS=true."
+        )
+        return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, reason)
+
+    try:
+        adapter = get_adapter(role, "real", config.name)
+        method = getattr(adapter, role)
+        return method(build_invocation(args, paths))
+    except AdapterError as exc:
+        return maybe_fallback_to_mock(role, args, paths, config.name, config.fallback_to_mock, str(exc))
+
+
+def maybe_fallback_to_mock(
+    role: str,
+    args: argparse.Namespace,
+    paths: TaskPaths,
+    adapter_name: str,
+    fallback_to_mock: bool,
+    reason: str,
+) -> AdapterResult:
+    safe_reason = mask_secrets(reason)
+    if not fallback_to_mock:
+        raise AgentOfficeError(f"{adapter_name} real adapter failed safely: {safe_reason}")
+    mock = MockAdapter()
+    method = getattr(mock, role)
+    result = method(build_invocation(args, paths))
+    metadata = dict(result.metadata)
+    metadata.update({"fallback_used": "true", "real_adapter": adapter_name, "fallback_reason": safe_reason})
+    return AdapterResult(
+        detail=f"{result.detail} fallback_used=true; real_adapter={adapter_name}; reason={safe_reason}",
+        decision=result.decision,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        metadata=metadata,
+    )
 
 
 def write_file(path: Path, content: str) -> None:
@@ -373,11 +438,34 @@ def cmd_adapters(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     report = collect_doctor(PROJECT_ROOT, adapter_filter=args.adapter)
-    if args.json:
+    if args.adapters:
+        if args.json:
+            print(json.dumps(report["adapter_modes"]["rows"], indent=2, ensure_ascii=False))
+        else:
+            print(format_adapter_rows(report["adapter_modes"]["rows"]))
+    elif args.json:
         print(doctor_json(report))
     else:
         print(format_doctor(report))
     return 0
+
+
+def format_adapter_rows(rows: list[dict[str, object]]) -> str:
+    lines = ["adapter | mode | dry_run | env_ok | fallback | status"]
+    for row in rows:
+        lines.append(
+            " | ".join(
+                [
+                    str(row["adapter"]),
+                    str(row["mode"]),
+                    bool_text(bool(row["dry_run"])),
+                    bool_text(bool(row["env_ok"])),
+                    bool_text(bool(row["fallback"])),
+                    str(row["status"]),
+                ]
+            )
+        )
+    return "\n".join(lines)
 
 
 def cmd_run_demo(args: argparse.Namespace) -> int:
@@ -452,6 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
+    p.add_argument("--adapters", action="store_true", help="Print staged adapter mode table only.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_doctor)
     return parser

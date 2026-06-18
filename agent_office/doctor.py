@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib
 import json
 import os
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .adapters.modes import adapter_mode_rows, collect_adapter_mode_status, format_adapter_mode_table
 from .adapters.registry import adapter_catalog
 
 
@@ -56,6 +58,8 @@ def env_configured(name: str) -> bool:
 def collect_doctor(project_root: Path, adapter_filter: str | None = None) -> dict[str, Any]:
     gitignore_patterns = read_gitignore_patterns(project_root)
     catalog = adapter_catalog()
+    mode_status = collect_adapter_mode_status()
+    mode_rows = adapter_mode_rows()
     adapters = {
         name: {
             "roles": data["roles"],
@@ -69,6 +73,9 @@ def collect_doctor(project_root: Path, adapter_filter: str | None = None) -> dic
     }
     if adapter_filter is not None and adapter_filter not in catalog:
         adapters = {}
+    if adapter_filter is not None:
+        mode_status = {name: data for name, data in mode_status.items() if name == adapter_filter}
+        mode_rows = [row for row in mode_rows if row["adapter"] == adapter_filter]
 
     return {
         "project_path": str(project_root),
@@ -90,6 +97,10 @@ def collect_doctor(project_root: Path, adapter_filter: str | None = None) -> dic
         "registry": {
             "contains": {name: name in catalog for name in ["mock", "codex", "gemini", "grok", "claude"]},
             "adapters": adapters,
+        },
+        "adapter_modes": {
+            "rows": mode_rows,
+            "adapters": mode_status,
         },
         "safe": {
             "env_file_read": False,
@@ -184,6 +195,22 @@ def format_doctor(report: dict[str, Any]) -> str:
         )
         for env in data["env"]:
             lines.append(f"    - {env['name']}: configured={bool_text(env['configured'])}")
+    lines.append("- adapter mode registry:")
+    lines.append("  adapter | mode | dry_run | env_ok | fallback | status")
+    for row in report["adapter_modes"]["rows"]:
+        lines.append(
+            "  "
+            + " | ".join(
+                [
+                    str(row["adapter"]),
+                    str(row["mode"]),
+                    bool_text(bool(row["dry_run"])),
+                    bool_text(bool(row["env_ok"])),
+                    bool_text(bool(row["fallback"])),
+                    str(row["status"]),
+                ]
+            )
+        )
     lines.extend(
         [
             "- safety:",
@@ -201,3 +228,53 @@ def bool_text(value: bool) -> str:
 
 def doctor_json(report: dict[str, Any]) -> str:
     return json.dumps(report, indent=2, ensure_ascii=False)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m agent_office.doctor")
+    parser.add_argument("--adapter", choices=["codex", "gemini", "grok", "claude"], help="Limit diagnostics to one adapter.")
+    parser.add_argument("--adapters", action="store_true", help="Print adapter mode table only.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    args = parser.parse_args(argv)
+
+    project_root = Path(__file__).resolve().parents[1]
+    if args.adapters:
+        rows = adapter_mode_rows()
+        if args.adapter:
+            rows = [row for row in rows if row["adapter"] == args.adapter]
+        if args.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+        elif args.adapter:
+            print(_format_adapter_rows(rows))
+        else:
+            print(format_adapter_mode_table())
+        return 0
+
+    report = collect_doctor(project_root, adapter_filter=args.adapter)
+    if args.json:
+        print(doctor_json(report))
+    else:
+        print(format_doctor(report))
+    return 0
+
+
+def _format_adapter_rows(rows: list[dict[str, object]]) -> str:
+    lines = ["adapter | mode | dry_run | env_ok | fallback | status"]
+    for row in rows:
+        lines.append(
+            " | ".join(
+                [
+                    str(row["adapter"]),
+                    str(row["mode"]),
+                    bool_text(bool(row["dry_run"])),
+                    bool_text(bool(row["env_ok"])),
+                    bool_text(bool(row["fallback"])),
+                    str(row["status"]),
+                ]
+            )
+        )
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

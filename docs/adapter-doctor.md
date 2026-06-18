@@ -31,6 +31,13 @@ Produce machine-readable output:
 python3 -m agent_office doctor --json
 ```
 
+Print only the staged adapter mode registry:
+
+```bash
+python3 -m agent_office doctor --adapters
+python3 -m agent_office.doctor --adapters
+```
+
 ## What Doctor Checks
 
 - Current project path.
@@ -40,10 +47,21 @@ python3 -m agent_office doctor --json
 - Whether `scripts/verify.sh` and `scripts/smoke-test.sh` exist.
 - Whether the adapter registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`.
 - Whether Codex, Gemini, Grok, and Claude adapter environment variables are configured.
+- The staged mode registry for Gemini, Codex, Grok, and Claude.
+
+The staged mode table is:
+
+```text
+adapter | mode | dry_run | env_ok | fallback | status
+```
 
 ## Configuration State
 
 Doctor reports only `configured: true` or `configured: false`. It does not print environment variable values.
+
+Provider adapters default to `mode=mock`. Real mode is impossible unless the specific adapter has `AGENTOFFICE_<ADAPTER>_MODE=real`. When an adapter is staged as real, `dry_run` defaults to `true`, so doctor can validate configuration without causing provider execution.
+
+If required environment is missing for one real adapter, doctor marks only that adapter as `env_failed`. Other adapters can remain `ok`.
 
 Codex variables checked:
 
