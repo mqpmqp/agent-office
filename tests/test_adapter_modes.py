@@ -33,6 +33,12 @@ class AdapterModeTests(unittest.TestCase):
         self.assertEqual(config.mode, "mock")
         self.assertTrue(config.enabled)
 
+    def test_codex_remains_mock_by_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_adapter_mode_config("codex")
+        self.assertEqual(config.mode, "mock")
+        self.assertTrue(config.enabled)
+
     def test_gemini_real_without_env_marks_env_failed(self) -> None:
         env = {"AGENTOFFICE_GEMINI_MODE": "real"}
         config = load_adapter_mode_config("gemini", env)
@@ -73,19 +79,19 @@ class AdapterModeTests(unittest.TestCase):
 
     def test_no_adapter_can_execute_commands_unless_explicitly_allowed(self) -> None:
         env = {
-            "AGENTOFFICE_CODEX_MODE": "real",
-            "AGENTOFFICE_CODEX_CMD": "codex",
-            "AGENTOFFICE_CODEX_DRY_RUN": "false",
-            "AGENTOFFICE_CODEX_ALLOW_NON_DRY_RUN": "true",
+            "AGENTOFFICE_GROK_MODE": "real",
+            "AGENTOFFICE_GROK_CMD": "grok",
+            "AGENTOFFICE_GROK_DRY_RUN": "false",
+            "AGENTOFFICE_GROK_ALLOW_NON_DRY_RUN": "true",
         }
-        config = load_adapter_mode_config("codex", env)
+        config = load_adapter_mode_config("grok", env)
         validation = validate_adapter_mode(config, env)
         self.assertFalse(config.can_execute_commands)
         self.assertTrue(any("CAN_EXECUTE_COMMANDS" in error for error in validation.errors))
 
         explicit_env = dict(env)
-        explicit_env["AGENTOFFICE_CODEX_CAN_EXECUTE_COMMANDS"] = "true"
-        explicit_config = load_adapter_mode_config("codex", explicit_env)
+        explicit_env["AGENTOFFICE_GROK_CAN_EXECUTE_COMMANDS"] = "true"
+        explicit_config = load_adapter_mode_config("grok", explicit_env)
         explicit_validation = validate_adapter_mode(explicit_config, explicit_env)
         self.assertTrue(explicit_config.can_execute_commands)
         self.assertFalse(any("CAN_EXECUTE_COMMANDS" in error for error in explicit_validation.errors))

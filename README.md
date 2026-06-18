@@ -260,33 +260,39 @@ Mock mode remains the default and safest path:
 python -m agent_office implement <TASK_ID> --mock
 ```
 
-The real Codex adapter is available only for the `implement` stage. `context`, `redteam`, and `final` still use mock providers in this phase.
+The real Codex adapter is available only for the `implement` stage. In P5-03 it is patch-only dry-run. It does not directly modify source files, does not execute commands, does not call OpenAI/Codex network APIs, and does not apply patches automatically.
 
-To enable the real Codex adapter, set an executable command in the environment:
+To enable Codex real implement dry-run:
 
 ```bash
 export AGENTOFFICE_AGENT_MODE=real
 export AGENTOFFICE_CODEX_MODE=real
 export AGENTOFFICE_CODEX_DRY_RUN=true
 export AGENTOFFICE_CODEX_FALLBACK_TO_MOCK=true
-export AGENTOFFICE_CODEX_CMD=codex
+export OPENAI_API_KEY=replace-with-real-key-outside-git
 export AGENTOFFICE_CODEX_TIMEOUT_SECONDS=1200
 python -m agent_office implement <TASK_ID> --real --adapter codex --timeout 1200
 ```
 
-`AGENTOFFICE_CODEX_CMD` must be a single executable name or path, without shell syntax or extra arguments. AgentOffice runs it with `shell=False`, sends the task prompt on stdin, captures stdout/stderr, writes sanitized logs under `.ai/logs/<TASK_ID>/`, and requires the adapter to produce both:
+Dry-run validates `OPENAI_API_KEY` presence but sends no network request. It writes only:
 
 ```text
-.ai/tasks/<TASK_ID>/codex-report.md
-.ai/tasks/<TASK_ID>/patch.diff
+.ai/codex/patch.diff
+.ai/codex/codex-report.md
+.ai/codex/metadata.json
 ```
 
-If the real command is missing or does not produce a non-empty `patch.diff`, the task does not transition to `IMPLEMENTED`.
+The generated patch is a proposal only. AgentOffice does not apply it, does not run `git apply`, and does not commit it. A human must review and apply any patch in a separate step.
+
+The patch safety validator rejects patches that modify `.env`, add obvious secrets, touch private keys, delete guard tests, weaken adapter safety defaults, enable all real adapters, set `dry_run=false` by default, set `allow_non_dry_run=true` by default, set `can_execute_commands=true` by default, target paths outside the allowed review set, or include unsafe live trading action markers.
+
+If `OPENAI_API_KEY` is missing and `AGENTOFFICE_CODEX_FALLBACK_TO_MOCK=true`, the workflow continues with the deterministic mock implementation and records `fallback_used=true`. If fallback is false, the workflow fails safely.
 
 Rollback to mock mode:
 
 ```bash
-unset AGENTOFFICE_CODEX_CMD
+unset OPENAI_API_KEY
+export AGENTOFFICE_CODEX_MODE=mock
 export AGENTOFFICE_AGENT_MODE=mock
 python -m agent_office run-demo DEMO-FINAL --mock --reset
 ```

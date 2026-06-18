@@ -23,10 +23,13 @@ REQUIRED_GITIGNORE_PATTERNS = [
     ".ai/tmp/",
     ".ai/finalize/",
     ".ai/context/",
+    ".ai/codex/",
 ]
 CODEX_ENV = [
-    "AGENTOFFICE_CODEX_CMD",
+    "OPENAI_API_KEY",
     "AGENTOFFICE_CODEX_TIMEOUT_SECONDS",
+    "AGENTOFFICE_CODEX_MAX_INPUT_CHARS",
+    "AGENTOFFICE_CODEX_MAX_OUTPUT_CHARS",
 ]
 GEMINI_ENV = [
     "GEMINI_API_KEY",
@@ -116,7 +119,7 @@ def adapter_configured(name: str) -> bool:
     if name == "mock":
         return True
     if name == "codex":
-        return env_configured("AGENTOFFICE_CODEX_CMD")
+        return env_configured("OPENAI_API_KEY")
     if name == "gemini":
         return env_configured("GEMINI_API_KEY")
     if name == "grok":
