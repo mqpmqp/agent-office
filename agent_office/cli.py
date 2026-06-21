@@ -28,6 +28,7 @@ STAGED_REAL_ADAPTER_ROLES = {
     "grok": "redteam",
     "claude": "final",
 }
+STAGED_RUNTIME_DIR_NAMES = ("context", "codex", "grok", "claude", "finalize")
 
 STATES = {
     "CREATED",
@@ -97,6 +98,50 @@ def reset_task(task_id: str) -> None:
         raise AgentOfficeError(f"Refusing to reset task outside tasks root: {paths.root}")
     if paths.root.exists():
         shutil.rmtree(paths.root)
+
+
+def clear_staged_runtime_dirs() -> None:
+    ai_root = (PROJECT_ROOT / ".ai").resolve()
+    for name in STAGED_RUNTIME_DIR_NAMES:
+        path = PROJECT_ROOT / ".ai" / name
+        resolved = path.resolve()
+        expected = (PROJECT_ROOT / ".ai" / name).resolve()
+        if resolved != expected or resolved.parent != ai_root:
+            raise AgentOfficeError(f"Refusing to clear unsafe staged runtime path: {path}")
+        if not path.exists():
+            continue
+        if path.is_symlink() or not path.is_dir():
+            raise AgentOfficeError(f"Refusing to clear non-directory staged runtime path: {path}")
+        shutil.rmtree(path)
+
+
+def copy_task_artifact_if_exists(source: Path, destination: Path) -> bool:
+    if not source.exists() or not source.is_file():
+        return False
+    project_root = PROJECT_ROOT.resolve()
+    resolved_destination = destination.resolve()
+    if project_root not in resolved_destination.parents:
+        raise AgentOfficeError(f"Refusing to stage artifact outside project root: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    return True
+
+
+def stage_current_task_artifacts(adapter_name: str, paths: TaskPaths) -> None:
+    staged_context = PROJECT_ROOT / ".ai" / "context" / "gemini-context.md"
+    staged_codex_patch = PROJECT_ROOT / ".ai" / "codex" / "patch.diff"
+    staged_codex_report = PROJECT_ROOT / ".ai" / "codex" / "codex-report.md"
+    staged_grok_report = PROJECT_ROOT / ".ai" / "grok" / "redteam-report.md"
+    staged_final_packet = PROJECT_ROOT / ".ai" / "finalize" / "final-for-claude.md"
+
+    if adapter_name in {"codex", "grok", "claude"}:
+        copy_task_artifact_if_exists(paths.gemini_context, staged_context)
+    if adapter_name in {"grok", "claude"}:
+        copy_task_artifact_if_exists(paths.patch_diff, staged_codex_patch)
+        copy_task_artifact_if_exists(paths.codex_report, staged_codex_report)
+    if adapter_name == "claude":
+        copy_task_artifact_if_exists(paths.grok_review, staged_grok_report)
+        copy_task_artifact_if_exists(paths.final_for_claude, staged_final_packet)
 
 
 def load_task(paths: TaskPaths) -> dict[str, Any]:
@@ -545,10 +590,12 @@ def staged_real_selection(args: argparse.Namespace) -> tuple[str | None, str | N
 def cmd_run_staged(args: argparse.Namespace) -> int:
     validate_task_id(args.task_id)
     real_role, real_adapter = staged_real_selection(args)
+    clear_staged_runtime_dirs()
     if args.reset:
         reset_task(args.task_id)
         print(f"reset task: {args.task_id}")
 
+    paths = task_paths(args.task_id)
     staged_steps: list[tuple[str, str | None, Callable[[argparse.Namespace], int]]] = [
         ("new", None, cmd_new),
         ("context", "context", cmd_context),
@@ -559,7 +606,7 @@ def cmd_run_staged(args: argparse.Namespace) -> int:
         ("status", None, cmd_status),
     ]
     for name, role, fn in staged_steps:
-        if name == "new" and task_paths(args.task_id).root.exists():
+        if name == "new" and paths.root.exists():
             print(f"skip new: task already exists ({args.task_id})")
             continue
         real_step = bool(real_adapter and role == real_role)
@@ -572,6 +619,8 @@ def cmd_run_staged(args: argparse.Namespace) -> int:
             reset=False,
             dry_run=real_step,
         )
+        if real_step:
+            stage_current_task_artifacts(real_adapter, paths)
         print(f"\n== {name} ==")
         fn(step_args)
     return 0

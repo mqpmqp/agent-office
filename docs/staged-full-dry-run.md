@@ -20,6 +20,16 @@ Every adapter remains mock by default. `run-staged` sets each step to mock unles
 
 The command also ignores `AGENTOFFICE_AGENT_MODE=real` for automatic full-loop real execution. This prevents environment drift from turning a full dry run into a multi-provider run.
 
+At the start of each invocation, AgentOffice clears only these fixed staged runtime directories:
+
+- `.ai/context/`
+- `.ai/codex/`
+- `.ai/grok/`
+- `.ai/claude/`
+- `.ai/finalize/`
+
+It does not delete `.ai/tasks/`, `.ai/logs/`, `.ai/tmp/`, source files, or arbitrary user-provided paths.
+
 ## One Real Adapter At A Time
 
 To exercise a real dry-run stage, all of these are required:
@@ -41,6 +51,14 @@ python -m agent_office run-staged P6-GEMINI --dry-run --real --adapter gemini --
 
 All other stages remain mock. Enabling all real adapters in one invocation is refused by design.
 
+Before a selected real dry-run stage, AgentOffice stages current task evidence:
+
+- `codex`: copies current task `gemini-context.md` to `.ai/context/gemini-context.md`.
+- `grok`: copies current task `gemini-context.md`, `patch.diff`, and `codex-report.md` to `.ai/context/` and `.ai/codex/`.
+- `claude`: copies current task `final-for-claude.md` to `.ai/finalize/final-for-claude.md`, and copies available current Gemini/Codex/Grok artifacts to their staged directories.
+
+Missing files are not invented.
+
 ## Safety Guarantees
 
 - No real provider request is sent while `--dry-run` is active.
@@ -51,6 +69,7 @@ All other stages remain mock. Enabling all real adapters in one invocation is re
 - Environment variable values are not printed.
 - Runtime artifacts stay under ignored `.ai/**` locations.
 - The existing four-agent state machine remains unchanged.
+- Stale staged artifacts from previous tasks are removed before the workflow starts.
 
 ## Verification
 

@@ -160,6 +160,8 @@ Safety boundaries:
 - `.env` is not read and environment variable values are not printed.
 - The existing task state machine is reused unchanged.
 - Runtime artifacts stay under ignored `.ai/**` paths.
+- Each `run-staged` invocation clears stale staged runtime directories: `.ai/context/`, `.ai/codex/`, `.ai/grok/`, `.ai/claude/`, and `.ai/finalize/`.
+- Before a selected real dry-run stage, AgentOffice copies only the current task's existing artifacts into the matching staged directories so adapters do not review evidence from a previous task.
 
 ## Verify
 

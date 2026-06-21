@@ -200,6 +200,10 @@ The matching `AGENTOFFICE_<ADAPTER>_MODE=real` and required provider environment
 
 `run-staged` never applies patches, never commits, never reads `.env`, and never prints environment variable values. Runtime files remain under ignored `.ai/**` locations.
 
+At startup, `run-staged` clears only `.ai/context/`, `.ai/codex/`, `.ai/grok/`, `.ai/claude/`, and `.ai/finalize/` so a dry run cannot review stale global evidence. It does not delete `.ai/tasks/`, `.ai/logs/`, `.ai/tmp/`, source code, or paths supplied by the user.
+
+When one real dry-run adapter is selected, current task artifacts are copied into staged runtime directories immediately before that real stage runs. Codex receives the current task Gemini context, Grok receives the current task Gemini/Codex artifacts, and Claude receives the current task final packet plus available Gemini/Codex/Grok artifacts. Missing artifacts are left missing.
+
 ## Doctor Protocol
 
 Doctor commands do not create or modify task directories:
