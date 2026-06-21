@@ -1,12 +1,14 @@
 # Skills Packaging
 
-AgentOffice v0.6 starts a skills packaging layer for operator and agent workflows. These skills are local Codex skill wrappers installed under:
+AgentOffice v0.6 starts a skills packaging note for operator and Codex development workflows. These skills are local Codex skill wrappers installed under:
 
 ```text
 C:\Users\Administrator\.codex\skills\
 ```
 
 They are workflow wrappers, not vendored copies of third-party repositories. They do not include external project code, credentials, or platform tokens.
+
+Important: these skills are for Codex/the operator to use while developing AgentOffice. They are not part of the AgentOffice runtime protocol and are not a replacement for the Gemini/Codex/Grok/Claude adapter loop.
 
 ## Packaged Skills
 
@@ -109,3 +111,4 @@ The two bundled scripts were smoke-tested:
 - Skills do not grant external platform access by themselves.
 - Platform access still depends on installed connectors, tools, browser state, or operator-provided exports.
 - AgentOffice runtime behavior is unchanged by these local skills.
+- The v0.5 four-agent loop must not depend on local Codex skills being installed.
