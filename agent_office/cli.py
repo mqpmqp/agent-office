@@ -22,6 +22,20 @@ TASKS_ROOT = PROJECT_ROOT / ".ai" / "tasks"
 FINAL_FOR_CLAUDE_LIMIT = 4000
 MAX_REWORK_ROUNDS = 2
 DRY_RUN_REAL_ADAPTERS = {"gemini", "codex", "grok", "claude"}
+STAGED_REAL_ADAPTER_ROLES = {
+    "gemini": "context",
+    "codex": "implement",
+    "grok": "redteam",
+    "claude": "final",
+}
+STAGED_RUNTIME_DIR_NAMES = ("context", "codex", "grok", "claude", "finalize")
+STAGED_ARTIFACT_DESTINATION_PARTS = (
+    (".ai", "context", "gemini-context.md"),
+    (".ai", "codex", "patch.diff"),
+    (".ai", "codex", "codex-report.md"),
+    (".ai", "grok", "redteam-report.md"),
+    (".ai", "finalize", "final-for-claude.md"),
+)
 
 STATES = {
     "CREATED",
@@ -91,6 +105,61 @@ def reset_task(task_id: str) -> None:
         raise AgentOfficeError(f"Refusing to reset task outside tasks root: {paths.root}")
     if paths.root.exists():
         shutil.rmtree(paths.root)
+
+
+def clear_staged_runtime_dirs() -> None:
+    ai_root = (PROJECT_ROOT / ".ai").resolve()
+    for name in STAGED_RUNTIME_DIR_NAMES:
+        path = PROJECT_ROOT / ".ai" / name
+        resolved = path.resolve()
+        expected = (PROJECT_ROOT / ".ai" / name).resolve()
+        if resolved != expected or resolved.parent != ai_root:
+            raise AgentOfficeError(f"Refusing to clear unsafe staged runtime path: {path}")
+        if not path.exists():
+            continue
+        if path.is_symlink() or not path.is_dir():
+            raise AgentOfficeError(f"Refusing to clear non-directory staged runtime path: {path}")
+        shutil.rmtree(path)
+
+
+def allowed_staged_artifact_destinations() -> set[Path]:
+    return {(PROJECT_ROOT.joinpath(*parts)).resolve() for parts in STAGED_ARTIFACT_DESTINATION_PARTS}
+
+
+def copy_task_artifact_if_exists(paths: TaskPaths, source: Path, destination: Path) -> bool:
+    if source.is_symlink():
+        raise AgentOfficeError(f"Refusing to stage symlink task artifact: {source}")
+    if not source.exists():
+        return False
+    if not source.is_file():
+        raise AgentOfficeError(f"Refusing to stage non-file task artifact: {source}")
+    resolved_source = source.resolve()
+    resolved_task_root = paths.root.resolve()
+    if resolved_source != resolved_task_root and resolved_task_root not in resolved_source.parents:
+        raise AgentOfficeError(f"Refusing to stage artifact outside current task root: {source}")
+    resolved_destination = destination.resolve()
+    if resolved_destination not in allowed_staged_artifact_destinations():
+        raise AgentOfficeError(f"Refusing to stage artifact to unsupported destination: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    return True
+
+
+def stage_current_task_artifacts(adapter_name: str, paths: TaskPaths) -> None:
+    staged_context = PROJECT_ROOT / ".ai" / "context" / "gemini-context.md"
+    staged_codex_patch = PROJECT_ROOT / ".ai" / "codex" / "patch.diff"
+    staged_codex_report = PROJECT_ROOT / ".ai" / "codex" / "codex-report.md"
+    staged_grok_report = PROJECT_ROOT / ".ai" / "grok" / "redteam-report.md"
+    staged_final_packet = PROJECT_ROOT / ".ai" / "finalize" / "final-for-claude.md"
+
+    if adapter_name in {"codex", "grok", "claude"}:
+        copy_task_artifact_if_exists(paths, paths.gemini_context, staged_context)
+    if adapter_name in {"grok", "claude"}:
+        copy_task_artifact_if_exists(paths, paths.patch_diff, staged_codex_patch)
+        copy_task_artifact_if_exists(paths, paths.codex_report, staged_codex_report)
+    if adapter_name == "claude":
+        copy_task_artifact_if_exists(paths, paths.grok_review, staged_grok_report)
+        copy_task_artifact_if_exists(paths, paths.final_for_claude, staged_final_packet)
 
 
 def load_task(paths: TaskPaths) -> dict[str, Any]:
@@ -517,6 +586,64 @@ def cmd_run_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def staged_real_selection(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    if not bool(getattr(args, "dry_run", False)):
+        raise AgentOfficeError("run-staged requires --dry-run.")
+    real = bool(getattr(args, "real", False))
+    adapter_name = getattr(args, "adapter", None)
+    if adapter_name == "mock":
+        adapter_name = None
+    if not real and adapter_name:
+        raise AgentOfficeError("run-staged accepts --adapter only with --real.")
+    if not real:
+        return None, None
+    if not adapter_name:
+        raise AgentOfficeError("run-staged --real requires one explicit --adapter. Enabling all real adapters is refused.")
+    role = STAGED_REAL_ADAPTER_ROLES.get(adapter_name)
+    if role is None:
+        raise AgentOfficeError(f"Unsupported run-staged real adapter: {adapter_name}")
+    return role, adapter_name
+
+
+def cmd_run_staged(args: argparse.Namespace) -> int:
+    validate_task_id(args.task_id)
+    real_role, real_adapter = staged_real_selection(args)
+    clear_staged_runtime_dirs()
+    if args.reset:
+        reset_task(args.task_id)
+        print(f"reset task: {args.task_id}")
+
+    paths = task_paths(args.task_id)
+    staged_steps: list[tuple[str, str | None, Callable[[argparse.Namespace], int]]] = [
+        ("new", None, cmd_new),
+        ("context", "context", cmd_context),
+        ("implement", "implement", cmd_implement),
+        ("redteam", "redteam", cmd_redteam),
+        ("summarize", None, cmd_summarize),
+        ("judge", "final", cmd_judge),
+        ("status", None, cmd_status),
+    ]
+    for name, role, fn in staged_steps:
+        if name == "new" and paths.root.exists():
+            print(f"skip new: task already exists ({args.task_id})")
+            continue
+        real_step = bool(real_adapter and role == real_role)
+        step_args = argparse.Namespace(
+            task_id=args.task_id,
+            mock=not real_step,
+            real=real_step,
+            adapter=real_adapter if real_step else None,
+            timeout=getattr(args, "timeout", None),
+            reset=False,
+            dry_run=real_step,
+        )
+        if real_step:
+            stage_current_task_artifacts(real_adapter, paths)
+        print(f"\n== {name} ==")
+        fn(step_args)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-office")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -548,6 +675,19 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "run-demo":
             step.add_argument("--reset", action="store_true", help="Delete an existing task with this ID before running.")
         step.set_defaults(func=func)
+
+    p = sub.add_parser("run-staged", help="Run the staged full workflow in dry-run orchestration mode.")
+    p.add_argument("task_id")
+    p.add_argument("--dry-run", action="store_true", help="Required. Keep orchestration in staged dry-run mode.")
+    p.add_argument("--reset", action="store_true", help="Delete an existing task with this ID before running.")
+    p.add_argument("--real", action="store_true", help="Enable one explicitly configured real adapter for its stage.")
+    p.add_argument(
+        "--adapter",
+        choices=["mock", "codex", "gemini", "grok", "claude"],
+        help="Single real adapter to exercise. All other stages remain mock.",
+    )
+    p.add_argument("--timeout", type=int, help="Adapter timeout in seconds for the selected real stage.")
+    p.set_defaults(func=cmd_run_staged)
 
     p = sub.add_parser("status", help="Print task state and artifact presence.")
     p.add_argument("task_id")

@@ -68,6 +68,8 @@ agent-office final <TASK_ID> --real --adapter claude --dry-run --timeout 120
 agent-office judge <TASK_ID> --real --adapter claude --dry-run --timeout 120
 agent-office status <TASK_ID>
 agent-office run-demo <TASK_ID> --mock
+agent-office run-staged <TASK_ID> --dry-run --reset
+agent-office run-staged <TASK_ID> --dry-run --real --adapter gemini
 agent-office adapters
 agent-office doctor
 agent-office doctor --adapter codex
@@ -124,6 +126,42 @@ To clean demo tasks manually:
 ```bash
 rm -rf .ai/tasks/DEMO-*
 ```
+
+## Staged Full Dry Run
+
+P6-01 adds a dry-run orchestration command that only chains existing stages:
+
+```bash
+python -m agent_office run-staged <TASK_ID> --dry-run --reset
+```
+
+It runs:
+
+```text
+new -> context -> implement -> redteam -> summarize -> judge -> status
+```
+
+All stages are mock by default, even if adapter environment variables are present. To exercise one staged real dry-run adapter, enable exactly one adapter explicitly:
+
+```bash
+export AGENTOFFICE_GEMINI_MODE=real
+export AGENTOFFICE_GEMINI_DRY_RUN=true
+export GEMINI_API_KEY=replace-with-real-key-outside-git
+python -m agent_office run-staged <TASK_ID> --dry-run --real --adapter gemini --reset
+```
+
+Use `codex`, `grok`, or `claude` in the same shape to exercise one corresponding stage. `run-staged` refuses `--real` without a single `--adapter`, refuses adapter selection without `--real`, and requires `--dry-run`.
+
+Safety boundaries:
+
+- No real provider request is sent while `--dry-run` is active.
+- No patch is applied.
+- No git commit is made.
+- `.env` is not read and environment variable values are not printed.
+- The existing task state machine is reused unchanged.
+- Runtime artifacts stay under ignored `.ai/**` paths.
+- Each `run-staged` invocation clears stale staged runtime directories: `.ai/context/`, `.ai/codex/`, `.ai/grok/`, `.ai/claude/`, and `.ai/finalize/`.
+- Before a selected real dry-run stage, AgentOffice copies only the current task's existing artifacts into the matching staged directories so adapters do not review evidence from a previous task.
 
 ## Verify
 
