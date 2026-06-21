@@ -27,6 +27,8 @@ Mock mode writes deterministic artifacts and never calls real provider APIs. It 
 
 The Phase 5 staged adapter registry keeps all adapters in `mode=mock` by default. P5-02 adds Gemini context dry-run, P5-03 adds Codex patch-only dry-run, P5-04 adds Grok review-only dry-run, and P5-05 adds Claude final-decision dry-run. Provider-specific authentication, browser state, or API calls belong behind adapter boundaries and must not be written into task artifacts.
 
+P6-01 adds `python -m agent_office run-staged <TASK_ID> --dry-run` as an orchestration wrapper around the existing commands. It runs `new`, `context`, `implement`, `redteam`, `summarize`, `judge`, and `status` in order without changing the state machine. Every stage remains mock unless the operator passes `--real --adapter <one-adapter> --dry-run` and the matching adapter environment gates are present. The command refuses to enable every real adapter in one run.
+
 Gemini is read-only against source code. It receives `brief.md`, a safe project file-tree summary, and allowed docs such as `README.md`, `docs/`, and `AGENTS.md` when present. It must not read `.env`, key files, token files, secret files, runtime task outputs, or unrelated project directories.
 
 Grok is read-only against source code and repository state. It reviews only task artifacts: `brief.md`, `codex-report.md`, and `patch.diff`. It must not scan the full repository, modify code, or generate patches.

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-AgentOffice v0.5 uses a staged real-adapter dry-run framework. All adapters default to `mode=mock`; real mode is impossible unless that specific adapter is explicitly configured with `AGENTOFFICE_<ADAPTER>_MODE=real`.
+AgentOffice v0.5 uses a staged real-adapter dry-run framework. P6-01 adds a controlled full dry-run orchestration command on top of that framework. All adapters default to `mode=mock`; real mode is impossible unless that specific adapter is explicitly configured with `AGENTOFFICE_<ADAPTER>_MODE=real`.
 
 Implemented staged adapters:
 
@@ -12,6 +12,14 @@ Implemented staged adapters:
 - P5-05: Claude final-decision dry-run.
 
 No adapter sends a real provider request while `dry_run=true`. Do not enable all real adapters at once.
+
+P6-01 command:
+
+```bash
+python3 -m agent_office run-staged <TASK_ID> --dry-run --reset
+```
+
+This runs `new -> context -> implement -> redteam -> summarize -> judge -> status`. It defaults every stage to mock and can exercise only one explicitly selected real dry-run adapter per invocation.
 
 ## Adapter Boundary
 
@@ -103,7 +111,7 @@ python3 -m agent_office judge <TASK_ID> --real --adapter claude --dry-run --time
 
 ## Next Phases
 
-1. Build a controlled end-to-end staged dry-run scenario with one adapter enabled at a time.
+1. Review P6-01 staged full dry-run orchestration in branch `phase6/staged-full-dry-run`.
 2. Add mocked HTTP/client boundaries before any non-dry-run provider call.
 3. Add operator approval gates for any future patch application or real network request.
 4. Keep `scripts/verify.sh` and mock workflow as the baseline regression checks.

@@ -22,6 +22,12 @@ TASKS_ROOT = PROJECT_ROOT / ".ai" / "tasks"
 FINAL_FOR_CLAUDE_LIMIT = 4000
 MAX_REWORK_ROUNDS = 2
 DRY_RUN_REAL_ADAPTERS = {"gemini", "codex", "grok", "claude"}
+STAGED_REAL_ADAPTER_ROLES = {
+    "gemini": "context",
+    "codex": "implement",
+    "grok": "redteam",
+    "claude": "final",
+}
 
 STATES = {
     "CREATED",
@@ -517,6 +523,60 @@ def cmd_run_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def staged_real_selection(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    if not bool(getattr(args, "dry_run", False)):
+        raise AgentOfficeError("run-staged requires --dry-run.")
+    real = bool(getattr(args, "real", False))
+    adapter_name = getattr(args, "adapter", None)
+    if adapter_name == "mock":
+        adapter_name = None
+    if not real and adapter_name:
+        raise AgentOfficeError("run-staged accepts --adapter only with --real.")
+    if not real:
+        return None, None
+    if not adapter_name:
+        raise AgentOfficeError("run-staged --real requires one explicit --adapter. Enabling all real adapters is refused.")
+    role = STAGED_REAL_ADAPTER_ROLES.get(adapter_name)
+    if role is None:
+        raise AgentOfficeError(f"Unsupported run-staged real adapter: {adapter_name}")
+    return role, adapter_name
+
+
+def cmd_run_staged(args: argparse.Namespace) -> int:
+    validate_task_id(args.task_id)
+    real_role, real_adapter = staged_real_selection(args)
+    if args.reset:
+        reset_task(args.task_id)
+        print(f"reset task: {args.task_id}")
+
+    staged_steps: list[tuple[str, str | None, Callable[[argparse.Namespace], int]]] = [
+        ("new", None, cmd_new),
+        ("context", "context", cmd_context),
+        ("implement", "implement", cmd_implement),
+        ("redteam", "redteam", cmd_redteam),
+        ("summarize", None, cmd_summarize),
+        ("judge", "final", cmd_judge),
+        ("status", None, cmd_status),
+    ]
+    for name, role, fn in staged_steps:
+        if name == "new" and task_paths(args.task_id).root.exists():
+            print(f"skip new: task already exists ({args.task_id})")
+            continue
+        real_step = bool(real_adapter and role == real_role)
+        step_args = argparse.Namespace(
+            task_id=args.task_id,
+            mock=not real_step,
+            real=real_step,
+            adapter=real_adapter if real_step else None,
+            timeout=getattr(args, "timeout", None),
+            reset=False,
+            dry_run=real_step,
+        )
+        print(f"\n== {name} ==")
+        fn(step_args)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-office")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -548,6 +608,19 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "run-demo":
             step.add_argument("--reset", action="store_true", help="Delete an existing task with this ID before running.")
         step.set_defaults(func=func)
+
+    p = sub.add_parser("run-staged", help="Run the staged full workflow in dry-run orchestration mode.")
+    p.add_argument("task_id")
+    p.add_argument("--dry-run", action="store_true", help="Required. Keep orchestration in staged dry-run mode.")
+    p.add_argument("--reset", action="store_true", help="Delete an existing task with this ID before running.")
+    p.add_argument("--real", action="store_true", help="Enable one explicitly configured real adapter for its stage.")
+    p.add_argument(
+        "--adapter",
+        choices=["mock", "codex", "gemini", "grok", "claude"],
+        help="Single real adapter to exercise. All other stages remain mock.",
+    )
+    p.add_argument("--timeout", type=int, help="Adapter timeout in seconds for the selected real stage.")
+    p.set_defaults(func=cmd_run_staged)
 
     p = sub.add_parser("status", help="Print task state and artifact presence.")
     p.add_argument("task_id")

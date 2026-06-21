@@ -170,6 +170,36 @@ python -m agent_office run-demo DEMO-FINAL --mock --reset
 
 Generated task directories are runtime artifacts and are ignored by git.
 
+## Staged Full Dry Run
+
+P6-01 adds a command-level orchestration wrapper:
+
+```bash
+python -m agent_office run-staged <TASK_ID> --dry-run --reset
+```
+
+The wrapper runs the existing commands in this order:
+
+```text
+new
+context
+implement
+redteam
+summarize
+judge
+status
+```
+
+It does not add new task states and does not change allowed transitions. Default behavior is all mock. A single staged real adapter can be selected only with all three conditions:
+
+- `--dry-run`
+- `--real`
+- `--adapter gemini|codex|grok|claude`
+
+The matching `AGENTOFFICE_<ADAPTER>_MODE=real` and required provider environment variable must also be present. The command rejects `--real` without an adapter and rejects adapter selection without `--real`.
+
+`run-staged` never applies patches, never commits, never reads `.env`, and never prints environment variable values. Runtime files remain under ignored `.ai/**` locations.
+
 ## Doctor Protocol
 
 Doctor commands do not create or modify task directories:
