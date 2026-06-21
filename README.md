@@ -76,6 +76,10 @@ agent-office doctor --adapter grok
 agent-office doctor --adapter claude
 agent-office doctor --adapters
 agent-office doctor --json
+agent-office skills
+agent-office skills --json
+agent-office skills doctor
+agent-office skills doctor --json
 python -m agent_office.doctor --adapters
 ```
 
@@ -166,6 +170,37 @@ codex | mock | false | true | false | ok
 grok | mock | false | true | false | ok
 claude | mock | false | true | false | ok
 ```
+
+## Skills Registry
+
+AgentOffice v0.6 includes a skills registry for local Codex workflow skills. The registry is metadata only; it does not commit the local `.codex/skills` directories.
+
+Registry file:
+
+```text
+skills/registry.json
+```
+
+Commands:
+
+```bash
+python -m agent_office skills
+python -m agent_office skills --json
+python -m agent_office skills doctor
+python -m agent_office skills doctor --json
+```
+
+The registry records:
+
+- skill name
+- purpose
+- expected local path
+- expected scripts
+- whether the skill path exists
+- whether `SKILL.md` frontmatter validates
+- whether expected scripts exist
+
+`skills doctor` does not read `.env`, does not print secrets, does not execute skill scripts, and does not create tasks. Missing local skills are reported as `missing` without failing the AgentOffice workflow.
 
 ## Staged Real Adapter Mode Registry
 

@@ -12,6 +12,7 @@ from typing import Any
 
 from .adapters.modes import adapter_mode_rows, collect_adapter_mode_status, format_adapter_mode_table
 from .adapters.registry import adapter_catalog
+from .skills_registry import skills_as_dicts
 
 
 REQUIRED_GITIGNORE_PATTERNS = [
@@ -110,6 +111,9 @@ def collect_doctor(project_root: Path, adapter_filter: str | None = None) -> dic
         "adapter_modes": {
             "rows": mode_rows,
             "adapters": mode_status,
+        },
+        "skills": {
+            "registered": skills_as_dicts(project_root),
         },
         "safe": {
             "env_file_read": False,
@@ -219,6 +223,12 @@ def format_doctor(report: dict[str, Any]) -> str:
                     str(row["status"]),
                 ]
             )
+        )
+    lines.append("- skills registry:")
+    lines.append(f"  - registered: {len(report['skills']['registered'])}")
+    for skill in report["skills"]["registered"]:
+        lines.append(
+            f"  - {skill['name']}: exists={bool_text(skill['exists'])}; validated={bool_text(skill['validated'])}; status={skill['status']}"
         )
     lines.extend(
         [

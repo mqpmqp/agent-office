@@ -15,6 +15,7 @@ from .adapters.mock import MockAdapter
 from .adapters.modes import adapter_for_role, load_adapter_mode_config, validate_adapter_mode
 from .adapters.registry import get_adapter
 from .doctor import bool_text, collect_doctor, doctor_json, format_adapters, format_doctor
+from .skills_registry import format_skills_doctor, format_skills_table, skills_as_dicts
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -451,6 +452,20 @@ def cmd_adapters(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skills(args: argparse.Namespace) -> int:
+    if getattr(args, "skills_action", None) == "doctor":
+        if args.json:
+            print(json.dumps({"skills": skills_as_dicts(PROJECT_ROOT)}, indent=2, ensure_ascii=False))
+        else:
+            print(format_skills_doctor(PROJECT_ROOT))
+        return 0
+    if args.json:
+        print(json.dumps(skills_as_dicts(PROJECT_ROOT), indent=2, ensure_ascii=False))
+    else:
+        print(format_skills_table(PROJECT_ROOT))
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     report = collect_doctor(PROJECT_ROOT, adapter_filter=args.adapter)
     if args.adapters:
@@ -555,6 +570,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("adapters", help="List supported adapters without executing them.")
     p.set_defaults(func=cmd_adapters)
+
+    p = sub.add_parser("skills", help="List registered local skills and diagnose their availability.")
+    p.add_argument("skills_action", nargs="?", choices=["doctor"], help="Run skills registry diagnostics.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_skills)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")

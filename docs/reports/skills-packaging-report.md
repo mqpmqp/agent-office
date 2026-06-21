@@ -17,6 +17,11 @@
 - `docs/skills-packaging.md`
 - `docs/RELEASE_BETA_V0_5.md`
 - `docs/reports/skills-packaging-report.md`
+- `skills/registry.json`
+- `agent_office/skills_registry.py`
+- `agent_office/cli.py`
+- `agent_office/doctor.py`
+- `tests/test_skills_registry.py`
 
 # Local Skill Paths
 
@@ -44,6 +49,7 @@ python gitnexus-code-map/scripts/build_code_map.py
 - Skill structure validation: PASS for all six skills.
 - `claude-mem` memory script: PASS, masked secret-like value.
 - `gitnexus-code-map` code map script: PASS, generated Markdown code map.
+- AgentOffice skills registry unit tests: PASS.
 
 # Security Notes
 
@@ -61,6 +67,6 @@ python gitnexus-code-map/scripts/build_code_map.py
 
 # Next Steps
 
-- Add AgentOffice skill registry integration if project runtime needs to discover local skills.
+- Use `python3 -m agent_office skills doctor` to check local skill availability.
 - Add a managed export/import command for skills if multiple machines should share them.
 - Consider a v0.6 tag after regression verification and GitHub push.

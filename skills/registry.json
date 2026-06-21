@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "skills_root": "~/.codex/skills",
+  "skills": [
+    {
+      "name": "superpowers-engineering",
+      "purpose": "Senior engineering workflow for planning, TDD, implementation, verification, and self-review.",
+      "path": "~/.codex/skills/superpowers-engineering",
+      "expected_scripts": []
+    },
+    {
+      "name": "openai-business-apps",
+      "purpose": "Role-based business workflow router for data analysis, sales operations, research, content, documents, and presentations.",
+      "path": "~/.codex/skills/openai-business-apps",
+      "expected_scripts": []
+    },
+    {
+      "name": "claude-mem",
+      "purpose": "Sanitized local long-term project memory for handoffs and future sessions.",
+      "path": "~/.codex/skills/claude-mem",
+      "expected_scripts": [
+        "scripts/memory.py"
+      ]
+    },
+    {
+      "name": "agent-reach-research",
+      "purpose": "Multi-platform public research workflow with source discipline and explicit capability checks.",
+      "path": "~/.codex/skills/agent-reach-research",
+      "expected_scripts": []
+    },
+    {
+      "name": "gitnexus-code-map",
+      "purpose": "Repository code mapping for dependency discovery, module boundaries, and refactor planning.",
+      "path": "~/.codex/skills/gitnexus-code-map",
+      "expected_scripts": [
+        "scripts/build_code_map.py"
+      ]
+    },
+    {
+      "name": "humanizer-zh",
+      "purpose": "Chinese editing pass that removes AI-like phrasing while preserving facts, commands, and technical meaning.",
+      "path": "~/.codex/skills/humanizer-zh",
+      "expected_scripts": []
+    }
+  ]
+}

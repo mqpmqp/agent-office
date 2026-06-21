@@ -8,6 +8,14 @@ C:\Users\Administrator\.codex\skills\
 
 They are workflow wrappers, not vendored copies of third-party repositories. They do not include external project code, credentials, or platform tokens.
 
+The AgentOffice repository tracks only metadata in:
+
+```text
+skills/registry.json
+```
+
+It does not commit the local `.codex/skills` folders.
+
 ## Packaged Skills
 
 ### superpowers-engineering
@@ -103,9 +111,28 @@ The two bundled scripts were smoke-tested:
 - `claude-mem/scripts/memory.py`
 - `gitnexus-code-map/scripts/build_code_map.py`
 
+## AgentOffice Registry Commands
+
+List registered skills:
+
+```bash
+python3 -m agent_office skills
+python3 -m agent_office skills --json
+```
+
+Diagnose local availability:
+
+```bash
+python3 -m agent_office skills doctor
+python3 -m agent_office skills doctor --json
+```
+
+The command checks whether the configured local skill path exists, whether `SKILL.md` has valid frontmatter, and whether expected scripts exist. It does not execute skill scripts.
+
 ## Safety Notes
 
 - Skills do not store or print secrets.
 - Skills do not grant external platform access by themselves.
 - Platform access still depends on installed connectors, tools, browser state, or operator-provided exports.
 - AgentOffice runtime behavior is unchanged by these local skills.
+- Missing local skills are diagnostics only and do not break the mock workflow.
