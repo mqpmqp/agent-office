@@ -29,6 +29,13 @@ STAGED_REAL_ADAPTER_ROLES = {
     "claude": "final",
 }
 STAGED_RUNTIME_DIR_NAMES = ("context", "codex", "grok", "claude", "finalize")
+STAGED_ARTIFACT_DESTINATION_PARTS = (
+    (".ai", "context", "gemini-context.md"),
+    (".ai", "codex", "patch.diff"),
+    (".ai", "codex", "codex-report.md"),
+    (".ai", "grok", "redteam-report.md"),
+    (".ai", "finalize", "final-for-claude.md"),
+)
 
 STATES = {
     "CREATED",
@@ -115,13 +122,24 @@ def clear_staged_runtime_dirs() -> None:
         shutil.rmtree(path)
 
 
-def copy_task_artifact_if_exists(source: Path, destination: Path) -> bool:
-    if not source.exists() or not source.is_file():
+def allowed_staged_artifact_destinations() -> set[Path]:
+    return {(PROJECT_ROOT.joinpath(*parts)).resolve() for parts in STAGED_ARTIFACT_DESTINATION_PARTS}
+
+
+def copy_task_artifact_if_exists(paths: TaskPaths, source: Path, destination: Path) -> bool:
+    if source.is_symlink():
+        raise AgentOfficeError(f"Refusing to stage symlink task artifact: {source}")
+    if not source.exists():
         return False
-    project_root = PROJECT_ROOT.resolve()
+    if not source.is_file():
+        raise AgentOfficeError(f"Refusing to stage non-file task artifact: {source}")
+    resolved_source = source.resolve()
+    resolved_task_root = paths.root.resolve()
+    if resolved_source != resolved_task_root and resolved_task_root not in resolved_source.parents:
+        raise AgentOfficeError(f"Refusing to stage artifact outside current task root: {source}")
     resolved_destination = destination.resolve()
-    if project_root not in resolved_destination.parents:
-        raise AgentOfficeError(f"Refusing to stage artifact outside project root: {destination}")
+    if resolved_destination not in allowed_staged_artifact_destinations():
+        raise AgentOfficeError(f"Refusing to stage artifact to unsupported destination: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
     return True
@@ -135,13 +153,13 @@ def stage_current_task_artifacts(adapter_name: str, paths: TaskPaths) -> None:
     staged_final_packet = PROJECT_ROOT / ".ai" / "finalize" / "final-for-claude.md"
 
     if adapter_name in {"codex", "grok", "claude"}:
-        copy_task_artifact_if_exists(paths.gemini_context, staged_context)
+        copy_task_artifact_if_exists(paths, paths.gemini_context, staged_context)
     if adapter_name in {"grok", "claude"}:
-        copy_task_artifact_if_exists(paths.patch_diff, staged_codex_patch)
-        copy_task_artifact_if_exists(paths.codex_report, staged_codex_report)
+        copy_task_artifact_if_exists(paths, paths.patch_diff, staged_codex_patch)
+        copy_task_artifact_if_exists(paths, paths.codex_report, staged_codex_report)
     if adapter_name == "claude":
-        copy_task_artifact_if_exists(paths.grok_review, staged_grok_report)
-        copy_task_artifact_if_exists(paths.final_for_claude, staged_final_packet)
+        copy_task_artifact_if_exists(paths, paths.grok_review, staged_grok_report)
+        copy_task_artifact_if_exists(paths, paths.final_for_claude, staged_final_packet)
 
 
 def load_task(paths: TaskPaths) -> dict[str, Any]:

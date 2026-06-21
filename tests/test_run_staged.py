@@ -317,6 +317,60 @@ class RunStagedTests(unittest.TestCase):
         self.assertNotIn("STALE_GROK", inputs["grok_report"])
         self.assertIn("P6-CLAUDE-STAGING", staged_final)
 
+    def test_copy_task_artifact_rejects_symlink_source(self) -> None:
+        with self._project() as root:
+            paths = cli.task_paths("P6-SYMLINK")
+            paths.root.mkdir(parents=True)
+            target = root / "outside-source.md"
+            self._write(target, "outside")
+            try:
+                os.symlink(target, paths.gemini_context)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            with self.assertRaisesRegex(cli.AgentOfficeError, "symlink"):
+                cli.copy_task_artifact_if_exists(
+                    paths,
+                    paths.gemini_context,
+                    root / ".ai" / "context" / "gemini-context.md",
+                )
+
+    def test_copy_task_artifact_rejects_destination_outside_allowlist(self) -> None:
+        with self._project() as root:
+            paths = cli.task_paths("P6-BAD-DEST")
+            self._write(paths.gemini_context, "current")
+
+            with self.assertRaisesRegex(cli.AgentOfficeError, "unsupported destination"):
+                cli.copy_task_artifact_if_exists(
+                    paths,
+                    paths.gemini_context,
+                    root / ".ai" / "logs" / "gemini-context.md",
+                )
+
+    def test_copy_task_artifact_rejects_source_outside_current_task_root(self) -> None:
+        with self._project() as root:
+            paths = cli.task_paths("P6-BAD-SOURCE")
+            outside_source = root / ".ai" / "tasks" / "OTHER" / "gemini-context.md"
+            self._write(outside_source, "other task")
+
+            with self.assertRaisesRegex(cli.AgentOfficeError, "outside current task root"):
+                cli.copy_task_artifact_if_exists(
+                    paths,
+                    outside_source,
+                    root / ".ai" / "context" / "gemini-context.md",
+                )
+
+    def test_copy_task_artifact_allows_current_task_artifact_to_allowed_destination(self) -> None:
+        with self._project() as root:
+            paths = cli.task_paths("P6-GOOD-STAGE")
+            self._write(paths.gemini_context, "current task context")
+            destination = root / ".ai" / "context" / "gemini-context.md"
+
+            copied = cli.copy_task_artifact_if_exists(paths, paths.gemini_context, destination)
+
+            self.assertTrue(copied)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "current task context")
+
     def _project(self):
         return _PatchedProject()
 
