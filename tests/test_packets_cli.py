@@ -12,8 +12,25 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_office import cli
-from agent_office.packets import execution_packet_payload, packet_contract_validation_payload
+from agent_office.packets import (
+    CONTRACT_SCHEMA_VERSION,
+    PACKET_VERSION,
+    execution_packet_payload,
+    packet_contract_validation_payload,
+)
 from agent_office.planner import execution_blueprint_payload
+
+
+PACKET_ACTORS = ("codex", "reviewer", "judge")
+PACKET_FIXTURES_ROOT = Path(__file__).parent / "fixtures" / "packets"
+
+
+def packet_fixture_path(actor: str) -> Path:
+    return PACKET_FIXTURES_ROOT / f"p6_10_lowest_cost_{actor}.json"
+
+
+def load_packet_fixture(actor: str) -> dict[str, object]:
+    return json.loads(packet_fixture_path(actor).read_text(encoding="utf-8"))
 
 
 class EnvGuard(MutableMapping[str, str]):
@@ -42,6 +59,32 @@ def run_cli(argv: list[str]) -> tuple[int, str, str]:
 
 
 class PacketPayloadTests(unittest.TestCase):
+    maxDiff = None
+
+    def test_packet_payloads_match_golden_fixtures(self) -> None:
+        for actor in PACKET_ACTORS:
+            with self.subTest(actor=actor):
+                actual = execution_packet_payload("P6-10", "lowest-cost", actor)
+                expected = load_packet_fixture(actor)
+
+                self.assertEqual(
+                    actual,
+                    expected,
+                    f"packet fixture mismatch for {actor}: {packet_fixture_path(actor)}",
+                )
+                objective = actual["objective"]
+                profile = actual["profile"]
+                self.assertIsInstance(objective, dict)
+                self.assertIsInstance(profile, dict)
+                self.assertEqual(actual["packet_version"], PACKET_VERSION)
+                self.assertEqual(objective["id"], "P6-10")
+                self.assertEqual(profile["selected"], "lowest-cost")
+                self.assertEqual(actual["actor"], actor)
+                self.assertFalse(actual["execution_enabled"])
+                self.assertFalse(actual["env_required"])
+                self.assertFalse(actual["runtime_calls"])
+                self.assertFalse(actual["adapter_calls"])
+
     def test_codex_packet_contract(self) -> None:
         packet = execution_packet_payload("P6-10", "lowest-cost", "codex")
 
@@ -130,6 +173,8 @@ class PacketPayloadTests(unittest.TestCase):
 
 
 class PacketCliTests(unittest.TestCase):
+    maxDiff = None
+
     def test_packet_text_outputs_stable_summary(self) -> None:
         exit_code, stdout, stderr = run_cli(["packet", "--objective", "P6-10", "--profile", "lowest-cost", "--actor", "codex"])
 
@@ -144,12 +189,17 @@ class PacketCliTests(unittest.TestCase):
         self.assertIn("success_criteria:", stdout)
 
     def test_packet_json_outputs_all_actor_contracts(self) -> None:
-        for actor in ("codex", "reviewer", "judge"):
+        for actor in PACKET_ACTORS:
             with self.subTest(actor=actor):
                 exit_code, stdout, stderr = run_cli(["packet", "--objective", "P6-10", "--profile", "lowest-cost", "--actor", actor, "--json"])
 
                 self.assertEqual(exit_code, 0, stderr)
-                self.assertEqual(json.loads(stdout), execution_packet_payload("P6-10", "lowest-cost", actor))
+                actual = json.loads(stdout)
+                self.assertEqual(
+                    actual,
+                    load_packet_fixture(actor),
+                    f"packet fixture mismatch for {actor}: {packet_fixture_path(actor)}",
+                )
 
     def test_packet_unknown_objective_returns_error_without_traceback(self) -> None:
         exit_code, stdout, stderr = run_cli(["packet", "--objective", "UNKNOWN", "--profile", "lowest-cost", "--actor", "codex"])
@@ -190,7 +240,7 @@ class PacketCliTests(unittest.TestCase):
         self.assertIn("runtime_adapter_calls: false", stdout)
 
     def test_packet_validate_json_outputs_all_actor_contracts(self) -> None:
-        for actor in ("codex", "reviewer", "judge"):
+        for actor in PACKET_ACTORS:
             with self.subTest(actor=actor):
                 exit_code, stdout, stderr = run_cli([
                     "packet",
@@ -205,7 +255,33 @@ class PacketCliTests(unittest.TestCase):
                 ])
 
                 self.assertEqual(exit_code, 0, stderr)
-                self.assertEqual(json.loads(stdout), packet_contract_validation_payload("P6-10", "lowest-cost", actor))
+                actual = json.loads(stdout)
+                self.assertEqual(actual, packet_contract_validation_payload("P6-10", "lowest-cost", actor))
+                self.assertTrue(actual["valid"])
+                self.assertEqual(actual["schema_version"], CONTRACT_SCHEMA_VERSION)
+                self.assertEqual(actual["objective"], "P6-10")
+                self.assertEqual(actual["profile"], "lowest-cost")
+                self.assertEqual(actual["actor"], actor)
+                self.assertEqual(
+                    actual["packet_identity"],
+                    {
+                        "packet_version": PACKET_VERSION,
+                        "objective": "P6-10",
+                        "profile": "lowest-cost",
+                        "actor": actor,
+                    },
+                )
+                self.assertEqual({check["status"] for check in actual["checks"]}, {"pass"})
+                self.assertEqual(
+                    actual["external_behavior"],
+                    {
+                        "provider_calls": False,
+                        "runtime_adapter_calls": False,
+                        "env_reads": False,
+                        "env_var_printing": False,
+                        "artifact_writes": False,
+                    },
+                )
 
     def test_packet_validate_unknown_inputs_return_error_without_traceback(self) -> None:
         cases = [
