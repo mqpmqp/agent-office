@@ -110,6 +110,21 @@ artifact_writes: false
 It does not select a runtime profile, probe installed CLIs, check credentials, read `.env`, send provider requests, import provider SDKs, write files, or create `.ai/` runtime artifacts.
 
 
+## Profile Plan Contract Audit
+
+P6-08 adds a read-only contract audit for profile plan previews:
+
+```bash
+python3 -m agent_office profiles --name lowest-cost --plan --audit
+python3 -m agent_office profiles --name lowest-cost --plan --audit --json
+python3 -m agent_office profiles --plan --audit
+python3 -m agent_office profiles --plan --audit --json
+```
+
+With `--name`, the audit checks one selected static plan. Without `--name`, it checks every built-in profile in registry order. The JSON contract is machine-readable and includes `kind`, selected/default profile fields, required contract fields, forbidden runtime behavior markers, per-check statuses, and final `status`. Text output includes `provider_calls_count: 0`, per-check pass lines, and `provider/runtime/adapter execution: not triggered`.
+
+The contract audit only reads the in-memory static plan payload. It does not select a runtime profile, probe installed CLIs, check credentials, read `.env`, print environment values, execute adapters, send provider requests, write files, or create `.ai/` runtime artifacts.
+
 ## Profile Plan Doctor Audit
 
 P6-07 adds a static doctor audit for profile plan safety:
@@ -145,4 +160,4 @@ P6-03 keeps that boundary: profile visibility is reporting only. Runtime profile
 
 P6-04 keeps that boundary: profile plan preview is local static reporting only. Runtime profile selection remains future work.
 
-P6-06 keeps that boundary while allowing all-profile plan previews. P6-07 keeps that boundary while exposing profile plan audit through `doctor --profiles`.
+P6-06 keeps that boundary while allowing all-profile plan previews. P6-07 keeps that boundary while exposing profile plan audit through `doctor --profiles`. P6-08 keeps that boundary while adding `profiles --plan --audit` contract checks.

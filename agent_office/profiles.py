@@ -34,6 +34,22 @@ class ProfileError(ValueError):
     pass
 
 
+PROFILE_PLAN_CONTRACT_REQUIRED_FIELDS = (
+    "selected_profile",
+    "default_profile",
+    "is_default",
+    "execution_enabled",
+    "provider_calls",
+)
+PROFILE_PLAN_FORBIDDEN_RUNTIME_BEHAVIOR = (
+    "provider_execution",
+    "adapter_execution",
+    "runtime_execution",
+    "env_var_printing",
+    "dotenv_read",
+)
+
+
 @dataclass(frozen=True)
 class ProviderProfile:
     name: str
@@ -137,6 +153,54 @@ def profile_plans_payload() -> dict[str, object]:
         "artifact_writes": False,
         "plans": [profile_plan_payload(name) for name in profile_names],
     }
+
+
+def profile_plan_contract_audit_payload(name: str) -> dict[str, object]:
+    plan = profile_plan_payload(name)
+    checks = [
+        _audit_check("selected_profile_present", bool(plan.get("selected_profile"))),
+        _audit_check("default_profile_present", bool(plan.get("default_profile"))),
+        _audit_check("is_default_boolean", isinstance(plan.get("is_default"), bool)),
+        _audit_check("execution_disabled", plan.get("execution_enabled") is False),
+        _audit_check("provider_calls_empty", plan.get("provider_calls") in (False, [])),
+    ]
+    return {
+        "kind": "profile_plan_contract_audit",
+        "selected_profile": plan["selected_profile"],
+        "default_profile": plan["default_profile"],
+        "is_default": plan["is_default"],
+        "execution_enabled": plan["execution_enabled"],
+        "provider_calls": [],
+        "contract": {
+            "schema_version": 1,
+            "required_fields": list(PROFILE_PLAN_CONTRACT_REQUIRED_FIELDS),
+            "forbidden_runtime_behavior": list(PROFILE_PLAN_FORBIDDEN_RUNTIME_BEHAVIOR),
+        },
+        "checks": checks,
+        "status": _audit_status(checks),
+    }
+
+
+def profile_plans_contract_audit_payload() -> dict[str, object]:
+    payload = profile_plans_payload()
+    audits = [profile_plan_contract_audit_payload(str(name)) for name in payload["available_profiles"]]
+    return {
+        "kind": "profile_plan_contract_audits",
+        "default_profile": payload["default_profile"],
+        "available_profiles": payload["available_profiles"],
+        "execution_enabled": payload["execution_enabled"],
+        "provider_calls": [],
+        "audits": audits,
+        "status": _audit_status(audits),
+    }
+
+
+def _audit_check(name: str, passed: bool) -> dict[str, str]:
+    return {"name": name, "status": "pass" if passed else "fail"}
+
+
+def _audit_status(items: list[dict[str, object]]) -> str:
+    return "pass" if all(item.get("status") == "pass" for item in items) else "fail"
 
 
 def validate_profile(profile: ProviderProfile | Mapping[str, object]) -> None:

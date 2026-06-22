@@ -30,7 +30,9 @@ from .profiles import (
     get_profile,
     list_profiles,
     profile_plan_payload,
+    profile_plan_contract_audit_payload,
     profile_plans_payload,
+    profile_plans_contract_audit_payload,
 )
 
 
@@ -656,10 +658,62 @@ def format_profile_plans(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_profile_plan_contract_audit(payload: dict[str, object]) -> str:
+    provider_calls = payload["provider_calls"]
+    provider_calls_count = len(provider_calls) if isinstance(provider_calls, list) else int(bool(provider_calls))
+    lines = [
+        "Profile plan contract audit",
+        f"selected_profile: {payload['selected_profile']}",
+        f"default_profile: {payload['default_profile']}",
+        f"is_default: {str(payload['is_default']).lower()}",
+        f"execution_enabled: {str(payload['execution_enabled']).lower()}",
+        f"provider_calls_count: {provider_calls_count}",
+        f"contract_status: {payload['status']}",
+        "checks:",
+    ]
+    checks = payload["checks"]
+    if isinstance(checks, list):
+        for check in checks:
+            if isinstance(check, dict):
+                lines.append(f"  {check['name']}: {check['status']}")
+    lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
+def format_profile_plan_contract_audits(payload: dict[str, object]) -> str:
+    lines = [
+        "Profile plan contract audits",
+        f"default_profile: {payload['default_profile']}",
+        f"available_profiles: {', '.join(str(name) for name in payload['available_profiles'])}",
+        f"contract_status: {payload['status']}",
+        "",
+    ]
+    audits = payload["audits"]
+    if isinstance(audits, list):
+        for index, audit in enumerate(audits):
+            if not isinstance(audit, dict):
+                continue
+            if index:
+                lines.append("")
+            lines.append(format_profile_plan_contract_audit(audit))
+    return "\n".join(lines).rstrip()
+
+
 def cmd_profiles(args: argparse.Namespace) -> int:
-    if bool(getattr(args, "plan", False)):
+    plan = bool(getattr(args, "plan", False))
+    audit = bool(getattr(args, "audit", False))
+    if audit and not plan:
+        raise AgentOfficeError("profiles --audit requires --plan.")
+    if plan:
         try:
-            if args.name:
+            if audit:
+                if args.name:
+                    payload = profile_plan_contract_audit_payload(args.name)
+                    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_profile_plan_contract_audit(payload))
+                else:
+                    payload = profile_plans_contract_audit_payload()
+                    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_profile_plan_contract_audits(payload))
+            elif args.name:
                 payload = profile_plan_payload(args.name)
                 print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_profile_plan(payload))
             else:
@@ -825,6 +879,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", help="Show one provider profile by name.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.add_argument("--plan", action="store_true", help="Preview a selected profile's static execution plan.")
+    p.add_argument("--audit", action="store_true", help="Audit the static profile plan contract.")
     p.set_defaults(func=cmd_profiles)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")

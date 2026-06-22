@@ -161,6 +161,52 @@ class ProfilesCliTests(unittest.TestCase):
         )
         self.assert_no_forbidden_plan_keys(payload)
 
+    def test_profiles_plan_audit_text_shows_contract_status(self) -> None:
+        exit_code, stdout, stderr = run_cli(["profiles", "--name", "lowest-cost", "--plan", "--audit"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Profile plan contract audit", stdout)
+        self.assertIn("selected_profile: lowest-cost", stdout)
+        self.assertIn("default_profile: lowest-cost", stdout)
+        self.assertIn("is_default: true", stdout)
+        self.assertIn("execution_enabled: false", stdout)
+        self.assertIn("provider_calls_count: 0", stdout)
+        self.assertIn("contract_status: pass", stdout)
+        self.assertIn("selected_profile_present: pass", stdout)
+        self.assertIn("provider_calls_empty: pass", stdout)
+        self.assertIn("provider/runtime/adapter execution: not triggered", stdout)
+
+    def test_profiles_plan_audit_json_is_machine_readable_contract(self) -> None:
+        exit_code, stdout, stderr = run_cli(["profiles", "--name", "lowest-cost", "--plan", "--audit", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["kind"], "profile_plan_contract_audit")
+        self.assertEqual(payload["selected_profile"], "lowest-cost")
+        self.assertEqual(payload["default_profile"], "lowest-cost")
+        self.assertTrue(payload["is_default"])
+        self.assertFalse(payload["execution_enabled"])
+        self.assertEqual(payload["provider_calls"], [])
+        self.assertEqual(payload["contract"]["schema_version"], 1)
+        self.assertIn("dotenv_read", payload["contract"]["forbidden_runtime_behavior"])
+        self.assertEqual([check["status"] for check in payload["checks"]], ["pass", "pass", "pass", "pass", "pass"])
+        self.assertEqual(payload["status"], "pass")
+
+    def test_profiles_plan_audit_without_name_reports_all_profiles(self) -> None:
+        exit_code, stdout, stderr = run_cli(["profiles", "--plan", "--audit", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["kind"], "profile_plan_contract_audits")
+        self.assertEqual(payload["default_profile"], "lowest-cost")
+        self.assertEqual(payload["available_profiles"], ["lowest-cost", "mock-ci", "multi-vendor"])
+        self.assertEqual(payload["provider_calls"], [])
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(
+            [audit["selected_profile"] for audit in payload["audits"]],
+            ["lowest-cost", "mock-ci", "multi-vendor"],
+        )
+
     def test_profiles_plan_json_without_name_lists_all_static_previews(self) -> None:
         exit_code, stdout, stderr = run_cli(["profiles", "--plan", "--json"])
 
@@ -208,6 +254,19 @@ class ProfilesCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(json.loads(stdout.getvalue())["selected_profile"], "lowest-cost")
+
+    def test_profiles_plan_audit_does_not_read_environment(self) -> None:
+        stdout = io.StringIO()
+        args = argparse.Namespace(name="lowest-cost", json=True, plan=True, audit=True)
+        with patch.object(os, "environ", EnvGuard()), patch.object(cli.os, "environ", EnvGuard()):
+            with redirect_stdout(stdout):
+                exit_code = cli.cmd_profiles(args)
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["selected_profile"], "lowest-cost")
+        self.assertEqual(payload["provider_calls"], [])
+        self.assertEqual(payload["status"], "pass")
 
     def test_profiles_plan_all_does_not_read_environment(self) -> None:
         stdout = io.StringIO()
