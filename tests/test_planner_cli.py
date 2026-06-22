@@ -93,6 +93,28 @@ class PlannerPayloadTests(unittest.TestCase):
         self.assertEqual(payload["next_actor"], "human_or_codex")
         json.dumps(payload)
 
+    def test_p6_16_lowest_cost_blueprint_contract(self) -> None:
+        payload = execution_blueprint_payload("P6-16", "lowest-cost")
+
+        self.assertEqual(payload["kind"], "execution_blueprint")
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["objective_id"], "P6-16")
+        self.assertEqual(payload["objective_name"], "Static Multi-Objective Registry")
+        self.assertIn("static multi-objective registry", payload["objective_summary"])
+        self.assertEqual(payload["selected_profile"], "lowest-cost")
+        self.assertEqual(payload["default_profile"], "lowest-cost")
+        self.assertTrue(payload["is_default"])
+        self.assertFalse(payload["execution_enabled"])
+        self.assertFalse(payload["runtime_calls"])
+        self.assertFalse(payload["adapter_calls"])
+        self.assertFalse(payload["env_required"])
+        self.assertIn("do_not_call_providers", payload["safety_constraints"])
+        self.assertIn("python3 -m agent_office objectives --show P6-16", payload["validation_commands"])
+        self.assertIn("python3 -m agent_office plan --objective P6-16 --profile lowest-cost --json", payload["validation_commands"])
+        self.assertNotIn("python3 -m agent_office plan --objective P6-10 --profile lowest-cost --json", payload["validation_commands"])
+        self.assertEqual(payload["next_actor"], "human_or_codex")
+        json.dumps(payload)
+
     def test_unknown_objective_raises_clear_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown objective: UNKNOWN"):
             execution_blueprint_payload("UNKNOWN", "lowest-cost")
@@ -122,6 +144,23 @@ class PlannerCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0, stderr)
         self.assertEqual(json.loads(stdout), execution_blueprint_payload("P6-10", "lowest-cost"))
+
+    def test_plan_json_outputs_p6_16_blueprint(self) -> None:
+        exit_code, stdout, stderr = run_cli(["plan", "--objective", "P6-16", "--profile", "lowest-cost", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(json.loads(stdout), execution_blueprint_payload("P6-16", "lowest-cost"))
+
+    def test_plan_text_outputs_p6_16_blueprint(self) -> None:
+        exit_code, stdout, stderr = run_cli(["plan", "--objective", "P6-16", "--profile", "lowest-cost"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("AgentOffice execution blueprint", stdout)
+        self.assertIn("objective_id: P6-16", stdout)
+        self.assertIn("objective_name: Static Multi-Objective Registry", stdout)
+        self.assertIn("execution_enabled: false", stdout)
+        self.assertIn("runtime_calls: false", stdout)
+        self.assertIn("adapter_calls: false", stdout)
 
     def test_plan_unknown_objective_returns_error_without_traceback(self) -> None:
         exit_code, stdout, stderr = run_cli(["plan", "--objective", "UNKNOWN", "--profile", "lowest-cost"])

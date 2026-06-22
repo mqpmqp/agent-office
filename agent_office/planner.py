@@ -8,14 +8,6 @@ class PlanningError(ValueError):
     pass
 
 
-PLANNING_VALIDATION_COMMANDS = (
-    "python3 -m agent_office objectives --show P6-10",
-    "python3 -m agent_office objectives --show P6-10 --json",
-    "python3 -m agent_office objectives --validate",
-    "python3 -m agent_office objectives --validate --json",
-    "python3 -m agent_office plan --objective P6-10 --profile lowest-cost",
-    "python3 -m agent_office plan --objective P6-10 --profile lowest-cost --json",
-)
 SAFETY_CONSTRAINTS = (
     "local_static_objective_registry_only",
     "local_static_profile_plan_only",
@@ -61,15 +53,30 @@ def execution_blueprint_payload(objective_id: str, profile_name: str) -> dict[st
         "adapter_calls": False,
         "env_required": False,
         "safety_constraints": list(SAFETY_CONSTRAINTS),
-        "validation_commands": _merged_validation_commands(objective["validation"]),
+        "validation_commands": _merged_validation_commands(
+            objective["validation"],
+            str(objective["phase"]),
+            str(profile_plan["selected_profile"]),
+        ),
         "next_actor": "human_or_codex",
         "next_action_summary": "Review the static blueprint, then hand implementation to a human or Codex after validation gates pass.",
     }
 
 
-def _merged_validation_commands(objective_commands: object) -> list[str]:
+def _merged_validation_commands(objective_commands: object, objective_id: str, profile_name: str) -> list[str]:
     commands = [str(command) for command in objective_commands] if isinstance(objective_commands, list) else []
-    for command in PLANNING_VALIDATION_COMMANDS:
+    for command in _planning_validation_commands(objective_id, profile_name):
         if command not in commands:
             commands.append(command)
     return commands
+
+
+def _planning_validation_commands(objective_id: str, profile_name: str) -> tuple[str, ...]:
+    return (
+        f"python3 -m agent_office objectives --show {objective_id}",
+        f"python3 -m agent_office objectives --show {objective_id} --json",
+        "python3 -m agent_office objectives --validate",
+        "python3 -m agent_office objectives --validate --json",
+        f"python3 -m agent_office plan --objective {objective_id} --profile {profile_name}",
+        f"python3 -m agent_office plan --objective {objective_id} --profile {profile_name} --json",
+    )

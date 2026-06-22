@@ -51,7 +51,7 @@ def run_cli(argv: list[str]) -> tuple[int, str, str]:
 class ObjectiveSpecPayloadTests(unittest.TestCase):
     def test_default_phase_is_p6_10(self) -> None:
         self.assertEqual(default_objective_phase(), "P6-10")
-        self.assertEqual(list_objective_phases(), ("P6-10",))
+        self.assertEqual(list_objective_phases(), ("P6-10", "P6-16"))
 
     def test_p6_10_objective_spec_payload_contract(self) -> None:
         payload = objective_spec_payload("P6-10")
@@ -89,6 +89,44 @@ class ObjectiveSpecPayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown objective phase: P6-99"):
             objective_spec_payload("P6-99")
 
+    def test_p6_16_objective_spec_payload_contract(self) -> None:
+        payload = objective_spec_payload("P6-16")
+
+        self.assertEqual(list(payload), list(OBJECTIVE_SPEC_REQUIRED_FIELDS))
+        self.assertEqual(payload["kind"], "objective_spec")
+        self.assertEqual(payload["phase"], "P6-16")
+        self.assertEqual(payload["title"], "Static Multi-Objective Registry")
+        self.assertEqual(payload["status"], "ready")
+        self.assertIn("static multi-objective registry", payload["objective"])
+        self.assertEqual(payload["source_phases"], ["P6-10", "P6-11", "P6-12", "P6-13", "P6-14", "P6-15"])
+        self.assertEqual(
+            payload["cli_contract"],
+            [
+                "python3 -m agent_office objectives --phase P6-16",
+                "python3 -m agent_office objectives --phase P6-16 --json",
+                "python3 -m agent_office objectives --show P6-16",
+                "python3 -m agent_office objectives --show P6-16 --json",
+            ],
+        )
+        self.assertEqual(payload["json_contract"]["schema_version"], 1)
+        self.assertEqual(payload["json_contract"]["required_fields"], list(OBJECTIVE_SPEC_REQUIRED_FIELDS))
+        self.assertIn("python3 -m agent_office plan --objective P6-16 --profile lowest-cost --json", payload["validation"])
+        self.assertIn(
+            "python3 -m agent_office packet --objective P6-16 --profile lowest-cost --actor judge --validate --json",
+            payload["validation"],
+        )
+        self.assertEqual(
+            payload["safety"],
+            {
+                "env_file_read": False,
+                "env_vars_printed": False,
+                "provider_calls": False,
+                "runtime_execution": False,
+                "adapter_execution": False,
+                "artifact_writes": False,
+            },
+        )
+
     def test_objective_listing_payload_contract(self) -> None:
         payload = objective_listing_payload()
 
@@ -103,12 +141,19 @@ class ObjectiveSpecPayloadTests(unittest.TestCase):
                     "title": "Objective Spec CLI Contract",
                     "status": "ready",
                     "objective": objective_spec_payload("P6-10")["objective"],
-                }
+                },
+                {
+                    "phase": "P6-16",
+                    "title": "Static Multi-Objective Registry",
+                    "status": "ready",
+                    "objective": objective_spec_payload("P6-16")["objective"],
+                },
             ],
         )
 
     def test_objective_detail_payload_uses_objective_id(self) -> None:
         self.assertEqual(objective_detail_payload("P6-10"), objective_spec_payload("P6-10"))
+        self.assertEqual(objective_detail_payload("P6-16"), objective_spec_payload("P6-16"))
         with self.assertRaisesRegex(ValueError, "Unknown objective: UNKNOWN"):
             objective_detail_payload("UNKNOWN")
 
@@ -121,7 +166,7 @@ class ObjectiveSpecPayloadTests(unittest.TestCase):
         )
         self.assertEqual(payload["kind"], "objective_registry_validation")
         self.assertEqual(payload["default_phase"], "P6-10")
-        self.assertEqual(payload["objectives_checked"], 1)
+        self.assertEqual(payload["objectives_checked"], 2)
         self.assertEqual([check["name"] for check in payload["checks"]], [
             "objective_ids_unique",
             "required_fields_present",
@@ -154,6 +199,12 @@ class ObjectiveSpecCliTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual(payload, objective_spec_payload("P6-10"))
 
+    def test_objectives_json_outputs_p6_16_contract(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--phase", "P6-16", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(json.loads(stdout), objective_spec_payload("P6-16"))
+
     def test_objectives_show_text_outputs_single_objective(self) -> None:
         exit_code, stdout, stderr = run_cli(["objectives", "--show", "P6-10"])
 
@@ -163,11 +214,26 @@ class ObjectiveSpecCliTests(unittest.TestCase):
         self.assertIn("title: Objective Spec CLI Contract", stdout)
         self.assertIn("provider_calls: false", stdout)
 
+    def test_objectives_show_text_outputs_p6_16_objective(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--show", "P6-16"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("AgentOffice objective spec", stdout)
+        self.assertIn("phase: P6-16", stdout)
+        self.assertIn("title: Static Multi-Objective Registry", stdout)
+        self.assertIn("provider_calls: false", stdout)
+
     def test_objectives_show_json_is_machine_readable_contract(self) -> None:
         exit_code, stdout, stderr = run_cli(["objectives", "--show", "P6-10", "--json"])
 
         self.assertEqual(exit_code, 0, stderr)
         self.assertEqual(json.loads(stdout), objective_detail_payload("P6-10"))
+
+    def test_objectives_show_json_outputs_p6_16_contract(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--show", "P6-16", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(json.loads(stdout), objective_detail_payload("P6-16"))
 
     def test_objectives_defaults_to_p6_10(self) -> None:
         exit_code, stdout, stderr = run_cli(["objectives", "--json"])
@@ -212,7 +278,9 @@ class ObjectiveSpecCliTests(unittest.TestCase):
         self.assertIn("AgentOffice objectives", stdout)
         self.assertIn("default_phase: P6-10", stdout)
         self.assertIn("  - phase: P6-10", stdout)
+        self.assertIn("  - phase: P6-16", stdout)
         self.assertIn("title: Objective Spec CLI Contract", stdout)
+        self.assertIn("title: Static Multi-Objective Registry", stdout)
         self.assertIn("status: ready", stdout)
         self.assertIn("provider-safe objective spec surface", stdout)
 
