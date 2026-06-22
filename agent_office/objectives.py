@@ -95,6 +95,28 @@ P6_17_VALIDATION_COMMANDS = (
     "python3 -m agent_office packet --objective P6-17 --profile lowest-cost --actor reviewer --validate --json",
     "python3 -m agent_office packet --objective P6-17 --profile lowest-cost --actor judge --validate --json",
 )
+P6_18_VALIDATION_COMMANDS = (
+    "python3 -m compileall agent_office tests",
+    "python3 -m unittest",
+    "python3 -m unittest discover -s tests -p 'test_*.py'",
+    "python3 -m agent_office doctor --adapters",
+    "./scripts/verify.sh",
+    "./scripts/smoke-test.sh P6-PROFILES",
+    "python3 -m agent_office run-staged P6-PROFILES --dry-run --reset",
+    "python3 -m agent_office objectives --validate --json",
+    "python3 -m agent_office objectives --phase P6-18",
+    "python3 -m agent_office objectives --phase P6-18 --json",
+    "python3 -m agent_office objectives --show P6-18",
+    "python3 -m agent_office objectives --show P6-18 --json",
+    "python3 -m agent_office plan --objective P6-18 --profile lowest-cost",
+    "python3 -m agent_office plan --objective P6-18 --profile lowest-cost --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor codex --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor reviewer --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor judge --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor codex --validate --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor reviewer --validate --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor judge --validate --json",
+)
 
 
 def default_objective_phase() -> str:
@@ -102,7 +124,7 @@ def default_objective_phase() -> str:
 
 
 def list_objective_phases() -> tuple[str, ...]:
-    return ("P6-10", "P6-16", "P6-17")
+    return ("P6-10", "P6-16", "P6-17", "P6-18")
 
 
 def objective_registry_payloads() -> tuple[dict[str, object], ...]:
@@ -247,20 +269,47 @@ def objective_spec_payload(phase: str | None = None) -> dict[str, object]:
             ],
             validation=list(P6_16_VALIDATION_COMMANDS),
         )
+    if selected_phase == "P6-17":
+        return _objective_spec(
+            phase="P6-17",
+            title="Static Objective Registry Extension",
+            objective=(
+                "Add P6-17 as a static objective spec that proves the multi-objective registry can extend "
+                "objectives, plan, packet, packet validation, and packet golden fixtures without file discovery, "
+                "environment reads, provider calls, runtime calls, adapter calls, or artifact writes."
+            ),
+            source_phases=["P6-16"],
+            cli_contract=[
+                "python3 -m agent_office objectives --phase P6-17",
+                "python3 -m agent_office objectives --phase P6-17 --json",
+                "python3 -m agent_office objectives --show P6-17",
+                "python3 -m agent_office objectives --show P6-17 --json",
+            ],
+            tests=[
+                "tests/test_objectives_cli.py::ObjectiveSpecPayloadTests",
+                "tests/test_objectives_cli.py::ObjectiveSpecCliTests",
+                "tests/test_planner_cli.py::PlannerPayloadTests",
+                "tests/test_packets.py::PacketContractValidationTests",
+                "tests/test_packets_cli.py::PacketPayloadTests",
+                "tests/test_packets_cli.py::PacketCliTests",
+            ],
+            validation=list(P6_17_VALIDATION_COMMANDS),
+        )
     return _objective_spec(
-        phase="P6-17",
-        title="Static Objective Registry Extension",
+        phase="P6-18",
+        title="Static Objective Progression",
         objective=(
-            "Add P6-17 as a static objective spec that proves the multi-objective registry can extend "
-            "objectives, plan, packet, packet validation, and packet golden fixtures without file discovery, "
-            "environment reads, provider calls, runtime calls, adapter calls, or artifact writes."
+            "Add P6-18 static objective progression and objective-plan-packet coverage that proves the "
+            "local static path from objective to lowest-cost plan to codex/reviewer/judge packets and "
+            "golden fixtures without file discovery, environment reads, provider calls, runtime calls, "
+            "adapter calls, or artifact writes."
         ),
-        source_phases=["P6-16"],
+        source_phases=["P6-17"],
         cli_contract=[
-            "python3 -m agent_office objectives --phase P6-17",
-            "python3 -m agent_office objectives --phase P6-17 --json",
-            "python3 -m agent_office objectives --show P6-17",
-            "python3 -m agent_office objectives --show P6-17 --json",
+            "python3 -m agent_office objectives --phase P6-18",
+            "python3 -m agent_office objectives --phase P6-18 --json",
+            "python3 -m agent_office objectives --show P6-18",
+            "python3 -m agent_office objectives --show P6-18 --json",
         ],
         tests=[
             "tests/test_objectives_cli.py::ObjectiveSpecPayloadTests",
@@ -270,7 +319,7 @@ def objective_spec_payload(phase: str | None = None) -> dict[str, object]:
             "tests/test_packets_cli.py::PacketPayloadTests",
             "tests/test_packets_cli.py::PacketCliTests",
         ],
-        validation=list(P6_17_VALIDATION_COMMANDS),
+        validation=list(P6_18_VALIDATION_COMMANDS),
     )
 
 
