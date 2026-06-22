@@ -10,11 +10,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_office.profiles import (
+    ALLOWED_PROVIDERS,
     ProfileError,
     ProviderProfile,
     default_profile_name,
     get_profile,
     list_profiles,
+    profile_plan_payload,
+    provider_execution_category,
     validate_profile,
 )
 
@@ -60,6 +63,77 @@ class ProviderProfileTests(unittest.TestCase):
             dict(profile.roles),
             {"context": "gemini", "implement": "codex", "review": "grok", "judge": "claude"},
         )
+
+    def test_lowest_cost_plan_contract(self) -> None:
+        self.assertEqual(
+            profile_plan_payload("lowest-cost"),
+            {
+                "selected_profile": "lowest-cost",
+                "default_profile": "lowest-cost",
+                "is_default": True,
+                "execution_enabled": False,
+                "provider_calls": False,
+                "artifact_writes": False,
+                "roles": [
+                    {"role": "context", "provider": "chatgpt-manual", "execution_category": "manual"},
+                    {"role": "implement", "provider": "codex", "execution_category": "local-cli"},
+                    {"role": "review", "provider": "chatgpt-manual", "execution_category": "manual"},
+                    {"role": "judge", "provider": "chatgpt-manual", "execution_category": "manual"},
+                ],
+            },
+        )
+
+    def test_mock_ci_plan_uses_mock_execution_category_for_all_roles(self) -> None:
+        payload = profile_plan_payload("mock-ci")
+
+        self.assertEqual(payload["selected_profile"], "mock-ci")
+        self.assertEqual(payload["default_profile"], "lowest-cost")
+        self.assertFalse(payload["is_default"])
+        self.assertEqual(
+            payload["roles"],
+            [
+                {"role": "context", "provider": "mock", "execution_category": "mock"},
+                {"role": "implement", "provider": "mock", "execution_category": "mock"},
+                {"role": "review", "provider": "mock", "execution_category": "mock"},
+                {"role": "judge", "provider": "mock", "execution_category": "mock"},
+            ],
+        )
+
+    def test_multi_vendor_plan_preserves_role_order_and_execution_categories(self) -> None:
+        payload = profile_plan_payload("multi-vendor")
+
+        self.assertEqual([role["role"] for role in payload["roles"]], ["context", "implement", "review", "judge"])
+        self.assertEqual(
+            payload["roles"],
+            [
+                {"role": "context", "provider": "gemini", "execution_category": "optional-provider"},
+                {"role": "implement", "provider": "codex", "execution_category": "local-cli"},
+                {"role": "review", "provider": "grok", "execution_category": "optional-provider"},
+                {"role": "judge", "provider": "claude", "execution_category": "optional-provider"},
+            ],
+        )
+
+    def test_provider_execution_category_covers_allowed_providers(self) -> None:
+        expected = {
+            "chatgpt-manual": "manual",
+            "codex": "local-cli",
+            "mock": "mock",
+            "gemini": "optional-provider",
+            "grok": "optional-provider",
+            "claude": "optional-provider",
+            "openai-api": "future-api",
+        }
+
+        self.assertEqual(set(ALLOWED_PROVIDERS), set(expected))
+        self.assertEqual({provider: provider_execution_category(provider) for provider in ALLOWED_PROVIDERS}, expected)
+
+    def test_unknown_provider_execution_category_raises(self) -> None:
+        with self.assertRaisesRegex(ProfileError, "Unknown provider execution category"):
+            provider_execution_category("unknown")
+
+    def test_missing_profile_plan_raises(self) -> None:
+        with self.assertRaisesRegex(ProfileError, "Unknown provider profile"):
+            profile_plan_payload("missing")
 
     def test_unknown_profile_raises(self) -> None:
         with self.assertRaisesRegex(ProfileError, "Unknown provider profile"):
