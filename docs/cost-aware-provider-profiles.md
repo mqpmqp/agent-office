@@ -74,6 +74,39 @@ The command prints the default profile, available built-in profile names, and ro
 
 This visibility command does not select a runtime profile, execute adapters, probe credentials, read `.env`, or send provider requests.
 
+## Profile Plan Preview
+
+P6-04 adds a read-only plan preview for one selected profile:
+
+```bash
+python3 -m agent_office profiles --name lowest-cost --plan
+python3 -m agent_office profiles --name lowest-cost --plan --json
+```
+
+`--plan` requires `--name`. The preview shows the selected profile, the default profile, whether the selected profile is the default, the canonical role order, each role's provider, and a static local execution category.
+
+Execution categories are static metadata only:
+
+```text
+chatgpt-manual -> manual
+codex -> local-cli
+mock -> mock
+gemini -> optional-provider
+grok -> optional-provider
+claude -> optional-provider
+openai-api -> future-api
+```
+
+The plan preview always reports:
+
+```text
+execution_enabled: false
+provider_calls: false
+artifact_writes: false
+```
+
+It does not select a runtime profile, probe installed CLIs, check credentials, read `.env`, send provider requests, import provider SDKs, write files, or create `.ai/` runtime artifacts.
+
 ## OpenAI API Provider
 
 `openai-api` is an allowed provider name for future optional work. It is disabled by default and must not be used as the default provider in P6-02.
@@ -94,3 +127,5 @@ P6-02 does not change runtime behavior.
 The profile registry is local metadata only. It is intended to guide future planning and operator routing before any P6-03 implementation work begins.
 
 P6-03 keeps that boundary: profile visibility is reporting only. Runtime profile selection remains future work.
+
+P6-04 keeps that boundary: profile plan preview is local static reporting only. Runtime profile selection remains future work.

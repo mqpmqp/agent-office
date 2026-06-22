@@ -15,7 +15,14 @@ from .adapters.mock import MockAdapter
 from .adapters.modes import adapter_for_role, load_adapter_mode_config, validate_adapter_mode
 from .adapters.registry import get_adapter
 from .doctor import bool_text, collect_doctor, doctor_json, format_adapters, format_doctor
-from .profiles import ALLOWED_ROLES, ProfileError, default_profile_name, get_profile, list_profiles
+from .profiles import (
+    ALLOWED_ROLES,
+    ProfileError,
+    default_profile_name,
+    get_profile,
+    list_profiles,
+    profile_plan_payload,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -594,7 +601,33 @@ def format_profiles(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_profile_plan(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice profile plan preview",
+        f"profile: {payload['profile']}",
+        f"default_profile: {payload['default_profile']}",
+        f"is_default: {str(payload['is_default']).lower()}",
+        f"execution_enabled: {str(payload['execution_enabled']).lower()}",
+        f"provider_calls: {str(payload['provider_calls']).lower()}",
+        f"artifact_writes: {str(payload['artifact_writes']).lower()}",
+        "",
+        "roles:",
+    ]
+    for role in payload["roles"]:
+        if not isinstance(role, dict):
+            continue
+        lines.append(f"  {role['role']}: {role['provider']} ({role['execution']})")
+    return "\n".join(lines)
+
+
 def cmd_profiles(args: argparse.Namespace) -> int:
+    if bool(getattr(args, "plan", False)):
+        if not args.name:
+            raise AgentOfficeError("--plan requires --name.")
+        payload = profile_plan_payload(args.name)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_profile_plan(payload))
+        return 0
+
     payload = profile_payload(args.name)
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -750,6 +783,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("profiles", help="List provider profiles without executing providers.")
     p.add_argument("--name", help="Show one provider profile by name.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.add_argument("--plan", action="store_true", help="Preview a selected profile's static execution plan.")
     p.set_defaults(func=cmd_profiles)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
