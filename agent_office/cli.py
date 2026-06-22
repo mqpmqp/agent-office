@@ -15,6 +15,7 @@ from .adapters.mock import MockAdapter
 from .adapters.modes import adapter_for_role, load_adapter_mode_config, validate_adapter_mode
 from .adapters.registry import get_adapter
 from .doctor import bool_text, collect_doctor, doctor_json, format_adapters, format_doctor
+from .profiles import ALLOWED_ROLES, ProfileError, default_profile_name, get_profile, list_profiles
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -552,6 +553,56 @@ def format_adapter_rows(rows: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def profile_payload(name: str | None = None) -> dict[str, object]:
+    profile_names = list_profiles()
+    selected_names = (name,) if name else profile_names
+    try:
+        profiles = []
+        for profile_name in selected_names:
+            profile = get_profile(profile_name)
+            profiles.append(
+                {
+                    "name": profile.name,
+                    "roles": {role: profile.roles[role] for role in ALLOWED_ROLES},
+                }
+            )
+    except ProfileError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+    return {
+        "default_profile": default_profile_name(),
+        "available_profiles": list(profile_names),
+        "profiles": profiles,
+    }
+
+
+def format_profiles(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice provider profiles",
+        f"default: {payload['default_profile']}",
+        f"available: {', '.join(str(name) for name in payload['available_profiles'])}",
+    ]
+    for profile in payload["profiles"]:
+        if not isinstance(profile, dict):
+            continue
+        lines.append("")
+        lines.append(str(profile["name"]))
+        roles = profile["roles"]
+        if not isinstance(roles, dict):
+            continue
+        for role in ALLOWED_ROLES:
+            lines.append(f"  {role}: {roles[role]}")
+    return "\n".join(lines)
+
+
+def cmd_profiles(args: argparse.Namespace) -> int:
+    payload = profile_payload(args.name)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(format_profiles(payload))
+    return 0
+
+
 def cmd_run_demo(args: argparse.Namespace) -> int:
     demo_mode = resolve_mode(args, "run-demo")
     validate_task_id(args.task_id)
@@ -695,6 +746,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("adapters", help="List supported adapters without executing them.")
     p.set_defaults(func=cmd_adapters)
+
+    p = sub.add_parser("profiles", help="List provider profiles without executing providers.")
+    p.add_argument("--name", help="Show one provider profile by name.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_profiles)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")

@@ -60,6 +60,20 @@ judge: claude
 
 Gemini, Claude, and Grok are optional providers, not required subscriptions. They can be useful for experimentation, but AgentOffice must not require them for the default engineering path.
 
+## Profile Visibility CLI
+
+P6-03 adds a read-only CLI for inspecting the local profile registry:
+
+```bash
+python3 -m agent_office profiles
+python3 -m agent_office profiles --name lowest-cost
+python3 -m agent_office profiles --json
+```
+
+The command prints the default profile, available built-in profile names, and role-to-provider mappings. JSON output is intended for local validation and scripting.
+
+This visibility command does not select a runtime profile, execute adapters, probe credentials, read `.env`, or send provider requests.
+
 ## OpenAI API Provider
 
 `openai-api` is an allowed provider name for future optional work. It is disabled by default and must not be used as the default provider in P6-02.
@@ -78,3 +92,5 @@ P6-02 does not change runtime behavior.
 - No runtime files are created under `.ai/`.
 
 The profile registry is local metadata only. It is intended to guide future planning and operator routing before any P6-03 implementation work begins.
+
+P6-03 keeps that boundary: profile visibility is reporting only. Runtime profile selection remains future work.
