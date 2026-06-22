@@ -45,6 +45,26 @@ def list_objective_phases() -> tuple[str, ...]:
     return (default_objective_phase(),)
 
 
+def objective_listing_payload() -> dict[str, object]:
+    objectives = []
+    for phase in list_objective_phases():
+        spec = objective_spec_payload(phase)
+        objectives.append(
+            {
+                "phase": spec["phase"],
+                "title": spec["title"],
+                "status": spec["status"],
+                "objective": spec["objective"],
+            }
+        )
+    # ponytail: static local listing only; this intentionally does not discover files or read environment.
+    return {
+        "kind": "objective_listing",
+        "default_phase": default_objective_phase(),
+        "objectives": objectives,
+    }
+
+
 def objective_spec_payload(phase: str | None = None) -> dict[str, object]:
     selected_phase = phase or default_objective_phase()
     if selected_phase != default_objective_phase():

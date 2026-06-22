@@ -15,6 +15,7 @@ from agent_office import cli
 from agent_office.objectives import (
     OBJECTIVE_SPEC_REQUIRED_FIELDS,
     default_objective_phase,
+    objective_listing_payload,
     list_objective_phases,
     objective_spec_payload,
 )
@@ -86,6 +87,24 @@ class ObjectiveSpecPayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown objective phase: P6-99"):
             objective_spec_payload("P6-99")
 
+    def test_objective_listing_payload_contract(self) -> None:
+        payload = objective_listing_payload()
+
+        self.assertEqual(list(payload), ["kind", "default_phase", "objectives"])
+        self.assertEqual(payload["kind"], "objective_listing")
+        self.assertEqual(payload["default_phase"], "P6-10")
+        self.assertEqual(
+            payload["objectives"],
+            [
+                {
+                    "phase": "P6-10",
+                    "title": "Objective Spec CLI Contract",
+                    "status": "ready",
+                    "objective": objective_spec_payload("P6-10")["objective"],
+                }
+            ],
+        )
+
 
 class ObjectiveSpecCliTests(unittest.TestCase):
     def test_objectives_text_outputs_p6_10_contract(self) -> None:
@@ -119,6 +138,23 @@ class ObjectiveSpecCliTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("Unknown objective phase: P6-99", stderr)
 
+    def test_objectives_list_text_outputs_defined_objectives(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--list"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("AgentOffice objectives", stdout)
+        self.assertIn("default_phase: P6-10", stdout)
+        self.assertIn("  - phase: P6-10", stdout)
+        self.assertIn("title: Objective Spec CLI Contract", stdout)
+        self.assertIn("status: ready", stdout)
+        self.assertIn("provider-safe objective spec surface", stdout)
+
+    def test_objectives_list_json_is_machine_readable_contract(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--list", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(json.loads(stdout), objective_listing_payload())
+
     def test_objectives_does_not_read_environment(self) -> None:
         stdout = io.StringIO()
         args = argparse.Namespace(phase="P6-10", json=True)
@@ -128,6 +164,16 @@ class ObjectiveSpecCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(json.loads(stdout.getvalue())["phase"], "P6-10")
+
+    def test_objectives_list_does_not_read_environment(self) -> None:
+        stdout = io.StringIO()
+        args = argparse.Namespace(phase=None, json=True, list=True)
+        with patch.object(os, "environ", EnvGuard()), patch.object(cli.os, "environ", EnvGuard()):
+            with redirect_stdout(stdout):
+                exit_code = cli.cmd_objectives(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["kind"], "objective_listing")
 
     def test_objectives_does_not_write_files_or_create_ai(self) -> None:
         original_cwd = Path.cwd()
