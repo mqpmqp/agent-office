@@ -154,3 +154,141 @@ class RunBundleCliTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("Unknown provider profile: UNKNOWN", stderr)
         self.assertNotIn("Traceback", stderr)
+
+
+class RunBundleInspectValidateCliTests(unittest.TestCase):
+    maxDiff = None
+
+    def _write_bundle(self, project_root: Path) -> Path:
+        exit_code, _stdout, stderr = run_cli(
+            [
+                "run-bundle",
+                "--objective",
+                "P6-17",
+                "--profile",
+                "lowest-cost",
+                "--run-id",
+                "P7-STATIC-RUN",
+                "--out",
+                ".ai/runs/P7-STATIC-RUN",
+            ]
+        )
+        self.assertEqual(exit_code, 0, stderr)
+        return project_root / ".ai" / "runs" / "P7-STATIC-RUN"
+
+    def test_run_bundle_inspect_and_validate_text_and_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            self._write_bundle(Path(tmpdir))
+
+            inspect_code, inspect_stdout, inspect_stderr = run_cli(
+                ["run-bundle", "inspect", "--path", ".ai/runs/P7-STATIC-RUN"]
+            )
+            self.assertEqual(inspect_code, 0, inspect_stderr)
+            self.assertIn("AgentOffice static run bundle inspection", inspect_stdout)
+            self.assertIn("run_id: P7-STATIC-RUN", inspect_stdout)
+            self.assertIn("packets/judge.json: present", inspect_stdout)
+
+            inspect_json_code, inspect_json_stdout, inspect_json_stderr = run_cli(
+                ["run-bundle", "inspect", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            self.assertEqual(inspect_json_code, 0, inspect_json_stderr)
+            inspection = json.loads(inspect_json_stdout)
+            self.assertEqual(inspection["kind"], "static_run_bundle_inspection")
+            self.assertEqual(inspection["run_id"], "P7-STATIC-RUN")
+            self.assertEqual(inspection["objective"]["id"], "P6-17")
+            self.assertEqual(inspection["profile"]["selected"], "lowest-cost")
+            self.assertFalse(inspection["execution_enabled"])
+            self.assertEqual(inspection["provider_calls"], [])
+            self.assertEqual(inspection["actors"], list(PACKET_ACTORS))
+
+            validate_code, validate_stdout, validate_stderr = run_cli(
+                ["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN"]
+            )
+            self.assertEqual(validate_code, 0, validate_stderr)
+            self.assertIn("AgentOffice static run bundle validation", validate_stdout)
+            self.assertIn("valid: true", validate_stdout)
+            self.assertIn("execution_enabled_false: pass", validate_stdout)
+
+            validate_json_code, validate_json_stdout, validate_json_stderr = run_cli(
+                ["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            self.assertEqual(validate_json_code, 0, validate_json_stderr)
+            validation = json.loads(validate_json_stdout)
+            self.assertEqual(validation["kind"], "static_run_bundle_validation_result")
+            self.assertTrue(validation["valid"])
+            self.assertEqual(validation["run_id"], "P7-STATIC-RUN")
+            self.assertEqual(validation["objective"], "P6-17")
+            self.assertEqual(validation["profile"], "lowest-cost")
+            self.assertEqual(validation["external_behavior"]["artifact_writes"], False)
+
+    def test_run_bundle_validate_missing_run_json_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            (bundle / "run.json").unlink()
+            exit_code, stdout, stderr = run_cli(["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("Missing run bundle file: run.json", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_run_bundle_validate_bad_json_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            (bundle / "run.json").write_text("{bad json", encoding="utf-8")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("Invalid JSON in run bundle file: run.json", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_run_bundle_validate_missing_judge_packet_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            (bundle / "packets" / "judge.json").unlink()
+            exit_code, stdout, stderr = run_cli(["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("Missing run bundle file: packets/judge.json", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_run_bundle_validate_execution_enabled_true_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            run = json.loads((bundle / "run.json").read_text(encoding="utf-8"))
+            run["execution_enabled"] = True
+            (bundle / "run.json").write_text(json.dumps(run), encoding="utf-8")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("run.json execution_enabled must be false", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_run_bundle_validate_provider_calls_non_empty_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            run = json.loads((bundle / "run.json").read_text(encoding="utf-8"))
+            run["provider_calls"] = [{"role": "context", "call_enabled": True}]
+            (bundle / "run.json").write_text(json.dumps(run), encoding="utf-8")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("run.json provider_calls must be empty", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_run_bundle_validate_missing_actor_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            run = json.loads((bundle / "run.json").read_text(encoding="utf-8"))
+            run["actors"] = ["codex", "reviewer"]
+            (bundle / "run.json").write_text(json.dumps(run), encoding="utf-8")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("run.json actors must be codex, reviewer, judge", stderr)
+        self.assertNotIn("Traceback", stderr)

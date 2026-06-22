@@ -144,6 +144,203 @@ def format_run_bundle_preview(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def inspect_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, object]:
+    bundle = _load_existing_bundle(path, project_root)
+    run = _validate_loaded_bundle(bundle)
+    objective = _expect_dict(run, "objective")
+    profile = _expect_dict(run, "profile")
+    return {
+        "kind": "static_run_bundle_inspection",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "path": str(bundle["root"]),
+        "run_id": run["run_id"],
+        "objective": objective,
+        "profile": profile,
+        "execution_enabled": False,
+        "provider_calls": [],
+        "actors": list(ALLOWED_ACTORS),
+        "files": _bundle_file_statuses(bundle),
+        "external_behavior": _read_only_external_behavior(),
+    }
+
+
+def validate_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, object]:
+    bundle = _load_existing_bundle(path, project_root)
+    run = _validate_loaded_bundle(bundle)
+    objective = _expect_dict(run, "objective")
+    profile = _expect_dict(run, "profile")
+    checks: list[dict[str, str]] = []
+    _add_check(checks, "required_files_present", True)
+    _add_check(checks, "json_files_parse", True)
+    _add_check(checks, "run_id_present", isinstance(run.get("run_id"), str) and bool(run["run_id"]))
+    _add_check(checks, "objective_present", isinstance(objective.get("id"), str) and bool(objective["id"]))
+    _add_check(checks, "profile_present", isinstance(profile.get("selected"), str) and bool(profile["selected"]))
+    _add_check(checks, "execution_enabled_false", run.get("execution_enabled") is False)
+    _add_check(checks, "provider_calls_empty", run.get("provider_calls") == [])
+    _add_check(checks, "actors_present", tuple(run.get("actors", ())) == ALLOWED_ACTORS)
+    _add_check(checks, "packet_actors_present", _packet_actors_present(bundle))
+    _add_check(checks, "validation_file_present", isinstance(bundle["json"]["validation.json"], dict))
+    _add_check(checks, "readme_present", isinstance(bundle["text"]["README.md"], str) and bool(bundle["text"]["README.md"].strip()))
+    _add_check(checks, "no_external_behavior", True)
+    return {
+        "kind": "static_run_bundle_validation_result",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "path": str(bundle["root"]),
+        "run_id": run["run_id"],
+        "objective": objective["id"],
+        "profile": profile["selected"],
+        "valid": _checks_pass(checks),
+        "required_files": list(RUN_BUNDLE_REQUIRED_FILES),
+        "files": _bundle_file_statuses(bundle),
+        "checks": checks,
+        "external_behavior": _read_only_external_behavior(),
+    }
+
+
+def format_run_bundle_inspection(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice static run bundle inspection",
+        f"path: {payload['path']}",
+        f"run_id: {payload['run_id']}",
+        f"objective: {_format_identity(payload['objective'])}",
+        f"profile: {_format_identity(payload['profile'])}",
+        f"execution_enabled: {str(payload['execution_enabled']).lower()}",
+        "provider_calls: []",
+        f"actors: {', '.join(str(actor) for actor in payload['actors'])}",
+        "files:",
+    ]
+    for item in payload["files"]:
+        if isinstance(item, dict):
+            lines.append(f"  - {item['path']}: {item['status']}")
+    lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
+def format_run_bundle_validation(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice static run bundle validation",
+        f"path: {payload['path']}",
+        f"run_id: {payload['run_id']}",
+        f"objective: {payload['objective']}",
+        f"profile: {payload['profile']}",
+        f"valid: {str(payload['valid']).lower()}",
+        "checks:",
+    ]
+    for check in payload["checks"]:
+        if isinstance(check, dict):
+            lines.append(f"  - {check['name']}: {check['status']}")
+    lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
+def _load_existing_bundle(path: str | Path, project_root: Path) -> dict[str, object]:
+    root = _resolve_bundle_path(path, project_root)
+    if root.is_symlink() or not root.is_dir():
+        raise RunBundleError(f"Run bundle path is not a directory: {path}")
+    json_files: dict[str, object] = {}
+    text_files: dict[str, str] = {}
+    for relative in RUN_BUNDLE_REQUIRED_FILES:
+        target = _safe_existing_bundle_file(root, relative)
+        if not target.exists():
+            raise RunBundleError(f"Missing run bundle file: {relative}")
+        if target.is_symlink() or not target.is_file():
+            raise RunBundleError(f"Invalid run bundle file: {relative}")
+        if relative.endswith(".json"):
+            json_files[relative] = _read_json_file(target, relative)
+        else:
+            text_files[relative] = target.read_text(encoding="utf-8")
+    return {"root": root, "json": json_files, "text": text_files}
+
+
+def _validate_loaded_bundle(bundle: dict[str, object]) -> dict[str, object]:
+    json_files = _expect_dict(bundle, "json")
+    run = _expect_dict(json_files, "run.json")
+    if not isinstance(run.get("run_id"), str) or not run["run_id"]:
+        raise RunBundleError("run.json missing run_id")
+    _expect_dict(run, "objective")
+    _expect_dict(run, "profile")
+    if run.get("execution_enabled") is not False:
+        raise RunBundleError("run.json execution_enabled must be false")
+    if run.get("provider_calls") != []:
+        raise RunBundleError("run.json provider_calls must be empty")
+    if tuple(run.get("actors", ())) != ALLOWED_ACTORS:
+        raise RunBundleError("run.json actors must be codex, reviewer, judge")
+    for actor in ALLOWED_ACTORS:
+        packet = _expect_dict(json_files, f"packets/{actor}.json")
+        if packet.get("actor") != actor:
+            raise RunBundleError(f"Packet actor mismatch: packets/{actor}.json")
+        if packet.get("execution_enabled") is not False:
+            raise RunBundleError(f"Packet execution_enabled must be false: packets/{actor}.json")
+    return run
+
+
+def _resolve_bundle_path(path: str | Path, project_root: Path) -> Path:
+    base = project_root.resolve()
+    requested = Path(path)
+    if not requested.is_absolute():
+        requested = project_root / requested
+    if requested.is_symlink():
+        raise RunBundleError(f"Refusing symlink run bundle path: {path}")
+    resolved = requested.resolve(strict=False)
+    if resolved != base and base not in resolved.parents:
+        raise RunBundleError(f"Refusing to read run bundle outside project root: {path}")
+    return resolved
+
+
+def _safe_existing_bundle_file(root: Path, relative: str) -> Path:
+    target = root / relative
+    resolved = target.resolve(strict=False)
+    if root not in resolved.parents:
+        raise RunBundleError(f"Refusing unsafe bundle path: {relative}")
+    return target
+
+
+def _read_json_file(path: Path, relative: str) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RunBundleError(f"Invalid JSON in run bundle file: {relative}") from exc
+
+
+def _bundle_file_statuses(bundle: dict[str, object]) -> list[dict[str, object]]:
+    json_files = _expect_dict(bundle, "json")
+    text_files = _expect_dict(bundle, "text")
+    statuses: list[dict[str, object]] = []
+    for relative in RUN_BUNDLE_REQUIRED_FILES:
+        statuses.append(
+            {
+                "path": relative,
+                "status": "present",
+                "kind": "markdown" if relative.endswith(".md") else "json",
+                "parsed": relative in json_files or relative in text_files,
+            }
+        )
+    return statuses
+
+
+def _packet_actors_present(bundle: dict[str, object]) -> bool:
+    json_files = _expect_dict(bundle, "json")
+    return all(_expect_dict(json_files, f"packets/{actor}.json").get("actor") == actor for actor in ALLOWED_ACTORS)
+
+
+def _read_only_external_behavior() -> dict[str, bool]:
+    return {
+        "env_reads": False,
+        "env_var_printing": False,
+        "provider_calls": False,
+        "runtime_calls": False,
+        "adapter_calls": False,
+        "artifact_writes": False,
+        "real_runner": False,
+    }
+
+
+def _format_identity(value: object) -> str:
+    if isinstance(value, dict):
+        return str(value.get("id") or value.get("selected") or value)
+    return str(value)
+
+
 def _run_bundle_validation_payload(
     run: dict[str, object],
     plan: dict[str, object],
