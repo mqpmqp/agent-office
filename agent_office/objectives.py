@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 
 class ObjectiveSpecError(ValueError):
     pass
@@ -17,6 +19,21 @@ OBJECTIVE_SPEC_REQUIRED_FIELDS = (
     "tests",
     "validation",
     "safety",
+)
+OBJECTIVE_REGISTRY_VALIDATION_CHECKS = (
+    "objective_ids_unique",
+    "required_fields_present",
+    "output_order_stable",
+    "json_serializable",
+    "static_safe_registry",
+)
+OBJECTIVE_STATIC_SAFETY_FLAGS = (
+    "env_file_read",
+    "env_vars_printed",
+    "provider_calls",
+    "runtime_execution",
+    "adapter_execution",
+    "artifact_writes",
 )
 P6_10_VALIDATION_COMMANDS = (
     "python3 -m compileall agent_office tests",
@@ -45,6 +62,10 @@ def list_objective_phases() -> tuple[str, ...]:
     return (default_objective_phase(),)
 
 
+def objective_registry_payloads() -> tuple[dict[str, object], ...]:
+    return tuple(objective_spec_payload(phase) for phase in list_objective_phases())
+
+
 def objective_listing_payload() -> dict[str, object]:
     objectives = []
     for phase in list_objective_phases():
@@ -62,6 +83,73 @@ def objective_listing_payload() -> dict[str, object]:
         "kind": "objective_listing",
         "default_phase": default_objective_phase(),
         "objectives": objectives,
+    }
+
+
+def objective_detail_payload(objective_id: str) -> dict[str, object]:
+    if objective_id != default_objective_phase():
+        raise ObjectiveSpecError(f"Unknown objective: {objective_id}")
+    return objective_spec_payload(objective_id)
+
+
+def objective_registry_validation_payload() -> dict[str, object]:
+    specs = list(objective_registry_payloads())
+    checks: list[dict[str, str]] = []
+    errors: list[str] = []
+
+    def add_check(name: str, passed: bool, error: str) -> None:
+        checks.append({"name": name, "status": "pass" if passed else "fail"})
+        if not passed:
+            errors.append(error)
+
+    objective_ids = [str(spec.get("phase", "")) for spec in specs]
+    add_check(
+        "objective_ids_unique",
+        len(objective_ids) == len(set(objective_ids)),
+        "Objective ids must be unique.",
+    )
+
+    missing_fields = {
+        objective_id: [field for field in OBJECTIVE_SPEC_REQUIRED_FIELDS if field not in spec]
+        for objective_id, spec in zip(objective_ids, specs)
+    }
+    missing_fields = {objective_id: fields for objective_id, fields in missing_fields.items() if fields}
+    add_check(
+        "required_fields_present",
+        not missing_fields,
+        f"Objective specs are missing required fields: {missing_fields}",
+    )
+
+    expected_order = list(list_objective_phases())
+    add_check(
+        "output_order_stable",
+        objective_ids == expected_order,
+        "Objective registry output order must match list_objective_phases().",
+    )
+
+    json_serializable = True
+    json_error = "Objective registry must be JSON serializable."
+    try:
+        json.dumps({"listing": objective_listing_payload(), "objectives": specs}, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        json_serializable = False
+        json_error = f"Objective registry must be JSON serializable: {exc}"
+    add_check("json_serializable", json_serializable, json_error)
+
+    add_check(
+        "static_safe_registry",
+        all(_spec_declares_static_safety(spec) for spec in specs),
+        "Objective registry must declare no env/provider/runtime/adapter behavior.",
+    )
+
+    status = "pass" if all(check["status"] == "pass" for check in checks) else "fail"
+    return {
+        "kind": "objective_registry_validation",
+        "default_phase": default_objective_phase(),
+        "objectives_checked": len(specs),
+        "checks": checks,
+        "errors": errors,
+        "status": status,
     }
 
 
@@ -104,3 +192,10 @@ def objective_spec_payload(phase: str | None = None) -> dict[str, object]:
             "artifact_writes": False,
         },
     }
+
+
+def _spec_declares_static_safety(spec: dict[str, object]) -> bool:
+    safety = spec.get("safety")
+    if not isinstance(safety, dict):
+        return False
+    return all(safety.get(flag) is False for flag in OBJECTIVE_STATIC_SAFETY_FLAGS)
