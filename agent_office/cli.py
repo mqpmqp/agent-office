@@ -23,6 +23,10 @@ from .doctor import (
     format_doctor,
     format_profile_plan_audit,
 )
+from .objectives import (
+    ObjectiveSpecError,
+    objective_spec_payload,
+)
 from .profiles import (
     ALLOWED_ROLES,
     ProfileError,
@@ -699,6 +703,44 @@ def format_profile_plan_contract_audits(payload: dict[str, object]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def format_objective_spec(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice objective spec",
+        f"phase: {payload['phase']}",
+        f"title: {payload['title']}",
+        f"status: {payload['status']}",
+        f"objective: {payload['objective']}",
+        f"source_phases: {', '.join(str(phase) for phase in payload['source_phases'])}",
+        "cli_contract:",
+    ]
+    for command in payload["cli_contract"]:
+        lines.append(f"  - {command}")
+    contract = payload["json_contract"]
+    if isinstance(contract, dict):
+        lines.append("json_contract:")
+        lines.append(f"  schema_version: {contract['schema_version']}")
+        lines.append(f"  required_fields: {', '.join(str(field) for field in contract['required_fields'])}")
+    for section in ("tests", "validation"):
+        lines.append(f"{section}:")
+        for item in payload[section]:
+            lines.append(f"  - {item}")
+    safety = payload["safety"]
+    if isinstance(safety, dict):
+        lines.append("safety:")
+        for key in sorted(safety):
+            lines.append(f"  {key}: {str(safety[key]).lower()}")
+    return "\n".join(lines)
+
+
+def cmd_objectives(args: argparse.Namespace) -> int:
+    try:
+        payload = objective_spec_payload(args.phase)
+    except ObjectiveSpecError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_objective_spec(payload))
+    return 0
+
+
 def cmd_profiles(args: argparse.Namespace) -> int:
     plan = bool(getattr(args, "plan", False))
     audit = bool(getattr(args, "audit", False))
@@ -881,6 +923,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plan", action="store_true", help="Preview a selected profile's static execution plan.")
     p.add_argument("--audit", action="store_true", help="Audit the static profile plan contract.")
     p.set_defaults(func=cmd_profiles)
+
+    p = sub.add_parser("objectives", help="Print static phase objective specs without executing providers.")
+    p.add_argument("--phase", help="Show one objective phase. Default: P6-10.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_objectives)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
