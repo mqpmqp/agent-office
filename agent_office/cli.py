@@ -47,6 +47,12 @@ from .profiles import (
     profile_plans_payload,
     profile_plans_contract_audit_payload,
 )
+from .run_bundle import (
+    RunBundleError,
+    format_run_bundle_preview,
+    run_bundle_preview_payload,
+    write_run_bundle,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -963,6 +969,19 @@ def cmd_packet(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_bundle(args: argparse.Namespace) -> int:
+    try:
+        payload = run_bundle_preview_payload(args.objective, args.profile, args.run_id)
+        if args.out:
+            payload = dict(payload)
+            payload["write_result"] = write_run_bundle(payload, args.out, PROJECT_ROOT)
+            payload["artifact_writes"] = True
+    except RunBundleError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_preview(payload))
+    return 0
+
+
 def cmd_run_demo(args: argparse.Namespace) -> int:
     demo_mode = resolve_mode(args, "run-demo")
     validate_task_id(args.task_id)
@@ -1136,6 +1155,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.add_argument("--validate", action="store_true", help="Validate the static packet contract without executing it.")
     p.set_defaults(func=cmd_packet)
+
+    p = sub.add_parser("run-bundle", help="Build or write a static local run bundle without executing providers.")
+    p.add_argument("--objective", required=True, help="Objective id to bundle, for example P6-17.")
+    p.add_argument("--profile", required=True, help="Provider profile name to use for the static bundle.")
+    p.add_argument("--run-id", required=True, help="Static run bundle id.")
+    p.add_argument("--out", help="Explicit output directory for writing the local bundle.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_run_bundle)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
