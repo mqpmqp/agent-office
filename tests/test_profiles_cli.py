@@ -114,7 +114,7 @@ class ProfilesCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0, stderr)
         self.assertIn("AgentOffice profile plan preview", stdout)
-        self.assertIn("profile: lowest-cost", stdout)
+        self.assertIn("selected_profile: lowest-cost", stdout)
         self.assertIn("default_profile: lowest-cost", stdout)
         self.assertIn("is_default: true", stdout)
         self.assertIn("execution_enabled: false", stdout)
@@ -133,17 +133,17 @@ class ProfilesCliTests(unittest.TestCase):
         self.assertEqual(
             payload,
             {
-                "profile": "lowest-cost",
+                "selected_profile": "lowest-cost",
                 "default_profile": "lowest-cost",
                 "is_default": True,
                 "execution_enabled": False,
                 "provider_calls": False,
                 "artifact_writes": False,
                 "roles": [
-                    {"role": "context", "provider": "chatgpt-manual", "execution": "manual"},
-                    {"role": "implement", "provider": "codex", "execution": "local-cli"},
-                    {"role": "review", "provider": "chatgpt-manual", "execution": "manual"},
-                    {"role": "judge", "provider": "chatgpt-manual", "execution": "manual"},
+                    {"role": "context", "provider": "chatgpt-manual", "execution_category": "manual"},
+                    {"role": "implement", "provider": "codex", "execution_category": "local-cli"},
+                    {"role": "review", "provider": "chatgpt-manual", "execution_category": "manual"},
+                    {"role": "judge", "provider": "chatgpt-manual", "execution_category": "manual"},
                 ],
             },
         )
@@ -154,15 +154,15 @@ class ProfilesCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0, stderr)
         payload = json.loads(stdout)
-        self.assertEqual(payload["profile"], "multi-vendor")
+        self.assertEqual(payload["selected_profile"], "multi-vendor")
         self.assertFalse(payload["is_default"])
         self.assertEqual(
             payload["roles"],
             [
-                {"role": "context", "provider": "gemini", "execution": "optional-provider"},
-                {"role": "implement", "provider": "codex", "execution": "local-cli"},
-                {"role": "review", "provider": "grok", "execution": "optional-provider"},
-                {"role": "judge", "provider": "claude", "execution": "optional-provider"},
+                {"role": "context", "provider": "gemini", "execution_category": "optional-provider"},
+                {"role": "implement", "provider": "codex", "execution_category": "local-cli"},
+                {"role": "review", "provider": "grok", "execution_category": "optional-provider"},
+                {"role": "judge", "provider": "claude", "execution_category": "optional-provider"},
             ],
         )
 
@@ -174,7 +174,7 @@ class ProfilesCliTests(unittest.TestCase):
                 exit_code = cli.cmd_profiles(args)
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(json.loads(stdout.getvalue())["profile"], "lowest-cost")
+        self.assertEqual(json.loads(stdout.getvalue())["selected_profile"], "lowest-cost")
 
     def test_profiles_plan_does_not_write_files_or_create_ai(self) -> None:
         original_cwd = Path.cwd()
@@ -186,7 +186,7 @@ class ProfilesCliTests(unittest.TestCase):
                 os.chdir(original_cwd)
 
             self.assertEqual(exit_code, 0, stderr)
-            self.assertIn("profile: lowest-cost", stdout)
+            self.assertIn("selected_profile: lowest-cost", stdout)
             self.assertFalse((Path(tmp) / ".ai").exists())
 
     def test_profiles_command_does_not_read_environment(self) -> None:

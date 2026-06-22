@@ -604,7 +604,7 @@ def format_profiles(payload: dict[str, object]) -> str:
 def format_profile_plan(payload: dict[str, object]) -> str:
     lines = [
         "AgentOffice profile plan preview",
-        f"profile: {payload['profile']}",
+        f"selected_profile: {payload['selected_profile']}",
         f"default_profile: {payload['default_profile']}",
         f"is_default: {str(payload['is_default']).lower()}",
         f"execution_enabled: {str(payload['execution_enabled']).lower()}",
@@ -616,7 +616,7 @@ def format_profile_plan(payload: dict[str, object]) -> str:
     for role in payload["roles"]:
         if not isinstance(role, dict):
             continue
-        lines.append(f"  {role['role']}: {role['provider']} ({role['execution']})")
+        lines.append(f"  {role['role']}: {role['provider']} ({role['execution_category']})")
     return "\n".join(lines)
 
 

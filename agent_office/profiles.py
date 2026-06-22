@@ -107,7 +107,7 @@ def profile_plan_payload(name: str) -> dict[str, object]:
     profile = get_profile(name)
     default_name = default_profile_name()
     return {
-        "profile": profile.name,
+        "selected_profile": profile.name,
         "default_profile": default_name,
         "is_default": profile.name == default_name,
         "execution_enabled": False,
@@ -117,7 +117,7 @@ def profile_plan_payload(name: str) -> dict[str, object]:
             {
                 "role": role,
                 "provider": profile.roles[role],
-                "execution": provider_execution_category(profile.roles[role]),
+                "execution_category": provider_execution_category(profile.roles[role]),
             }
             for role in ALLOWED_ROLES
         ],

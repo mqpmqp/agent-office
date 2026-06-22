@@ -83,7 +83,7 @@ python3 -m agent_office profiles --name lowest-cost --plan
 python3 -m agent_office profiles --name lowest-cost --plan --json
 ```
 
-`--plan` requires `--name`. The preview shows the selected profile, the default profile, whether the selected profile is the default, the canonical role order, each role's provider, and a static local execution category.
+`--plan` requires `--name`. The preview shows the selected profile, the default profile, whether the selected profile is the default, the canonical role order, each role's provider, and a static local execution category. JSON output uses `selected_profile` for the chosen profile and `execution_category` for each role item.
 
 Execution categories are static metadata only:
 
