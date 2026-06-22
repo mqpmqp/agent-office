@@ -1,0 +1,185 @@
+{
+  "packet_version": 1,
+  "objective": {
+    "id": "P6-18",
+    "name": "Static Objective Progression",
+    "summary": "Add P6-18 static objective progression and objective-plan-packet coverage that proves the local static path from objective to lowest-cost plan to codex/reviewer/judge packets and golden fixtures without file discovery, environment reads, provider calls, runtime calls, adapter calls, or artifact writes."
+  },
+  "profile": {
+    "selected": "lowest-cost",
+    "default": "lowest-cost",
+    "is_default": true
+  },
+  "blueprint": {
+    "kind": "execution_blueprint",
+    "schema_version": 1,
+    "objective_id": "P6-18",
+    "objective_name": "Static Objective Progression",
+    "objective_summary": "Add P6-18 static objective progression and objective-plan-packet coverage that proves the local static path from objective to lowest-cost plan to codex/reviewer/judge packets and golden fixtures without file discovery, environment reads, provider calls, runtime calls, adapter calls, or artifact writes.",
+    "selected_profile": "lowest-cost",
+    "default_profile": "lowest-cost",
+    "is_default": true,
+    "execution_enabled": false,
+    "provider_calls": [
+      {
+        "role": "context",
+        "provider": "chatgpt-manual",
+        "execution_category": "manual",
+        "call_enabled": false
+      },
+      {
+        "role": "implement",
+        "provider": "codex",
+        "execution_category": "local-cli",
+        "call_enabled": false
+      },
+      {
+        "role": "review",
+        "provider": "chatgpt-manual",
+        "execution_category": "manual",
+        "call_enabled": false
+      },
+      {
+        "role": "judge",
+        "provider": "chatgpt-manual",
+        "execution_category": "manual",
+        "call_enabled": false
+      }
+    ],
+    "runtime_calls": false,
+    "adapter_calls": false,
+    "env_required": false,
+    "safety_constraints": [
+      "local_static_objective_registry_only",
+      "local_static_profile_plan_only",
+      "execution_disabled",
+      "do_not_read_dotenv",
+      "do_not_print_env_vars",
+      "do_not_call_providers",
+      "do_not_call_runtime",
+      "do_not_call_adapters"
+    ],
+    "validation_commands": [
+      "python3 -m compileall agent_office tests",
+      "python3 -m unittest",
+      "python3 -m unittest discover -s tests -p 'test_*.py'",
+      "python3 -m agent_office doctor --adapters",
+      "./scripts/verify.sh",
+      "./scripts/smoke-test.sh P6-PROFILES",
+      "python3 -m agent_office run-staged P6-PROFILES --dry-run --reset",
+      "python3 -m agent_office objectives --validate --json",
+      "python3 -m agent_office objectives --phase P6-18",
+      "python3 -m agent_office objectives --phase P6-18 --json",
+      "python3 -m agent_office objectives --show P6-18",
+      "python3 -m agent_office objectives --show P6-18 --json",
+      "python3 -m agent_office plan --objective P6-18 --profile lowest-cost",
+      "python3 -m agent_office plan --objective P6-18 --profile lowest-cost --json",
+      "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor codex --json",
+      "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor reviewer --json",
+      "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor judge --json",
+      "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor codex --validate --json",
+      "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor reviewer --validate --json",
+      "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor judge --validate --json",
+      "python3 -m agent_office objectives --validate"
+    ],
+    "next_actor": "human_or_codex",
+    "next_action_summary": "Review the static blueprint, then hand implementation to a human or Codex after validation gates pass."
+  },
+  "actor": "judge",
+  "instructions": [
+    "Decide pass/fail for the completed packet work.",
+    "Confirm validation evidence covers required commands and negative cases.",
+    "Confirm no boundary breach for env, provider, runtime, or adapter behavior.",
+    "Approve merge or reject with reasons."
+  ],
+  "safety_constraints": [
+    "local_static_objective_registry_only",
+    "local_static_profile_plan_only",
+    "execution_disabled",
+    "do_not_read_dotenv",
+    "do_not_print_env_vars",
+    "do_not_call_providers",
+    "do_not_call_runtime",
+    "do_not_call_adapters"
+  ],
+  "allowed_actions": [
+    "inspect validation evidence",
+    "inspect final diff and status",
+    "approve merge when all criteria pass",
+    "reject with reasons when criteria fail"
+  ],
+  "forbidden_actions": [
+    "implementation changes",
+    "silent fixes",
+    "bypassing failed validation",
+    "pushing without explicit pass"
+  ],
+  "validation_commands": [
+    "python3 -m compileall agent_office tests",
+    "python3 -m unittest",
+    "python3 -m unittest discover -s tests -p 'test_*.py'",
+    "python3 -m agent_office doctor --adapters",
+    "./scripts/verify.sh",
+    "./scripts/smoke-test.sh P6-PROFILES",
+    "python3 -m agent_office run-staged P6-PROFILES --dry-run --reset",
+    "python3 -m agent_office objectives --validate --json",
+    "python3 -m agent_office objectives --phase P6-18",
+    "python3 -m agent_office objectives --phase P6-18 --json",
+    "python3 -m agent_office objectives --show P6-18",
+    "python3 -m agent_office objectives --show P6-18 --json",
+    "python3 -m agent_office plan --objective P6-18 --profile lowest-cost",
+    "python3 -m agent_office plan --objective P6-18 --profile lowest-cost --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor codex --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor reviewer --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor judge --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor codex --validate --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor reviewer --validate --json",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor judge --validate --json",
+    "python3 -m agent_office objectives --validate",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor codex",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor reviewer",
+    "python3 -m agent_office packet --objective P6-18 --profile lowest-cost --actor judge"
+  ],
+  "success_criteria": [
+    "pass/fail decision is explicit",
+    "validation evidence is complete",
+    "no boundary breach is confirmed",
+    "merge approval or rejection reasons are clear"
+  ],
+  "failure_criteria": [
+    "validation evidence is missing or failed",
+    "boundary breach is unresolved",
+    "judge changes implementation instead of deciding"
+  ],
+  "handoff_summary": "Judge packet: decide pass/fail from validation evidence and approve merge or reject with reasons.",
+  "execution_enabled": false,
+  "env_required": false,
+  "provider_calls": [
+    {
+      "role": "context",
+      "provider": "chatgpt-manual",
+      "execution_category": "manual",
+      "call_enabled": false
+    },
+    {
+      "role": "implement",
+      "provider": "codex",
+      "execution_category": "local-cli",
+      "call_enabled": false
+    },
+    {
+      "role": "review",
+      "provider": "chatgpt-manual",
+      "execution_category": "manual",
+      "call_enabled": false
+    },
+    {
+      "role": "judge",
+      "provider": "chatgpt-manual",
+      "execution_category": "manual",
+      "call_enabled": false
+    }
+  ],
+  "runtime_calls": false,
+  "adapter_calls": false
+}
