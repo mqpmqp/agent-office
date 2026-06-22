@@ -221,6 +221,83 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
             self.assertEqual(validation["profile"], "lowest-cost")
             self.assertEqual(validation["external_behavior"]["artifact_writes"], False)
 
+    def test_run_bundle_list_and_status_text_and_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            self._write_bundle(Path(tmpdir))
+
+            list_code, list_stdout, list_stderr = run_cli(["run-bundle", "list", "--root", ".ai/runs"])
+            self.assertEqual(list_code, 0, list_stderr)
+            self.assertIn("AgentOffice static run bundle catalog", list_stdout)
+            self.assertIn("P7-STATIC-RUN: ready", list_stdout)
+
+            list_json_code, list_json_stdout, list_json_stderr = run_cli(
+                ["run-bundle", "list", "--root", ".ai/runs", "--json"]
+            )
+            self.assertEqual(list_json_code, 0, list_json_stderr)
+            catalog = json.loads(list_json_stdout)
+            self.assertEqual(catalog["kind"], "static_run_bundle_catalog")
+            self.assertEqual(catalog["count"], 1)
+            self.assertEqual(catalog["bundles"][0]["run_id"], "P7-STATIC-RUN")
+            self.assertEqual(catalog["bundles"][0]["status"], "ready")
+
+            status_code, status_stdout, status_stderr = run_cli(
+                ["run-bundle", "status", "--path", ".ai/runs/P7-STATIC-RUN"]
+            )
+            self.assertEqual(status_code, 0, status_stderr)
+            self.assertIn("AgentOffice static run bundle status", status_stdout)
+            self.assertIn("run_id: P7-STATIC-RUN", status_stdout)
+            self.assertIn("status: ready", status_stdout)
+
+            status_json_code, status_json_stdout, status_json_stderr = run_cli(
+                ["run-bundle", "status", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            self.assertEqual(status_json_code, 0, status_json_stderr)
+            status = json.loads(status_json_stdout)
+            self.assertEqual(status["kind"], "static_run_bundle_status")
+            self.assertEqual(status["run_id"], "P7-STATIC-RUN")
+            self.assertEqual(status["objective"]["id"], "P6-17")
+            self.assertEqual(status["profile"]["selected"], "lowest-cost")
+            self.assertEqual(status["actors"], list(PACKET_ACTORS))
+            self.assertFalse(status["execution_enabled"])
+            self.assertEqual(status["provider_calls"], [])
+            self.assertEqual(status["required_files"], list(RUN_BUNDLE_REQUIRED_FILES))
+            self.assertEqual(status["status"], "ready")
+            self.assertEqual(status["errors"], [])
+            self.assertFalse(status["external_behavior"]["artifact_writes"])
+
+    def test_run_bundle_list_missing_root_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            exit_code, stdout, stderr = run_cli(["run-bundle", "list", "--root", ".ai/runs", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("Run bundle root is not a directory", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_run_bundle_status_missing_path_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            exit_code, stdout, stderr = run_cli(["run-bundle", "status", "--path", ".ai/runs/MISSING", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        status = json.loads(stdout)
+        self.assertEqual(status["status"], "invalid")
+        self.assertIn("Run bundle path is not a directory", status["errors"][0])
+        self.assertNotIn("Traceback", stdout)
+
+    def test_run_bundle_status_bad_bundle_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            (bundle / "packets" / "judge.json").unlink()
+            exit_code, stdout, stderr = run_cli(["run-bundle", "status", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        status = json.loads(stdout)
+        self.assertEqual(status["status"], "invalid")
+        self.assertIn("Missing run bundle file: packets/judge.json", status["errors"])
+        self.assertNotIn("Traceback", stdout)
+
     def test_run_bundle_validate_missing_run_json_exits_two_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
             bundle = self._write_bundle(Path(tmpdir))

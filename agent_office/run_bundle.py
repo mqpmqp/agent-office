@@ -197,6 +197,75 @@ def validate_run_bundle_payload(path: str | Path, project_root: Path) -> dict[st
     }
 
 
+def list_run_bundles_payload(root: str | Path, project_root: Path) -> dict[str, object]:
+    catalog_root = _resolve_bundle_path(root, project_root)
+    if catalog_root.is_symlink() or not catalog_root.is_dir():
+        raise RunBundleError(f"Run bundle root is not a directory: {root}")
+    bundles = [status_run_bundle_payload(child, project_root) for child in sorted(catalog_root.iterdir()) if child.is_dir()]
+    return {
+        "kind": "static_run_bundle_catalog",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "root": str(catalog_root),
+        "count": len(bundles),
+        "bundles": bundles,
+        "external_behavior": _read_only_external_behavior(),
+    }
+
+
+def status_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, object]:
+    root = _resolve_bundle_path(path, project_root)
+    errors: list[str] = []
+    run: dict[str, object] = {}
+    files: list[dict[str, object]] = []
+    try:
+        bundle = _load_existing_bundle(path, project_root)
+        try:
+            run = _validate_loaded_bundle(bundle)
+        except RunBundleError as exc:
+            errors.append(str(exc))
+            json_files = _expect_dict(bundle, "json")
+            maybe_run = json_files.get("run.json")
+            if isinstance(maybe_run, dict):
+                run = maybe_run
+        files = _bundle_file_statuses(bundle)
+    except RunBundleError as exc:
+        errors.append(str(exc))
+    objective = run.get("objective") if isinstance(run.get("objective"), dict) else None
+    profile = run.get("profile") if isinstance(run.get("profile"), dict) else None
+    provider_calls = run.get("provider_calls") if isinstance(run.get("provider_calls"), list) else []
+    actors = run.get("actors") if isinstance(run.get("actors"), list) else []
+    return {
+        "kind": "static_run_bundle_status",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "path": str(root),
+        "run_id": run.get("run_id") if isinstance(run.get("run_id"), str) else None,
+        "objective": objective,
+        "profile": profile,
+        "actors": actors,
+        "execution_enabled": run.get("execution_enabled"),
+        "provider_calls": provider_calls,
+        "required_files": list(RUN_BUNDLE_REQUIRED_FILES),
+        "files": files,
+        "status": "invalid" if errors else "ready",
+        "errors": errors,
+        "external_behavior": _read_only_external_behavior(),
+    }
+
+
+def format_run_bundle_catalog(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice static run bundle catalog",
+        f"root: {payload['root']}",
+        f"count: {payload['count']}",
+        "bundles:",
+    ]
+    for item in payload["bundles"]:
+        if isinstance(item, dict):
+            lines.append(f"  - {Path(str(item['path'])).name}: {item['status']}")
+    lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
 def format_run_bundle_inspection(payload: dict[str, object]) -> str:
     lines = [
         "AgentOffice static run bundle inspection",
@@ -229,6 +298,32 @@ def format_run_bundle_validation(payload: dict[str, object]) -> str:
     for check in payload["checks"]:
         if isinstance(check, dict):
             lines.append(f"  - {check['name']}: {check['status']}")
+    lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
+def format_run_bundle_status(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice static run bundle status",
+        f"path: {payload['path']}",
+        f"run_id: {payload['run_id']}",
+        f"objective: {_format_identity(payload['objective'])}",
+        f"profile: {_format_identity(payload['profile'])}",
+        f"actors: {', '.join(str(actor) for actor in payload['actors'])}",
+        f"execution_enabled: {str(payload['execution_enabled']).lower()}",
+        f"provider_calls: {payload['provider_calls']}",
+        "required_files:",
+    ]
+    for relative in payload["required_files"]:
+        lines.append(f"  - {relative}")
+    lines.append(f"status: {payload['status']}")
+    errors = payload.get("errors")
+    if isinstance(errors, list) and errors:
+        lines.append("errors:")
+        for error in errors:
+            lines.append(f"  - {error}")
+    else:
+        lines.append("errors: []")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
