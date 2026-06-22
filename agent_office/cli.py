@@ -31,7 +31,11 @@ from .objectives import (
     objective_spec_payload,
 )
 from .planner import PlanningError, execution_blueprint_payload
-from .packets import PacketError, execution_packet_payload
+from .packets import (
+    PacketError,
+    execution_packet_payload,
+    packet_contract_validation_payload,
+)
 from .profiles import (
     ALLOWED_ROLES,
     ProfileError,
@@ -857,6 +861,31 @@ def format_execution_packet(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_packet_contract_validation(payload: dict[str, object]) -> str:
+    status = "PASS" if payload["valid"] else "FAIL"
+    lines = [
+        "Packet contract validation",
+        f"status: {status}",
+        f"schema_version: {payload['schema_version']}",
+        f"objective: {payload['objective']}",
+        f"profile: {payload['profile']}",
+        f"actor: {payload['actor']}",
+        "checks:",
+    ]
+    checks = payload["checks"]
+    if isinstance(checks, list):
+        for check in checks:
+            if isinstance(check, dict):
+                lines.append(f"  - {check['name']}: {check['status']}")
+    lines.append("external_behavior:")
+    external_behavior = payload["external_behavior"]
+    if isinstance(external_behavior, dict):
+        for key in sorted(external_behavior):
+            lines.append(f"  {key}: {str(external_behavior[key]).lower()}")
+    lines.append("no real execution performed: true")
+    return "\n".join(lines)
+
+
 def cmd_objectives(args: argparse.Namespace) -> int:
     if bool(getattr(args, "list", False)):
         payload = objective_listing_payload()
@@ -919,10 +948,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_packet(args: argparse.Namespace) -> int:
+    validate = bool(getattr(args, "validate", False))
     try:
-        payload = execution_packet_payload(args.objective, args.profile, args.actor)
+        if validate:
+            payload = packet_contract_validation_payload(args.objective, args.profile, args.actor)
+        else:
+            payload = execution_packet_payload(args.objective, args.profile, args.actor)
     except PacketError as exc:
         raise AgentOfficeError(str(exc)) from exc
+    if validate:
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_packet_contract_validation(payload))
+        return 0 if payload["valid"] else 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_execution_packet(payload))
     return 0
 
@@ -1098,6 +1134,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", required=True, help="Provider profile name to use for the static packet.")
     p.add_argument("--actor", required=True, help="Packet actor: codex, reviewer, or judge.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.add_argument("--validate", action="store_true", help="Validate the static packet contract without executing it.")
     p.set_defaults(func=cmd_packet)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")

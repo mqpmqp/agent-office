@@ -17,6 +17,27 @@ PACKET_VALIDATION_COMMANDS = (
     "python3 -m agent_office packet --objective P6-10 --profile lowest-cost --actor judge",
     "python3 -m agent_office packet --objective P6-10 --profile lowest-cost --actor judge --json",
 )
+CONTRACT_SCHEMA_VERSION = "packet-contract-v1"
+PACKET_REQUIRED_SECTIONS = (
+    "packet_version",
+    "objective",
+    "profile",
+    "blueprint",
+    "actor",
+    "instructions",
+    "safety_constraints",
+    "allowed_actions",
+    "forbidden_actions",
+    "validation_commands",
+    "success_criteria",
+    "failure_criteria",
+    "handoff_summary",
+    "execution_enabled",
+    "env_required",
+    "provider_calls",
+    "runtime_calls",
+    "adapter_calls",
+)
 
 
 def execution_packet_payload(objective_id: str, profile_name: str, actor: str) -> dict[str, object]:
@@ -56,6 +77,101 @@ def execution_packet_payload(objective_id: str, profile_name: str, actor: str) -
         "runtime_calls": False,
         "adapter_calls": False,
     }
+
+
+def packet_contract_validation_payload(objective_id: str, profile_name: str, actor: str) -> dict[str, object]:
+    packet = execution_packet_payload(objective_id, profile_name, actor)
+    objective = packet.get("objective")
+    profile = packet.get("profile")
+    checks: list[dict[str, str]] = []
+    external_behavior = {
+        "provider_calls": False,
+        "runtime_adapter_calls": False,
+        "env_reads": False,
+        "env_var_printing": False,
+        "artifact_writes": False,
+    }
+
+    _add_check(checks, "known_objective", isinstance(objective, dict) and objective.get("id") == objective_id)
+    _add_check(checks, "known_profile", isinstance(profile, dict) and profile.get("selected") == profile_name)
+    _add_check(checks, "known_actor", actor in ALLOWED_ACTORS and packet.get("actor") == actor)
+    _add_check(checks, "packet_schema_version_present", packet.get("packet_version") == PACKET_VERSION)
+    _add_check(checks, "identity_fields_match_requested_inputs", _packet_identity(packet) == _requested_identity(objective_id, profile_name, actor))
+    _add_check(checks, "deterministic_identity_fields_present", _packet_identity(packet) == _requested_identity(objective_id, profile_name, actor))
+    _add_check(checks, "required_packet_sections_present", all(section in packet for section in PACKET_REQUIRED_SECTIONS))
+    _add_check(checks, "execution_enabled_false", packet.get("execution_enabled") is False)
+    _add_check(checks, "provider_calls_false", _provider_calls_disabled(packet.get("provider_calls")))
+    _add_check(checks, "runtime_adapter_calls_false", packet.get("runtime_calls") is False and packet.get("adapter_calls") is False)
+    _add_check(checks, "env_reads_false", packet.get("env_required") is False and _has_text(packet, "do_not_read_dotenv"))
+    _add_check(checks, "env_var_printing_false", _has_text(packet, "do_not_print_env_vars") or _has_text(packet, "print env vars"))
+    # ponytail: validation allows future artifact write descriptions, but not execution flags.
+    _add_check(checks, "artifact_writes_false", _artifact_writes_disabled(packet.get("artifact_writes", False)))
+    _add_check(checks, "no_real_execution_performed", packet.get("execution_enabled") is False and not any(external_behavior.values()))
+
+    return {
+        "valid": _checks_pass(checks),
+        "schema_version": CONTRACT_SCHEMA_VERSION,
+        "objective": objective_id,
+        "profile": profile_name,
+        "actor": actor,
+        "packet_identity": _packet_identity(packet),
+        "checks": checks,
+        "external_behavior": external_behavior,
+    }
+
+
+def _add_check(checks: list[dict[str, str]], name: str, passed: bool) -> None:
+    checks.append({"name": name, "status": "pass" if passed else "fail"})
+
+
+def _checks_pass(checks: list[dict[str, str]]) -> bool:
+    return all(check["status"] == "pass" for check in checks)
+
+
+def _requested_identity(objective_id: str, profile_name: str, actor: str) -> dict[str, object]:
+    return {
+        "packet_version": PACKET_VERSION,
+        "objective": objective_id,
+        "profile": profile_name,
+        "actor": actor,
+    }
+
+
+def _packet_identity(packet: dict[str, object]) -> dict[str, object]:
+    objective = packet.get("objective")
+    profile = packet.get("profile")
+    return {
+        "packet_version": packet.get("packet_version"),
+        "objective": objective.get("id") if isinstance(objective, dict) else None,
+        "profile": profile.get("selected") if isinstance(profile, dict) else None,
+        "actor": packet.get("actor"),
+    }
+
+
+def _artifact_writes_disabled(value: object) -> bool:
+    if value is False:
+        return True
+    if isinstance(value, dict):
+        return value.get("description_only") is True and value.get("executed") is False
+    return False
+
+
+def _provider_calls_disabled(value: object) -> bool:
+    if value is False:
+        return True
+    if not isinstance(value, list):
+        return False
+    return all(isinstance(item, dict) and item.get("call_enabled") is False for item in value)
+
+
+def _has_text(value: object, text: str) -> bool:
+    if isinstance(value, str):
+        return text in value
+    if isinstance(value, dict):
+        return any(_has_text(child, text) for child in value.values())
+    if isinstance(value, list):
+        return any(_has_text(child, text) for child in value)
+    return False
 
 
 def _actor_behavior(actor: str) -> dict[str, list[str] | str]:
