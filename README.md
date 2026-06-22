@@ -77,6 +77,10 @@ agent-office doctor --adapter gemini
 agent-office doctor --adapter grok
 agent-office doctor --adapter claude
 agent-office doctor --adapters
+agent-office profiles --name lowest-cost --plan --audit
+agent-office profiles --name lowest-cost --plan --audit --json
+agent-office profiles --plan --audit
+agent-office profiles --plan --audit --json
 agent-office doctor --profiles
 agent-office doctor --json
 python -m agent_office.doctor --adapters
@@ -215,6 +219,17 @@ The static profile plan audit shows every built-in profile without selecting a r
 profile | default | execution_enabled | provider_calls | artifact_writes | roles | status
 lowest-cost | true | false | false | false | context:chatgpt-manual(manual), implement:codex(local-cli), review:chatgpt-manual(manual), judge:chatgpt-manual(manual) | ok
 ```
+
+The profile plan contract audit checks the local plan payload against the P6-08 static contract:
+
+```bash
+python -m agent_office profiles --name lowest-cost --plan --audit
+python -m agent_office profiles --name lowest-cost --plan --audit --json
+python -m agent_office profiles --plan --audit
+python -m agent_office profiles --plan --audit --json
+```
+
+It reports required contract fields, pass/fail checks, `provider_calls_count: 0`, and `provider/runtime/adapter execution: not triggered`. It does not read `.env`, print environment values, execute adapters, send provider requests, write files, or create `.ai/` runtime artifacts.
 
 ## Staged Real Adapter Mode Registry
 

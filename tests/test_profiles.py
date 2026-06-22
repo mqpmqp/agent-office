@@ -17,7 +17,9 @@ from agent_office.profiles import (
     get_profile,
     list_profiles,
     profile_plan_payload,
+    profile_plan_contract_audit_payload,
     profile_plans_payload,
+    profile_plans_contract_audit_payload,
     provider_execution_category,
     validate_profile,
 )
@@ -83,6 +85,59 @@ class ProviderProfileTests(unittest.TestCase):
                 ],
             },
         )
+
+    def test_lowest_cost_profile_plan_contract_audit(self) -> None:
+        self.assertEqual(
+            profile_plan_contract_audit_payload("lowest-cost"),
+            {
+                "kind": "profile_plan_contract_audit",
+                "selected_profile": "lowest-cost",
+                "default_profile": "lowest-cost",
+                "is_default": True,
+                "execution_enabled": False,
+                "provider_calls": [],
+                "contract": {
+                    "schema_version": 1,
+                    "required_fields": [
+                        "selected_profile",
+                        "default_profile",
+                        "is_default",
+                        "execution_enabled",
+                        "provider_calls",
+                    ],
+                    "forbidden_runtime_behavior": [
+                        "provider_execution",
+                        "adapter_execution",
+                        "runtime_execution",
+                        "env_var_printing",
+                        "dotenv_read",
+                    ],
+                },
+                "checks": [
+                    {"name": "selected_profile_present", "status": "pass"},
+                    {"name": "default_profile_present", "status": "pass"},
+                    {"name": "is_default_boolean", "status": "pass"},
+                    {"name": "execution_disabled", "status": "pass"},
+                    {"name": "provider_calls_empty", "status": "pass"},
+                ],
+                "status": "pass",
+            },
+        )
+
+    def test_all_profiles_plan_contract_audits(self) -> None:
+        payload = profile_plans_contract_audit_payload()
+
+        self.assertEqual(payload["kind"], "profile_plan_contract_audits")
+        self.assertEqual(payload["default_profile"], "lowest-cost")
+        self.assertEqual(payload["available_profiles"], ["lowest-cost", "mock-ci", "multi-vendor"])
+        self.assertEqual(payload["execution_enabled"], False)
+        self.assertEqual(payload["provider_calls"], [])
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(
+            [audit["selected_profile"] for audit in payload["audits"]],
+            ["lowest-cost", "mock-ci", "multi-vendor"],
+        )
+        self.assertTrue(all(audit["status"] == "pass" for audit in payload["audits"]))
 
     def test_mock_ci_plan_uses_mock_execution_category_for_all_roles(self) -> None:
         payload = profile_plan_payload("mock-ci")
