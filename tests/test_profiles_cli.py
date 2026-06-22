@@ -102,12 +102,24 @@ class ProfilesCliTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("Unknown provider profile: missing", stderr)
 
-    def test_profiles_plan_requires_name(self) -> None:
-        exit_code, stdout, stderr = run_cli(["profiles", "--plan"])
+    def test_profiles_plan_unknown_name_returns_error(self) -> None:
+        exit_code, stdout, stderr = run_cli(["profiles", "--name", "missing", "--plan"])
 
         self.assertEqual(exit_code, 2)
         self.assertEqual(stdout, "")
-        self.assertIn("--plan requires --name", stderr)
+        self.assertIn("Unknown provider profile: missing", stderr)
+
+    def test_profiles_plan_without_name_shows_all_static_previews(self) -> None:
+        exit_code, stdout, stderr = run_cli(["profiles", "--plan"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("AgentOffice profile plan previews", stdout)
+        self.assertIn("default_profile: lowest-cost", stdout)
+        self.assertIn("available_profiles: lowest-cost, mock-ci, multi-vendor", stdout)
+        self.assertEqual(stdout.count("selected_profile:"), 3)
+        self.assertIn("selected_profile: lowest-cost", stdout)
+        self.assertIn("selected_profile: mock-ci", stdout)
+        self.assertIn("selected_profile: multi-vendor", stdout)
 
     def test_profiles_plan_text_shows_static_preview(self) -> None:
         exit_code, stdout, stderr = run_cli(["profiles", "--name", "lowest-cost", "--plan"])
@@ -149,6 +161,27 @@ class ProfilesCliTests(unittest.TestCase):
         )
         self.assert_no_forbidden_plan_keys(payload)
 
+    def test_profiles_plan_json_without_name_lists_all_static_previews(self) -> None:
+        exit_code, stdout, stderr = run_cli(["profiles", "--plan", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            list(payload),
+            ["default_profile", "available_profiles", "execution_enabled", "provider_calls", "artifact_writes", "plans"],
+        )
+        self.assertEqual(payload["default_profile"], "lowest-cost")
+        self.assertEqual(payload["available_profiles"], ["lowest-cost", "mock-ci", "multi-vendor"])
+        self.assertFalse(payload["execution_enabled"])
+        self.assertFalse(payload["provider_calls"])
+        self.assertFalse(payload["artifact_writes"])
+        self.assertEqual(
+            [plan["selected_profile"] for plan in payload["plans"]],
+            ["lowest-cost", "mock-ci", "multi-vendor"],
+        )
+        self.assertEqual(payload["plans"][1]["roles"][0], {"role": "context", "provider": "mock", "execution_category": "mock"})
+        self.assert_no_forbidden_plan_keys(payload)
+
     def test_profiles_plan_json_uses_provider_execution_categories(self) -> None:
         exit_code, stdout, stderr = run_cli(["profiles", "--name", "multi-vendor", "--plan", "--json"])
 
@@ -176,6 +209,16 @@ class ProfilesCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(json.loads(stdout.getvalue())["selected_profile"], "lowest-cost")
 
+    def test_profiles_plan_all_does_not_read_environment(self) -> None:
+        stdout = io.StringIO()
+        args = argparse.Namespace(name=None, json=True, plan=True)
+        with patch.object(os, "environ", EnvGuard()), patch.object(cli.os, "environ", EnvGuard()):
+            with redirect_stdout(stdout):
+                exit_code = cli.cmd_profiles(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["plans"][0]["selected_profile"], "lowest-cost")
+
     def test_profiles_plan_does_not_write_files_or_create_ai(self) -> None:
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,6 +230,19 @@ class ProfilesCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0, stderr)
             self.assertIn("selected_profile: lowest-cost", stdout)
+            self.assertFalse((Path(tmp) / ".ai").exists())
+
+    def test_profiles_plan_all_does_not_write_files_or_create_ai(self) -> None:
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                exit_code, stdout, stderr = run_cli(["profiles", "--plan"])
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(exit_code, 0, stderr)
+            self.assertIn("AgentOffice profile plan previews", stdout)
             self.assertFalse((Path(tmp) / ".ai").exists())
 
     def test_profiles_command_does_not_read_environment(self) -> None:

@@ -22,6 +22,7 @@ from .profiles import (
     get_profile,
     list_profiles,
     profile_plan_payload,
+    profile_plans_payload,
 )
 
 
@@ -620,12 +621,36 @@ def format_profile_plan(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_profile_plans(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice profile plan previews",
+        f"default_profile: {payload['default_profile']}",
+        f"available_profiles: {', '.join(str(name) for name in payload['available_profiles'])}",
+        "",
+    ]
+    plans = payload["plans"]
+    if not isinstance(plans, list):
+        return "\n".join(lines).rstrip()
+    for index, plan in enumerate(plans):
+        if not isinstance(plan, dict):
+            continue
+        if index:
+            lines.append("")
+        lines.append(format_profile_plan(plan))
+    return "\n".join(lines)
+
+
 def cmd_profiles(args: argparse.Namespace) -> int:
     if bool(getattr(args, "plan", False)):
-        if not args.name:
-            raise AgentOfficeError("--plan requires --name.")
-        payload = profile_plan_payload(args.name)
-        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_profile_plan(payload))
+        try:
+            if args.name:
+                payload = profile_plan_payload(args.name)
+                print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_profile_plan(payload))
+            else:
+                payload = profile_plans_payload()
+                print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_profile_plans(payload))
+        except ProfileError as exc:
+            raise AgentOfficeError(str(exc)) from exc
         return 0
 
     payload = profile_payload(args.name)

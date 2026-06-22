@@ -124,6 +124,21 @@ def profile_plan_payload(name: str) -> dict[str, object]:
     }
 
 
+def profile_plans_payload() -> dict[str, object]:
+    profile_names = list_profiles()
+    default_name = default_profile_name()
+    if default_name not in profile_names:
+        raise ProfileError(f"Default provider profile is not registered: {default_name}")
+    return {
+        "default_profile": default_name,
+        "available_profiles": list(profile_names),
+        "execution_enabled": False,
+        "provider_calls": False,
+        "artifact_writes": False,
+        "plans": [profile_plan_payload(name) for name in profile_names],
+    }
+
+
 def validate_profile(profile: ProviderProfile | Mapping[str, object]) -> None:
     name, roles = _profile_name_and_roles(profile)
     expected_roles = set(ALLOWED_ROLES)

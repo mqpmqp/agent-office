@@ -17,6 +17,7 @@ from agent_office.profiles import (
     get_profile,
     list_profiles,
     profile_plan_payload,
+    profile_plans_payload,
     provider_execution_category,
     validate_profile,
 )
@@ -112,6 +113,25 @@ class ProviderProfileTests(unittest.TestCase):
                 {"role": "judge", "provider": "claude", "execution_category": "optional-provider"},
             ],
         )
+
+    def test_all_profiles_plan_contract(self) -> None:
+        payload = profile_plans_payload()
+
+        self.assertEqual(payload["default_profile"], "lowest-cost")
+        self.assertEqual(payload["available_profiles"], ["lowest-cost", "mock-ci", "multi-vendor"])
+        self.assertFalse(payload["execution_enabled"])
+        self.assertFalse(payload["provider_calls"])
+        self.assertFalse(payload["artifact_writes"])
+        plans = payload["plans"]
+        self.assertEqual([plan["selected_profile"] for plan in plans], ["lowest-cost", "mock-ci", "multi-vendor"])
+        self.assertEqual(plans[0], profile_plan_payload("lowest-cost"))
+        self.assertEqual(plans[1], profile_plan_payload("mock-ci"))
+        self.assertEqual(plans[2], profile_plan_payload("multi-vendor"))
+
+    def test_all_profiles_plan_rejects_missing_default(self) -> None:
+        with patch("agent_office.profiles.default_profile_name", return_value="missing"):
+            with self.assertRaisesRegex(ProfileError, "Default provider profile is not registered"):
+                profile_plans_payload()
 
     def test_provider_execution_category_covers_allowed_providers(self) -> None:
         expected = {
