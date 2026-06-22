@@ -25,6 +25,7 @@ from .doctor import (
 )
 from .objectives import (
     ObjectiveSpecError,
+    objective_listing_payload,
     objective_spec_payload,
 )
 from .profiles import (
@@ -732,7 +733,29 @@ def format_objective_spec(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_objective_listing(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice objectives",
+        f"default_phase: {payload['default_phase']}",
+        "objectives:",
+    ]
+    objectives = payload["objectives"]
+    if isinstance(objectives, list):
+        for objective in objectives:
+            if not isinstance(objective, dict):
+                continue
+            lines.append(f"  - phase: {objective['phase']}")
+            lines.append(f"    title: {objective['title']}")
+            lines.append(f"    status: {objective['status']}")
+            lines.append(f"    objective: {objective['objective']}")
+    return "\n".join(lines)
+
+
 def cmd_objectives(args: argparse.Namespace) -> int:
+    if bool(getattr(args, "list", False)):
+        payload = objective_listing_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_objective_listing(payload))
+        return 0
     try:
         payload = objective_spec_payload(args.phase)
     except ObjectiveSpecError as exc:
@@ -926,6 +949,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("objectives", help="Print static phase objective specs without executing providers.")
     p.add_argument("--phase", help="Show one objective phase. Default: P6-10.")
+    p.add_argument("--list", action="store_true", help="List defined objective phases.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_objectives)
 
