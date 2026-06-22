@@ -15,7 +15,9 @@ from agent_office import cli
 from agent_office.objectives import (
     OBJECTIVE_SPEC_REQUIRED_FIELDS,
     default_objective_phase,
+    objective_detail_payload,
     objective_listing_payload,
+    objective_registry_validation_payload,
     list_objective_phases,
     objective_spec_payload,
 )
@@ -105,6 +107,33 @@ class ObjectiveSpecPayloadTests(unittest.TestCase):
             ],
         )
 
+    def test_objective_detail_payload_uses_objective_id(self) -> None:
+        self.assertEqual(objective_detail_payload("P6-10"), objective_spec_payload("P6-10"))
+        with self.assertRaisesRegex(ValueError, "Unknown objective: UNKNOWN"):
+            objective_detail_payload("UNKNOWN")
+
+    def test_objective_registry_validation_payload_contract(self) -> None:
+        payload = objective_registry_validation_payload()
+
+        self.assertEqual(
+            list(payload),
+            ["kind", "default_phase", "objectives_checked", "checks", "errors", "status"],
+        )
+        self.assertEqual(payload["kind"], "objective_registry_validation")
+        self.assertEqual(payload["default_phase"], "P6-10")
+        self.assertEqual(payload["objectives_checked"], 1)
+        self.assertEqual([check["name"] for check in payload["checks"]], [
+            "objective_ids_unique",
+            "required_fields_present",
+            "output_order_stable",
+            "json_serializable",
+            "static_safe_registry",
+        ])
+        self.assertEqual([check["status"] for check in payload["checks"]], ["pass", "pass", "pass", "pass", "pass"])
+        self.assertEqual(payload["errors"], [])
+        self.assertEqual(payload["status"], "pass")
+        json.dumps(payload)
+
 
 class ObjectiveSpecCliTests(unittest.TestCase):
     def test_objectives_text_outputs_p6_10_contract(self) -> None:
@@ -125,6 +154,21 @@ class ObjectiveSpecCliTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual(payload, objective_spec_payload("P6-10"))
 
+    def test_objectives_show_text_outputs_single_objective(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--show", "P6-10"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("AgentOffice objective spec", stdout)
+        self.assertIn("phase: P6-10", stdout)
+        self.assertIn("title: Objective Spec CLI Contract", stdout)
+        self.assertIn("provider_calls: false", stdout)
+
+    def test_objectives_show_json_is_machine_readable_contract(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--show", "P6-10", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(json.loads(stdout), objective_detail_payload("P6-10"))
+
     def test_objectives_defaults_to_p6_10(self) -> None:
         exit_code, stdout, stderr = run_cli(["objectives", "--json"])
 
@@ -137,6 +181,29 @@ class ObjectiveSpecCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(stdout, "")
         self.assertIn("Unknown objective phase: P6-99", stderr)
+
+    def test_objectives_unknown_show_returns_error_without_traceback(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--show", "UNKNOWN"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("Unknown objective: UNKNOWN", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_objectives_validate_text_outputs_registry_checks(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--validate"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Objective registry validation", stdout)
+        self.assertIn("status: pass", stdout)
+        self.assertIn("objective_ids_unique: pass", stdout)
+        self.assertIn("provider/runtime/adapter execution: not triggered", stdout)
+
+    def test_objectives_validate_json_is_machine_readable_contract(self) -> None:
+        exit_code, stdout, stderr = run_cli(["objectives", "--validate", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(json.loads(stdout), objective_registry_validation_payload())
 
     def test_objectives_list_text_outputs_defined_objectives(self) -> None:
         exit_code, stdout, stderr = run_cli(["objectives", "--list"])
@@ -164,6 +231,16 @@ class ObjectiveSpecCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(json.loads(stdout.getvalue())["phase"], "P6-10")
+
+    def test_objectives_validate_does_not_read_environment(self) -> None:
+        stdout = io.StringIO()
+        args = argparse.Namespace(phase=None, show=None, json=True, list=False, validate=True)
+        with patch.object(os, "environ", EnvGuard()), patch.object(cli.os, "environ", EnvGuard()):
+            with redirect_stdout(stdout):
+                exit_code = cli.cmd_objectives(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["kind"], "objective_registry_validation")
 
     def test_objectives_list_does_not_read_environment(self) -> None:
         stdout = io.StringIO()

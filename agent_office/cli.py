@@ -25,9 +25,12 @@ from .doctor import (
 )
 from .objectives import (
     ObjectiveSpecError,
+    objective_detail_payload,
     objective_listing_payload,
+    objective_registry_validation_payload,
     objective_spec_payload,
 )
+from .planner import PlanningError, execution_blueprint_payload
 from .profiles import (
     ALLOWED_ROLES,
     ProfileError,
@@ -751,13 +754,83 @@ def format_objective_listing(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_objective_registry_validation(payload: dict[str, object]) -> str:
+    lines = [
+        "Objective registry validation",
+        f"default_phase: {payload['default_phase']}",
+        f"objectives_checked: {payload['objectives_checked']}",
+        f"status: {payload['status']}",
+        "checks:",
+    ]
+    checks = payload["checks"]
+    if isinstance(checks, list):
+        for check in checks:
+            if isinstance(check, dict):
+                lines.append(f"  {check['name']}: {check['status']}")
+    errors = payload.get("errors", [])
+    if isinstance(errors, list) and errors:
+        lines.append("errors:")
+        for error in errors:
+            lines.append(f"  - {error}")
+    lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
+def format_execution_blueprint(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice execution blueprint",
+        f"objective_id: {payload['objective_id']}",
+        f"objective_name: {payload['objective_name']}",
+        f"objective_summary: {payload['objective_summary']}",
+        f"selected_profile: {payload['selected_profile']}",
+        f"default_profile: {payload['default_profile']}",
+        f"is_default: {str(payload['is_default']).lower()}",
+        f"execution_enabled: {str(payload['execution_enabled']).lower()}",
+        "provider_calls:",
+    ]
+    provider_calls = payload["provider_calls"]
+    if isinstance(provider_calls, list):
+        for call in provider_calls:
+            if isinstance(call, dict):
+                lines.append(
+                    f"  - {call['role']}: {call['provider']} ({call['execution_category']}); call_enabled={str(call['call_enabled']).lower()}"
+                )
+    lines.extend(
+        [
+            f"runtime_calls: {str(payload['runtime_calls']).lower()}",
+            f"adapter_calls: {str(payload['adapter_calls']).lower()}",
+            f"env_required: {str(payload['env_required']).lower()}",
+            "safety_constraints:",
+        ]
+    )
+    for constraint in payload["safety_constraints"]:
+        lines.append(f"  - {constraint}")
+    lines.append("validation_commands:")
+    for command in payload["validation_commands"]:
+        lines.append(f"  - {command}")
+    lines.extend(
+        [
+            f"next_actor: {payload['next_actor']}",
+            f"next_action_summary: {payload['next_action_summary']}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def cmd_objectives(args: argparse.Namespace) -> int:
     if bool(getattr(args, "list", False)):
         payload = objective_listing_payload()
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_objective_listing(payload))
         return 0
+    if bool(getattr(args, "validate", False)):
+        payload = objective_registry_validation_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_objective_registry_validation(payload))
+        return 0 if payload["status"] == "pass" else 1
     try:
-        payload = objective_spec_payload(args.phase)
+        if getattr(args, "show", None):
+            payload = objective_detail_payload(args.show)
+        else:
+            payload = objective_spec_payload(getattr(args, "phase", None))
     except ObjectiveSpecError as exc:
         raise AgentOfficeError(str(exc)) from exc
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_objective_spec(payload))
@@ -793,6 +866,15 @@ def cmd_profiles(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(format_profiles(payload))
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    try:
+        payload = execution_blueprint_payload(args.objective, args.profile)
+    except PlanningError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_execution_blueprint(payload))
     return 0
 
 
@@ -949,9 +1031,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("objectives", help="Print static phase objective specs without executing providers.")
     p.add_argument("--phase", help="Show one objective phase. Default: P6-10.")
+    p.add_argument("--show", help="Show one objective by id.")
     p.add_argument("--list", action="store_true", help="List defined objective phases.")
+    p.add_argument("--validate", action="store_true", help="Validate the static objective registry.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_objectives)
+
+    p = sub.add_parser("plan", help="Build a static execution blueprint without executing providers.")
+    p.add_argument("--objective", required=True, help="Objective id to plan, for example P6-10.")
+    p.add_argument("--profile", required=True, help="Provider profile name to use for the static plan.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
