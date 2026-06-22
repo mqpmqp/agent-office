@@ -49,8 +49,12 @@ from .profiles import (
 )
 from .run_bundle import (
     RunBundleError,
+    format_run_bundle_inspection,
     format_run_bundle_preview,
+    format_run_bundle_validation,
+    inspect_run_bundle_payload,
     run_bundle_preview_payload,
+    validate_run_bundle_payload,
     write_run_bundle,
 )
 
@@ -970,7 +974,22 @@ def cmd_packet(args: argparse.Namespace) -> int:
 
 
 def cmd_run_bundle(args: argparse.Namespace) -> int:
+    action = getattr(args, "bundle_action", None)
     try:
+        if action == "inspect":
+            if not args.path:
+                raise RunBundleError("run-bundle inspect requires --path.")
+            payload = inspect_run_bundle_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_inspection(payload))
+            return 0
+        if action == "validate":
+            if not args.path:
+                raise RunBundleError("run-bundle validate requires --path.")
+            payload = validate_run_bundle_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_validation(payload))
+            return 0
+        if not args.objective or not args.profile or not args.run_id:
+            raise RunBundleError("run-bundle requires --objective, --profile, and --run-id.")
         payload = run_bundle_preview_payload(args.objective, args.profile, args.run_id)
         if args.out:
             payload = dict(payload)
@@ -1156,11 +1175,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--validate", action="store_true", help="Validate the static packet contract without executing it.")
     p.set_defaults(func=cmd_packet)
 
-    p = sub.add_parser("run-bundle", help="Build or write a static local run bundle without executing providers.")
-    p.add_argument("--objective", required=True, help="Objective id to bundle, for example P6-17.")
-    p.add_argument("--profile", required=True, help="Provider profile name to use for the static bundle.")
-    p.add_argument("--run-id", required=True, help="Static run bundle id.")
+    p = sub.add_parser("run-bundle", help="Build, inspect, or validate a static local run bundle without executing providers.")
+    p.add_argument("bundle_action", nargs="?", choices=["inspect", "validate"], help="Read-only bundle action.")
+    p.add_argument("--objective", help="Objective id to bundle, for example P6-17.")
+    p.add_argument("--profile", help="Provider profile name to use for the static bundle.")
+    p.add_argument("--run-id", help="Static run bundle id.")
     p.add_argument("--out", help="Explicit output directory for writing the local bundle.")
+    p.add_argument("--path", help="Static run bundle directory for inspect or validate.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_run_bundle)
 
