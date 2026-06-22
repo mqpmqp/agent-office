@@ -38,6 +38,14 @@ python3 -m agent_office doctor --adapters
 python3 -m agent_office.doctor --adapters
 ```
 
+Print only the static profile plan audit:
+
+```bash
+python3 -m agent_office doctor --profiles
+python3 -m agent_office doctor --profiles --json
+python3 -m agent_office.doctor --profiles
+```
+
 ## What Doctor Checks
 
 - Current project path.
@@ -48,6 +56,7 @@ python3 -m agent_office.doctor --adapters
 - Whether the adapter registry contains `mock`, `codex`, `gemini`, `grok`, and `claude`.
 - Whether Codex, Gemini, Grok, and Claude adapter environment variables are configured.
 - The staged mode registry for Gemini, Codex, Grok, and Claude.
+- The static profile plan audit for every built-in provider profile.
 
 The staged mode table is:
 
@@ -55,9 +64,15 @@ The staged mode table is:
 adapter | mode | dry_run | env_ok | fallback | status
 ```
 
+The profile audit table is:
+
+```text
+profile | default | execution_enabled | provider_calls | artifact_writes | roles | status
+```
+
 ## Configuration State
 
-Doctor reports only `configured: true` or `configured: false`. It does not print environment variable values.
+Doctor reports only `configured: true` or `configured: false`. It does not print environment variable values. `doctor --profiles` is profile metadata only; it does not read adapter environment variables, select runtime profiles, execute adapters, or create tasks.
 
 Provider adapters default to `mode=mock`. Real mode is impossible unless the specific adapter has `AGENTOFFICE_<ADAPTER>_MODE=real`. When an adapter is staged as real, `dry_run` defaults to `true`, so doctor can validate configuration without causing provider execution.
 
