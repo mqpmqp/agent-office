@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_office import cli
-from agent_office.packets import execution_packet_payload
+from agent_office.packets import execution_packet_payload, packet_contract_validation_payload
 from agent_office.planner import execution_blueprint_payload
 
 
@@ -174,6 +174,75 @@ class PacketCliTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("Unknown packet actor: unknown", stderr)
         self.assertNotIn("Traceback", stderr)
+
+
+    def test_packet_validate_text_outputs_pass_summary(self) -> None:
+        exit_code, stdout, stderr = run_cli(["packet", "--objective", "P6-10", "--profile", "lowest-cost", "--actor", "codex", "--validate"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Packet contract validation", stdout)
+        self.assertIn("status: PASS", stdout)
+        self.assertIn("objective: P6-10", stdout)
+        self.assertIn("profile: lowest-cost", stdout)
+        self.assertIn("actor: codex", stdout)
+        self.assertIn("known_objective: pass", stdout)
+        self.assertIn("provider_calls: false", stdout)
+        self.assertIn("runtime_adapter_calls: false", stdout)
+
+    def test_packet_validate_json_outputs_all_actor_contracts(self) -> None:
+        for actor in ("codex", "reviewer", "judge"):
+            with self.subTest(actor=actor):
+                exit_code, stdout, stderr = run_cli([
+                    "packet",
+                    "--objective",
+                    "P6-10",
+                    "--profile",
+                    "lowest-cost",
+                    "--actor",
+                    actor,
+                    "--validate",
+                    "--json",
+                ])
+
+                self.assertEqual(exit_code, 0, stderr)
+                self.assertEqual(json.loads(stdout), packet_contract_validation_payload("P6-10", "lowest-cost", actor))
+
+    def test_packet_validate_unknown_inputs_return_error_without_traceback(self) -> None:
+        cases = [
+            (["packet", "--objective", "UNKNOWN", "--profile", "lowest-cost", "--actor", "codex", "--validate", "--json"], "Unknown objective: UNKNOWN"),
+            (["packet", "--objective", "P6-10", "--profile", "UNKNOWN", "--actor", "codex", "--validate", "--json"], "Unknown provider profile: UNKNOWN"),
+            (["packet", "--objective", "P6-10", "--profile", "lowest-cost", "--actor", "UNKNOWN", "--validate", "--json"], "Unknown packet actor: UNKNOWN"),
+        ]
+        for argv, message in cases:
+            with self.subTest(message=message):
+                exit_code, stdout, stderr = run_cli(argv)
+
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(stdout, "")
+                self.assertIn(message, stderr)
+                self.assertNotIn("Traceback", stderr)
+
+    def test_packet_validate_contract_failure_returns_nonzero_without_traceback(self) -> None:
+        invalid_payload = packet_contract_validation_payload("P6-10", "lowest-cost", "codex")
+        invalid_payload["valid"] = False
+        invalid_payload["checks"] = [{"name": "execution_enabled_false", "status": "fail"}]
+        with patch.object(cli, "packet_contract_validation_payload", return_value=invalid_payload):
+            exit_code, stdout, stderr = run_cli(["packet", "--objective", "P6-10", "--profile", "lowest-cost", "--actor", "codex", "--validate"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("status: FAIL", stdout)
+        self.assertNotIn("Traceback", stdout)
+
+    def test_packet_validate_does_not_read_environment(self) -> None:
+        stdout = io.StringIO()
+        args = argparse.Namespace(objective="P6-10", profile="lowest-cost", actor="codex", json=True, validate=True)
+        with patch.object(os, "environ", EnvGuard()), patch.object(cli.os, "environ", EnvGuard()):
+            with redirect_stdout(stdout):
+                exit_code = cli.cmd_packet(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(json.loads(stdout.getvalue())["valid"])
 
     def test_packet_does_not_read_environment(self) -> None:
         stdout = io.StringIO()
