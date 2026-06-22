@@ -31,6 +31,7 @@ from .objectives import (
     objective_spec_payload,
 )
 from .planner import PlanningError, execution_blueprint_payload
+from .packets import PacketError, execution_packet_payload
 from .profiles import (
     ALLOWED_ROLES,
     ProfileError,
@@ -817,6 +818,45 @@ def format_execution_blueprint(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_execution_packet(payload: dict[str, object]) -> str:
+    objective = payload["objective"]
+    profile = payload["profile"]
+    lines = [
+        "AgentOffice execution packet",
+        f"packet_version: {payload['packet_version']}",
+        f"objective: {objective['id']} - {objective['name']}" if isinstance(objective, dict) else f"objective: {objective}",
+        f"profile: {profile['selected']}" if isinstance(profile, dict) else f"profile: {profile}",
+        f"actor: {payload['actor']}",
+        f"execution_enabled: {str(payload['execution_enabled']).lower()}",
+        f"env_required: {str(payload['env_required']).lower()}",
+        f"runtime_calls: {str(payload['runtime_calls']).lower()}",
+        f"adapter_calls: {str(payload['adapter_calls']).lower()}",
+        "instructions:",
+    ]
+    for instruction in payload["instructions"]:
+        lines.append(f"  - {instruction}")
+    lines.append("safety_constraints:")
+    for constraint in payload["safety_constraints"]:
+        lines.append(f"  - {constraint}")
+    lines.append("allowed_actions:")
+    for action in payload["allowed_actions"]:
+        lines.append(f"  - {action}")
+    lines.append("forbidden_actions:")
+    for action in payload["forbidden_actions"]:
+        lines.append(f"  - {action}")
+    lines.append("validation_commands:")
+    for command in payload["validation_commands"]:
+        lines.append(f"  - {command}")
+    lines.append("success_criteria:")
+    for criterion in payload["success_criteria"]:
+        lines.append(f"  - {criterion}")
+    lines.append("failure_criteria:")
+    for criterion in payload["failure_criteria"]:
+        lines.append(f"  - {criterion}")
+    lines.append(f"handoff_summary: {payload['handoff_summary']}")
+    return "\n".join(lines)
+
+
 def cmd_objectives(args: argparse.Namespace) -> int:
     if bool(getattr(args, "list", False)):
         payload = objective_listing_payload()
@@ -875,6 +915,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
     except PlanningError as exc:
         raise AgentOfficeError(str(exc)) from exc
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_execution_blueprint(payload))
+    return 0
+
+
+def cmd_packet(args: argparse.Namespace) -> int:
+    try:
+        payload = execution_packet_payload(args.objective, args.profile, args.actor)
+    except PacketError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_execution_packet(payload))
     return 0
 
 
@@ -1042,6 +1091,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", required=True, help="Provider profile name to use for the static plan.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_plan)
+
+
+    p = sub.add_parser("packet", help="Build a static execution packet for an actor without executing providers.")
+    p.add_argument("--objective", required=True, help="Objective id to package, for example P6-10.")
+    p.add_argument("--profile", required=True, help="Provider profile name to use for the static packet.")
+    p.add_argument("--actor", required=True, help="Packet actor: codex, reviewer, or judge.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_packet)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
