@@ -16,6 +16,19 @@ ALLOWED_PROVIDERS = (
     "openai-api",
 )
 
+# ponytail: static preview metadata only; runtime provider routing belongs in a future phase.
+PROVIDER_EXECUTION_CATEGORIES: Mapping[str, str] = MappingProxyType(
+    {
+        "chatgpt-manual": "manual",
+        "codex": "local-cli",
+        "mock": "mock",
+        "gemini": "optional-provider",
+        "grok": "optional-provider",
+        "claude": "optional-provider",
+        "openai-api": "future-api",
+    }
+)
+
 
 class ProfileError(ValueError):
     pass
@@ -81,6 +94,34 @@ def get_profile(name: str) -> ProviderProfile:
         raise ProfileError(f"Unknown provider profile: {name}") from exc
     validate_profile(profile)
     return profile
+
+
+def provider_execution_category(provider: str) -> str:
+    try:
+        return PROVIDER_EXECUTION_CATEGORIES[provider]
+    except KeyError as exc:
+        raise ProfileError(f"Unknown provider execution category: {provider}") from exc
+
+
+def profile_plan_payload(name: str) -> dict[str, object]:
+    profile = get_profile(name)
+    default_name = default_profile_name()
+    return {
+        "selected_profile": profile.name,
+        "default_profile": default_name,
+        "is_default": profile.name == default_name,
+        "execution_enabled": False,
+        "provider_calls": False,
+        "artifact_writes": False,
+        "roles": [
+            {
+                "role": role,
+                "provider": profile.roles[role],
+                "execution_category": provider_execution_category(profile.roles[role]),
+            }
+            for role in ALLOWED_ROLES
+        ],
+    }
 
 
 def validate_profile(profile: ProviderProfile | Mapping[str, object]) -> None:
