@@ -9,14 +9,6 @@ class PacketError(ValueError):
 
 PACKET_VERSION = 1
 ALLOWED_ACTORS = ("codex", "reviewer", "judge")
-PACKET_VALIDATION_COMMANDS = (
-    "python3 -m agent_office packet --objective P6-10 --profile lowest-cost --actor codex",
-    "python3 -m agent_office packet --objective P6-10 --profile lowest-cost --actor codex --json",
-    "python3 -m agent_office packet --objective P6-10 --profile lowest-cost --actor reviewer",
-    "python3 -m agent_office packet --objective P6-10 --profile lowest-cost --actor reviewer --json",
-    "python3 -m agent_office packet --objective P6-10 --profile lowest-cost --actor judge",
-    "python3 -m agent_office packet --objective P6-10 --profile lowest-cost --actor judge --json",
-)
 CONTRACT_SCHEMA_VERSION = "packet-contract-v1"
 PACKET_REQUIRED_SECTIONS = (
     "packet_version",
@@ -67,7 +59,11 @@ def execution_packet_payload(objective_id: str, profile_name: str, actor: str) -
         "safety_constraints": blueprint["safety_constraints"],
         "allowed_actions": behavior["allowed_actions"],
         "forbidden_actions": behavior["forbidden_actions"],
-        "validation_commands": _merged_validation_commands(blueprint["validation_commands"]),
+        "validation_commands": _merged_validation_commands(
+            blueprint["validation_commands"],
+            str(blueprint["objective_id"]),
+            str(blueprint["selected_profile"]),
+        ),
         "success_criteria": behavior["success_criteria"],
         "failure_criteria": behavior["failure_criteria"],
         "handoff_summary": behavior["handoff_summary"],
@@ -281,9 +277,17 @@ def _actor_behavior(actor: str) -> dict[str, list[str] | str]:
     }
 
 
-def _merged_validation_commands(blueprint_commands: object) -> list[str]:
+def _merged_validation_commands(blueprint_commands: object, objective_id: str, profile_name: str) -> list[str]:
     commands = [str(command) for command in blueprint_commands] if isinstance(blueprint_commands, list) else []
-    for command in PACKET_VALIDATION_COMMANDS:
+    for command in _packet_validation_commands(objective_id, profile_name):
         if command not in commands:
             commands.append(command)
     return commands
+
+
+def _packet_validation_commands(objective_id: str, profile_name: str) -> tuple[str, ...]:
+    commands: list[str] = []
+    for actor in ALLOWED_ACTORS:
+        commands.append(f"python3 -m agent_office packet --objective {objective_id} --profile {profile_name} --actor {actor}")
+        commands.append(f"python3 -m agent_office packet --objective {objective_id} --profile {profile_name} --actor {actor} --json")
+    return tuple(commands)
