@@ -76,14 +76,16 @@ This visibility command does not select a runtime profile, execute adapters, pro
 
 ## Profile Plan Preview
 
-P6-04 adds a read-only plan preview for one selected profile:
+P6-04 adds a read-only plan preview for one selected profile, and P6-06 extends it to all built-in profiles:
 
 ```bash
 python3 -m agent_office profiles --name lowest-cost --plan
 python3 -m agent_office profiles --name lowest-cost --plan --json
+python3 -m agent_office profiles --plan
+python3 -m agent_office profiles --plan --json
 ```
 
-`--plan` requires `--name`. The preview shows the selected profile, the default profile, whether the selected profile is the default, the canonical role order, each role's provider, and a static local execution category. JSON output uses `selected_profile` for the chosen profile and `execution_category` for each role item.
+With `--name`, the preview shows one selected profile. Without `--name`, it shows every built-in profile in registry order. The preview shows the selected profile, the default profile, whether the selected profile is the default, the canonical role order, each role's provider, and a static local execution category. JSON output uses `selected_profile` for each plan and `execution_category` for each role item.
 
 Execution categories are static metadata only:
 
@@ -107,6 +109,19 @@ artifact_writes: false
 
 It does not select a runtime profile, probe installed CLIs, check credentials, read `.env`, send provider requests, import provider SDKs, write files, or create `.ai/` runtime artifacts.
 
+
+## Profile Plan Doctor Audit
+
+P6-07 adds a static doctor audit for profile plan safety:
+
+```bash
+python3 -m agent_office doctor --profiles
+python3 -m agent_office doctor --profiles --json
+python3 -m agent_office.doctor --profiles
+```
+
+The audit reports each built-in profile, default status, static safety booleans, role/provider/category mappings, and `status=ok`. It does not select a runtime profile, read `.env`, print environment values, execute adapters, send provider requests, write files, or create `.ai/` runtime artifacts.
+
 ## OpenAI API Provider
 
 `openai-api` is an allowed provider name for future optional work. It is disabled by default and must not be used as the default provider in P6-02.
@@ -129,3 +144,5 @@ The profile registry is local metadata only. It is intended to guide future plan
 P6-03 keeps that boundary: profile visibility is reporting only. Runtime profile selection remains future work.
 
 P6-04 keeps that boundary: profile plan preview is local static reporting only. Runtime profile selection remains future work.
+
+P6-06 keeps that boundary while allowing all-profile plan previews. P6-07 keeps that boundary while exposing profile plan audit through `doctor --profiles`.

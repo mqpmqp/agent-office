@@ -77,8 +77,10 @@ agent-office doctor --adapter gemini
 agent-office doctor --adapter grok
 agent-office doctor --adapter claude
 agent-office doctor --adapters
+agent-office doctor --profiles
 agent-office doctor --json
 python -m agent_office.doctor --adapters
+python -m agent_office.doctor --profiles
 ```
 
 ## State Machine
@@ -190,6 +192,8 @@ python -m agent_office doctor --adapter grok
 python -m agent_office doctor --adapter claude
 python -m agent_office doctor --adapters
 python -m agent_office.doctor --adapters
+python -m agent_office doctor --profiles
+python -m agent_office.doctor --profiles
 python -m agent_office doctor --json
 ```
 
@@ -203,6 +207,13 @@ gemini | mock | false | true | false | ok
 codex | mock | false | true | false | ok
 grok | mock | false | true | false | ok
 claude | mock | false | true | false | ok
+```
+
+The static profile plan audit shows every built-in profile without selecting a runtime profile or executing adapters:
+
+```text
+profile | default | execution_enabled | provider_calls | artifact_writes | roles | status
+lowest-cost | true | false | false | false | context:chatgpt-manual(manual), implement:codex(local-cli), review:chatgpt-manual(manual), judge:chatgpt-manual(manual) | ok
 ```
 
 ## Staged Real Adapter Mode Registry

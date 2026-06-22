@@ -14,7 +14,15 @@ from .adapters.base import AdapterError, AdapterInvocation, AdapterResult, mask_
 from .adapters.mock import MockAdapter
 from .adapters.modes import adapter_for_role, load_adapter_mode_config, validate_adapter_mode
 from .adapters.registry import get_adapter
-from .doctor import bool_text, collect_doctor, doctor_json, format_adapters, format_doctor
+from .doctor import (
+    bool_text,
+    collect_doctor,
+    collect_profile_plan_audit,
+    doctor_json,
+    format_adapters,
+    format_doctor,
+    format_profile_plan_audit,
+)
 from .profiles import (
     ALLOWED_ROLES,
     ProfileError,
@@ -530,6 +538,14 @@ def cmd_adapters(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    if bool(getattr(args, "profiles", False)):
+        audit = collect_profile_plan_audit()
+        if args.json:
+            print(json.dumps(audit, indent=2, ensure_ascii=False))
+        else:
+            print(format_profile_plan_audit(audit))
+        return 0
+
     report = collect_doctor(PROJECT_ROOT, adapter_filter=args.adapter)
     if args.adapters:
         if args.json:
@@ -813,7 +829,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
-    p.add_argument("--adapters", action="store_true", help="Print staged adapter mode table only.")
+    view = p.add_mutually_exclusive_group()
+    view.add_argument("--adapters", action="store_true", help="Print staged adapter mode table only.")
+    view.add_argument("--profiles", action="store_true", help="Print static profile plan audit only.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_doctor)
     return parser

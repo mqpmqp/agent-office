@@ -12,6 +12,7 @@ from typing import Any
 
 from .adapters.modes import adapter_mode_rows, collect_adapter_mode_status, format_adapter_mode_table
 from .adapters.registry import adapter_catalog
+from .profiles import ProfileError, profile_plans_payload
 
 
 REQUIRED_GITIGNORE_PATTERNS = [
@@ -111,11 +112,56 @@ def collect_doctor(project_root: Path, adapter_filter: str | None = None) -> dic
             "rows": mode_rows,
             "adapters": mode_status,
         },
+        "profiles": collect_profile_plan_audit(),
         "safe": {
             "env_file_read": False,
             "real_adapter_executed": False,
             "task_created": False,
         },
+    }
+
+
+def collect_profile_plan_audit() -> dict[str, Any]:
+    try:
+        payload = profile_plans_payload()
+    except ProfileError as exc:
+        return {
+            "status": "invalid",
+            "default_profile": None,
+            "available_profiles": [],
+            "profiles_checked": 0,
+            "execution_enabled": False,
+            "provider_calls": False,
+            "artifact_writes": False,
+            "errors": [str(exc)],
+            "rows": [],
+        }
+
+    rows = []
+    for plan in payload["plans"]:
+        if not isinstance(plan, dict):
+            continue
+        rows.append(
+            {
+                "profile": plan["selected_profile"],
+                "is_default": bool(plan["is_default"]),
+                "execution_enabled": bool(plan["execution_enabled"]),
+                "provider_calls": bool(plan["provider_calls"]),
+                "artifact_writes": bool(plan["artifact_writes"]),
+                "roles": plan["roles"],
+                "status": "ok",
+            }
+        )
+    return {
+        "status": "ok",
+        "default_profile": payload["default_profile"],
+        "available_profiles": payload["available_profiles"],
+        "profiles_checked": len(rows),
+        "execution_enabled": bool(payload["execution_enabled"]),
+        "provider_calls": bool(payload["provider_calls"]),
+        "artifact_writes": bool(payload["artifact_writes"]),
+        "errors": [],
+        "rows": rows,
     }
 
 
@@ -220,6 +266,9 @@ def format_doctor(report: dict[str, Any]) -> str:
                 ]
             )
         )
+    lines.append("- profile plan audit:")
+    for line in format_profile_plan_audit(report["profiles"]).splitlines():
+        lines.append(f"  {line}")
     lines.extend(
         [
             "- safety:",
@@ -228,6 +277,36 @@ def format_doctor(report: dict[str, Any]) -> str:
             f"  - task_created: {bool_text(report['safe']['task_created'])}",
         ]
     )
+    return "\n".join(lines)
+
+
+def format_profile_plan_audit(audit: dict[str, Any]) -> str:
+    lines = ["profile | default | execution_enabled | provider_calls | artifact_writes | roles | status"]
+    for row in audit["rows"]:
+        roles = row.get("roles", [])
+        if isinstance(roles, list):
+            role_text = ", ".join(
+                f"{role['role']}:{role['provider']}({role['execution_category']})"
+                for role in roles
+                if isinstance(role, dict)
+            )
+        else:
+            role_text = ""
+        lines.append(
+            " | ".join(
+                [
+                    str(row["profile"]),
+                    bool_text(bool(row["is_default"])),
+                    bool_text(bool(row["execution_enabled"])),
+                    bool_text(bool(row["provider_calls"])),
+                    bool_text(bool(row["artifact_writes"])),
+                    role_text,
+                    str(row["status"]),
+                ]
+            )
+        )
+    for error in audit.get("errors", []):
+        lines.append(f"error: {error}")
     return "\n".join(lines)
 
 
@@ -242,7 +321,9 @@ def doctor_json(report: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m agent_office.doctor")
     parser.add_argument("--adapter", choices=["codex", "gemini", "grok", "claude"], help="Limit diagnostics to one adapter.")
-    parser.add_argument("--adapters", action="store_true", help="Print adapter mode table only.")
+    view = parser.add_mutually_exclusive_group()
+    view.add_argument("--adapters", action="store_true", help="Print adapter mode table only.")
+    view.add_argument("--profiles", action="store_true", help="Print static profile plan audit only.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     args = parser.parse_args(argv)
 
@@ -257,6 +338,14 @@ def main(argv: list[str] | None = None) -> int:
             print(_format_adapter_rows(rows))
         else:
             print(format_adapter_mode_table())
+        return 0
+
+    if args.profiles:
+        audit = collect_profile_plan_audit()
+        if args.json:
+            print(json.dumps(audit, indent=2, ensure_ascii=False))
+        else:
+            print(format_profile_plan_audit(audit))
         return 0
 
     report = collect_doctor(project_root, adapter_filter=args.adapter)
