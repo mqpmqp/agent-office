@@ -79,6 +79,8 @@ agent-office doctor --adapter claude
 agent-office doctor --adapters
 agent-office profiles --name lowest-cost --plan --audit
 agent-office profiles --name lowest-cost --plan --audit --json
+agent-office objectives --phase P6-10
+agent-office objectives --phase P6-10 --json
 agent-office profiles --plan --audit
 agent-office profiles --plan --audit --json
 agent-office doctor --profiles
@@ -177,6 +179,34 @@ bash scripts/smoke-test.sh demo-task
 ```
 
 Both scripts are repeatable. `smoke-test.sh` runs the requested task with `--reset`; `verify.sh` uses a fixed local verification task and resets it before each run.
+
+## Objective Specs
+
+P6-09 is the P6-10 objective spec bootstrap. It converts the completed P6-06/P6-07/P6-08 profile plan, doctor, and audit surfaces into a concrete P6-10 objective that can be inspected locally before implementation work starts.
+
+P6-10 adds a static objective spec CLI:
+
+```bash
+python -m agent_office objectives --phase P6-10
+python -m agent_office objectives --phase P6-10 --json
+```
+
+The P6-10 objective is to expose a provider-safe objective spec surface that documents:
+
+- objective and source phases
+- public CLI contract
+- machine-readable JSON contract
+- tests covering the contract
+- validation commands for release gates
+- safety boundaries
+
+The JSON contract includes:
+
+```text
+kind, phase, title, status, objective, source_phases, cli_contract, json_contract, tests, validation, safety
+```
+
+`objectives` does not read `.env`, print environment values, execute adapters, send provider requests, write files, or create `.ai/` runtime artifacts.
 
 ## Adapter Diagnostics
 
