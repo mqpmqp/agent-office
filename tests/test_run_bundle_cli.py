@@ -574,6 +574,118 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("Refusing to read run bundle outside project root", stderr)
 
+    def test_run_bundle_intake_rejects_symlinked_result_target_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            artifact = self._write_artifact(project_root, "artifacts/codex.txt", "new metadata source")
+            victim = self._write_artifact(project_root, "victim-result.json", "do not overwrite")
+            results_dir = bundle / "results"
+            results_dir.mkdir()
+            result_link = results_dir / "codex.json"
+            result_link.symlink_to(victim)
+
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(artifact.relative_to(project_root)),
+                    "--json",
+                ]
+            )
+            victim_text = victim.read_text(encoding="utf-8")
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Refusing to overwrite symlink actor result", stderr)
+        self.assertEqual(victim_text, "do not overwrite")
+
+    def test_run_bundle_out_rejects_symlinked_bundle_file_target_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            victim = self._write_artifact(project_root, "victim-run.json", "do not overwrite")
+            (bundle / "run.json").unlink()
+            (bundle / "run.json").symlink_to(victim)
+
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "--objective",
+                    "P6-17",
+                    "--profile",
+                    "lowest-cost",
+                    "--run-id",
+                    "P7-STATIC-RUN",
+                    "--out",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--json",
+                ]
+            )
+            victim_text = victim.read_text(encoding="utf-8")
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Refusing to overwrite symlink bundle file", stderr)
+        self.assertEqual(victim_text, "do not overwrite")
+
+    def test_run_bundle_rejects_symlinked_output_directory_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            real_dir = project_root / ".ai" / "runs" / "REAL-BUNDLE"
+            real_dir.mkdir(parents=True)
+            link_dir = project_root / ".ai" / "runs" / "LINK-BUNDLE"
+            link_dir.symlink_to(real_dir, target_is_directory=True)
+
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "--objective",
+                    "P6-17",
+                    "--profile",
+                    "lowest-cost",
+                    "--run-id",
+                    "P7-LINK",
+                    "--out",
+                    ".ai/runs/LINK-BUNDLE",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Refusing to write run bundle to symlink path", stderr)
+
+    def test_run_bundle_non_utf8_required_file_exits_two_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            artifact = self._write_artifact(project_root, "artifacts/codex.txt")
+            (bundle / "run.json").write_bytes(b"\xff\xfe")
+            commands = [
+                ["run-bundle", "inspect", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
+                ["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
+                ["run-bundle", "status", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
+                ["run-bundle", "results", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(artifact.relative_to(project_root)),
+                    "--json",
+                ],
+            ]
+
+            for command in commands:
+                stdout, stderr = self.assert_exit_two_without_traceback(command)
+                self.assertIn("Invalid UTF-8 in run bundle file: run.json", stdout + stderr)
+
     def test_run_bundle_validate_missing_run_json_exits_two_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
             bundle = self._write_bundle(Path(tmpdir))

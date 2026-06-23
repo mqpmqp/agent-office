@@ -93,10 +93,10 @@ def write_run_bundle(payload: dict[str, object], out: str | Path, project_root: 
     }
 
     targets = [(relative, _safe_target(out_root, relative)) for relative in RUN_BUNDLE_REQUIRED_FILES]
-    out_root.mkdir(parents=True, exist_ok=True)
+    _mkdir(out_root, "run bundle output directory")
     for relative, target in targets:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() and target.is_symlink():
+        _mkdir(target.parent, f"run bundle parent directory: {relative}")
+        if _is_symlink(target, relative):
             raise RunBundleError(f"Refusing to overwrite symlink bundle file: {target}")
         value = contents[relative]
         if relative.endswith(".json"):
@@ -268,9 +268,9 @@ def intake_actor_result_payload(path: str | Path, actor: str, artifact: str | Pa
     artifact_path = _resolve_artifact_path(artifact, project_root)
     result = _actor_result_payload(actor, artifact_path, project_root)
     target = _safe_target(root, f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json")
-    if target.exists() and target.is_symlink():
+    if _is_symlink(target, f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json"):
         raise RunBundleError(f"Refusing to overwrite symlink actor result: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir(target.parent, f"actor result parent directory: {actor}")
     _write_json(target, result)
     results = _load_actor_results(root)
     return {
@@ -429,14 +429,14 @@ def _load_existing_bundle(path: str | Path, project_root: Path) -> dict[str, obj
     text_files: dict[str, str] = {}
     for relative in RUN_BUNDLE_REQUIRED_FILES:
         target = _safe_existing_bundle_file(root, relative)
-        if not target.exists():
+        if not _exists(target, relative):
             raise RunBundleError(f"Missing run bundle file: {relative}")
-        if target.is_symlink() or not target.is_file():
+        if _is_symlink(target, relative) or not _is_file(target, relative):
             raise RunBundleError(f"Invalid run bundle file: {relative}")
         if relative.endswith(".json"):
             json_files[relative] = _read_json_file(target, relative)
         else:
-            text_files[relative] = target.read_text(encoding="utf-8")
+            text_files[relative] = _read_text_file(target, relative)
     return {"root": root, "json": json_files, "text": text_files}
 
 
@@ -467,9 +467,12 @@ def _resolve_bundle_path(path: str | Path, project_root: Path) -> Path:
     requested = Path(path)
     if not requested.is_absolute():
         requested = project_root / requested
-    if requested.is_symlink():
+    if _is_symlink(requested, str(path)):
         raise RunBundleError(f"Refusing symlink run bundle path: {path}")
-    resolved = requested.resolve(strict=False)
+    try:
+        resolved = requested.resolve(strict=False)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to resolve run bundle path: {path}") from exc
     if resolved != base and base not in resolved.parents:
         raise RunBundleError(f"Refusing to read run bundle outside project root: {path}")
     return resolved
@@ -477,7 +480,10 @@ def _resolve_bundle_path(path: str | Path, project_root: Path) -> Path:
 
 def _safe_existing_bundle_file(root: Path, relative: str) -> Path:
     target = root / relative
-    resolved = target.resolve(strict=False)
+    try:
+        resolved = target.resolve(strict=False)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to resolve run bundle file: {relative}") from exc
     if root not in resolved.parents:
         raise RunBundleError(f"Refusing unsafe bundle path: {relative}")
     return target
@@ -486,8 +492,21 @@ def _safe_existing_bundle_file(root: Path, relative: str) -> Path:
 def _read_json_file(path: Path, relative: str) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        raise RunBundleError(f"Invalid UTF-8 in run bundle file: {relative}") from exc
     except json.JSONDecodeError as exc:
         raise RunBundleError(f"Invalid JSON in run bundle file: {relative}") from exc
+    except OSError as exc:
+        raise RunBundleError(f"Unable to read run bundle file: {relative}") from exc
+
+
+def _read_text_file(path: Path, relative: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise RunBundleError(f"Invalid UTF-8 in run bundle file: {relative}") from exc
+    except OSError as exc:
+        raise RunBundleError(f"Unable to read run bundle file: {relative}") from exc
 
 
 def _bundle_file_statuses(bundle: dict[str, object]) -> list[dict[str, object]]:
@@ -516,9 +535,9 @@ def _load_actor_results(root: Path) -> dict[str, dict[str, object]]:
     for actor in ALLOWED_ACTORS:
         relative = f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json"
         target = _safe_existing_bundle_file(root, relative)
-        if not target.exists():
+        if not _exists(target, relative):
             continue
-        if target.is_symlink() or not target.is_file():
+        if _is_symlink(target, relative) or not _is_file(target, relative):
             raise RunBundleError(f"Invalid actor result file: {relative}")
         value = _read_json_file(target, relative)
         if not isinstance(value, dict):
@@ -539,7 +558,10 @@ def _result_presence(results: dict[str, dict[str, object]]) -> dict[str, bool]:
 
 def _actor_result_payload(actor: str, artifact_path: Path, project_root: Path) -> dict[str, object]:
     # ponytail: P7-04 records artifact metadata only; bundle-portable byte copies are out of scope.
-    stat = artifact_path.stat()
+    try:
+        stat = artifact_path.stat()
+    except OSError as exc:
+        raise RunBundleError(f"Unable to stat artifact file: {artifact_path}") from exc
     return {
         "kind": "static_actor_result",
         "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
@@ -567,16 +589,22 @@ def _resolve_artifact_path(path: str | Path, project_root: Path) -> Path:
     requested = Path(path)
     if not requested.is_absolute():
         requested = project_root / requested
-    if requested.is_symlink():
+    if _is_symlink(requested, str(path)):
         raise RunBundleError(f"Refusing symlink artifact: {path}")
-    resolved = requested.resolve(strict=False)
+    try:
+        resolved = requested.resolve(strict=False)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to resolve artifact path: {path}") from exc
     if resolved != base and base not in resolved.parents:
         raise RunBundleError(f"Refusing artifact outside project root: {path}")
-    if not requested.exists():
+    if not _exists(requested, str(path)):
         raise RunBundleError(f"Missing artifact file: {path}")
-    if not requested.is_file():
+    if not _is_file(requested, str(path)):
         raise RunBundleError(f"Artifact path is not a file: {path}")
-    return requested.resolve(strict=True)
+    try:
+        return requested.resolve(strict=True)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to resolve artifact path: {path}") from exc
 
 
 def _project_relative_path(path: Path, project_root: Path) -> str:
@@ -585,9 +613,12 @@ def _project_relative_path(path: Path, project_root: Path) -> str:
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to read artifact file: {path}") from exc
     return digest.hexdigest()
 
 
@@ -681,15 +712,26 @@ def _resolve_out_path(out: str | Path, project_root: Path) -> Path:
     path = Path(out)
     if not path.is_absolute():
         path = project_root / path
-    resolved = path.resolve(strict=False)
+    if _is_symlink(path, str(out)):
+        raise RunBundleError(f"Refusing to write run bundle to symlink path: {out}")
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to resolve run bundle output path: {out}") from exc
     if resolved != base and base not in resolved.parents:
         raise RunBundleError(f"Refusing to write run bundle outside project root: {out}")
     return resolved
 
 
 def _safe_target(out_root: Path, relative: str) -> Path:
-    target = (out_root / relative).resolve(strict=False)
-    if target == out_root or out_root not in target.parents:
+    target = out_root / relative
+    if _is_symlink(target, relative):
+        return target
+    try:
+        resolved = target.resolve(strict=False)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to resolve bundle target: {relative}") from exc
+    if resolved == out_root or out_root not in resolved.parents:
         raise RunBundleError(f"Refusing unsafe bundle path: {relative}")
     return target
 
@@ -700,10 +742,41 @@ def _write_json(path: Path, value: object) -> None:
 
 def _write_text(path: Path, value: str) -> None:
     tmp = path.with_name(f"{path.name}.tmp")
-    if tmp.exists() and tmp.is_symlink():
+    if _is_symlink(tmp, str(tmp)):
         raise RunBundleError(f"Refusing to write temporary symlink: {tmp}")
-    tmp.write_text(value, encoding="utf-8")
-    tmp.replace(path)
+    try:
+        tmp.write_text(value, encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to write bundle file: {path}") from exc
+
+
+def _exists(path: Path, label: str) -> bool:
+    try:
+        return path.exists()
+    except OSError as exc:
+        raise RunBundleError(f"Unable to access path: {label}") from exc
+
+
+def _is_file(path: Path, label: str) -> bool:
+    try:
+        return path.is_file()
+    except OSError as exc:
+        raise RunBundleError(f"Unable to access path: {label}") from exc
+
+
+def _is_symlink(path: Path, label: str) -> bool:
+    try:
+        return path.is_symlink()
+    except OSError as exc:
+        raise RunBundleError(f"Unable to access path: {label}") from exc
+
+
+def _mkdir(path: Path, label: str) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to create directory: {label}") from exc
 
 
 def _bundle_readme(payload: dict[str, object]) -> str:
