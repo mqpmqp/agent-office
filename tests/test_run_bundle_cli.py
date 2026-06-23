@@ -938,6 +938,100 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
             self.assertEqual(item["artifact"]["path"], f"artifacts/{actor}.txt")
             self.assertEqual(item["artifact"]["sha256"], expected_hashes[actor])
 
+    def test_run_bundle_review_partial_intake_keeps_judge_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            content = "codex partial result"
+            artifact = self._write_artifact(project_root, "artifacts/codex.txt", content)
+            expected_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            exit_code, _stdout, stderr = run_cli(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(artifact.relative_to(project_root)),
+                    "--json",
+                ]
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            artifact.unlink()
+
+            review_code, review_stdout, review_stderr = run_cli(
+                ["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+
+        self.assertEqual(review_code, 0, review_stderr)
+        payload = json.loads(review_stdout)
+        self.assertTrue(payload["readiness"]["claude_review_ready"])
+        self.assertFalse(payload["readiness"]["actor_results_complete"])
+        self.assertFalse(payload["readiness"]["judge_ready"])
+        evidence = {item["actor"]: item for item in payload["actor_evidence"]}
+        self.assertTrue(evidence["codex"]["result_present"])
+        self.assertEqual(evidence["codex"]["artifact"]["path"], "artifacts/codex.txt")
+        self.assertEqual(evidence["codex"]["artifact"]["sha256"], expected_hash)
+        for actor in ("reviewer", "judge"):
+            self.assertFalse(evidence[actor]["result_present"])
+            self.assertIsNone(evidence[actor]["artifact"])
+
+    def test_run_bundle_review_text_reports_intaked_artifact_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            content = "codex text result"
+            artifact = self._write_artifact(project_root, "artifacts/codex.txt", content)
+            expected_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            exit_code, _stdout, stderr = run_cli(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(artifact.relative_to(project_root)),
+                    "--json",
+                ]
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            artifact.unlink()
+
+            review_code, review_stdout, review_stderr = run_cli(
+                ["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN"]
+            )
+
+        self.assertEqual(review_code, 0, review_stderr)
+        self.assertIn(
+            "  - codex: packet_file=packets/codex.json; packet_ready=true; result_present=true; result_file=results/codex.json",
+            review_stdout,
+        )
+        self.assertIn("    artifact: path=artifacts/codex.txt;", review_stdout)
+        self.assertIn(f"sha256={expected_hash}", review_stdout)
+        self.assertIn(
+            "  - reviewer: packet_file=packets/reviewer.json; packet_ready=true; result_present=false; result_file=results/reviewer.json",
+            review_stdout,
+        )
+        self.assertIn("judge_ready: false", review_stdout)
+
+    def test_run_bundle_review_rejects_symlink_bundle_path_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            real_dir = self._write_bundle(project_root)
+            link_dir = project_root / ".ai" / "runs" / "REVIEW-LINK"
+            link_dir.symlink_to(real_dir, target_is_directory=True)
+
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                ["run-bundle", "review", "--path", ".ai/runs/REVIEW-LINK", "--json"]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Refusing symlink run bundle path", stderr)
+
     def test_run_bundle_review_rejects_missing_bundle_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
             stdout, stderr = self.assert_exit_two_without_traceback(

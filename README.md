@@ -206,6 +206,8 @@ It summarizes run identity, objective/profile, bundle readiness, required review
 
 The action is static and local. It does not read `.env`, print environment values, execute actor artifacts, call providers, call adapters, call runtimes, create `.ai/` outputs, or mutate the bundle.
 
+`run-bundle review` exits 0 when the bundle is readable. Automation should read `readiness.claude_review_ready` and `readiness.judge_ready` from the payload instead of treating the process exit code as review readiness.
+
 ## Objective Specs
 
 P6-09 is the P6-10 objective spec bootstrap. It converts the completed P6-06/P6-07/P6-08 profile plan, doctor, and audit surfaces into a concrete P6-10 objective that can be inspected locally before implementation work starts.
