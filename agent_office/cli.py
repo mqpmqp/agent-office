@@ -1028,9 +1028,15 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
             payload = results_run_bundle_payload(args.path, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_results(payload))
             return 0
-        if not args.objective or not args.profile or not args.run_id:
-            raise RunBundleError("run-bundle requires --objective, --profile, and --run-id.")
-        payload = run_bundle_preview_payload(args.objective, args.profile, args.run_id)
+        if action == "preview":
+            if not args.objective or not args.profile:
+                raise RunBundleError("run-bundle preview requires --objective and --profile.")
+            run_id = args.run_id or args.objective
+        else:
+            if not args.objective or not args.profile or not args.run_id:
+                raise RunBundleError("run-bundle requires --objective, --profile, and --run-id.")
+            run_id = args.run_id
+        payload = run_bundle_preview_payload(args.objective, args.profile, run_id)
         if args.out:
             payload = dict(payload)
             payload["write_result"] = write_run_bundle(payload, args.out, PROJECT_ROOT)
@@ -1215,8 +1221,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--validate", action="store_true", help="Validate the static packet contract without executing it.")
     p.set_defaults(func=cmd_packet)
 
-    p = sub.add_parser("run-bundle", help="Build, inspect, validate, list, or check static local run bundles without executing providers.")
-    p.add_argument("bundle_action", nargs="?", choices=["inspect", "validate", "list", "status", "intake", "results", "handoff"], help="Bundle action.")
+    p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, or check static local run bundles without executing providers.")
+    p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff"], help="Bundle action.")
     p.add_argument("--objective", help="Objective id to bundle, for example P6-17.")
     p.add_argument("--profile", help="Provider profile name to use for the static bundle.")
     p.add_argument("--run-id", help="Static run bundle id.")
