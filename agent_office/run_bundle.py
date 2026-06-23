@@ -24,15 +24,19 @@ RUN_BUNDLE_REQUIRED_FILES = (
     "README.md",
 )
 RUN_BUNDLE_RESULTS_DIR = "results"
+RUN_BUNDLE_OBJECTIVE_ALIASES = {
+    "P6-PROFILES": "P6-17",
+}
 
 
-def run_bundle_preview_payload(objective_id: str, profile_name: str, run_id: str) -> dict[str, object]:
+def run_bundle_preview_payload(objective_id: str, profile_name: str, run_id: str, *, allow_alias: bool = False) -> dict[str, object]:
     _validate_run_id(run_id)
+    resolved_objective_id = _resolve_preview_objective(objective_id) if allow_alias else objective_id
     try:
-        plan = execution_blueprint_payload(objective_id, profile_name)
-        packets = {actor: execution_packet_payload(objective_id, profile_name, actor) for actor in ALLOWED_ACTORS}
+        plan = execution_blueprint_payload(resolved_objective_id, profile_name)
+        packets = {actor: execution_packet_payload(resolved_objective_id, profile_name, actor) for actor in ALLOWED_ACTORS}
         packet_validations = {
-            actor: packet_contract_validation_payload(objective_id, profile_name, actor) for actor in ALLOWED_ACTORS
+            actor: packet_contract_validation_payload(resolved_objective_id, profile_name, actor) for actor in ALLOWED_ACTORS
         }
     except (PlanningError, PacketError) as exc:
         raise RunBundleError(str(exc)) from exc
@@ -72,6 +76,11 @@ def run_bundle_preview_payload(objective_id: str, profile_name: str, run_id: str
         "env_required": False,
         "artifact_writes": False,
     }
+
+
+def _resolve_preview_objective(objective_id: str) -> str:
+    # ponytail: P6-PROFILES is a smoke/staged id; only explicit preview maps it to static P6-17.
+    return RUN_BUNDLE_OBJECTIVE_ALIASES.get(objective_id, objective_id)
 
 
 def write_run_bundle(payload: dict[str, object], out: str | Path, project_root: Path) -> dict[str, object]:

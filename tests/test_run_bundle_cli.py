@@ -63,6 +63,125 @@ class RunBundlePayloadTests(unittest.TestCase):
 class RunBundleCliTests(unittest.TestCase):
     maxDiff = None
 
+    def test_run_bundle_preview_action_accepts_profiles_smoke_alias_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            first_code, first_stdout, first_stderr = run_cli(
+                [
+                    "run-bundle",
+                    "preview",
+                    "--objective",
+                    "P6-PROFILES",
+                    "--profile",
+                    "lowest-cost",
+                    "--json",
+                ]
+            )
+            second_code, second_stdout, second_stderr = run_cli(
+                [
+                    "run-bundle",
+                    "preview",
+                    "--objective",
+                    "P6-PROFILES",
+                    "--profile",
+                    "lowest-cost",
+                    "--json",
+                ]
+            )
+            self.assertFalse((Path(tmpdir) / ".ai").exists())
+
+        self.assertEqual(first_code, 0, first_stderr)
+        self.assertEqual(second_code, 0, second_stderr)
+        self.assertEqual(first_stdout, second_stdout)
+        payload = json.loads(first_stdout)
+        self.assertEqual(payload["kind"], "static_run_bundle")
+        self.assertEqual(payload["run"]["run_id"], "P6-PROFILES")
+        self.assertEqual(payload["run"]["objective"]["id"], "P6-17")
+        self.assertEqual(payload["plan"]["objective_id"], "P6-17")
+        self.assertEqual(payload["plan"]["selected_profile"], "lowest-cost")
+        self.assertFalse(payload["execution_enabled"])
+        self.assertEqual(payload["provider_calls"], [])
+        self.assertFalse(payload["artifact_writes"])
+        self.assertEqual(payload["validation"]["required_files"], list(RUN_BUNDLE_REQUIRED_FILES))
+        self.assertTrue(payload["validation"]["valid"])
+
+    def test_run_bundle_implicit_build_rejects_profiles_smoke_alias_without_traceback(self) -> None:
+        exit_code, stdout, stderr = run_cli(
+            [
+                "run-bundle",
+                "--objective",
+                "P6-PROFILES",
+                "--profile",
+                "lowest-cost",
+                "--run-id",
+                "MYBUILD",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("Unknown objective: P6-PROFILES", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_run_bundle_preview_action_writes_full_bundle_and_reports_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            exit_code, stdout, stderr = run_cli(
+                [
+                    "run-bundle",
+                    "preview",
+                    "--objective",
+                    "P6-17",
+                    "--profile",
+                    "lowest-cost",
+                    "--out",
+                    ".ai/runs/P8-PREVIEW-FIX",
+                    "--json",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0, stderr)
+            payload = json.loads(stdout)
+            out_root = Path(tmpdir) / ".ai" / "runs" / "P8-PREVIEW-FIX"
+            for relative in RUN_BUNDLE_REQUIRED_FILES:
+                self.assertTrue((out_root / relative).is_file(), relative)
+
+        self.assertTrue(payload["artifact_writes"])
+        self.assertTrue(payload["write_result"]["enabled"])
+        self.assertEqual(payload["write_result"]["files_written"], list(RUN_BUNDLE_REQUIRED_FILES))
+        self.assertEqual(payload["run"]["run_id"], "P6-17")
+        self.assertEqual(payload["run"]["objective"]["id"], "P6-17")
+
+    def test_run_bundle_preview_action_preserves_explicit_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            exit_code, stdout, stderr = run_cli(
+                [
+                    "run-bundle",
+                    "preview",
+                    "--objective",
+                    "P6-17",
+                    "--profile",
+                    "lowest-cost",
+                    "--run-id",
+                    "CUSTOM-RID",
+                    "--json",
+                ]
+            )
+            self.assertFalse((Path(tmpdir) / ".ai").exists())
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["run"]["run_id"], "CUSTOM-RID")
+        self.assertEqual(payload["run"]["objective"]["id"], "P6-17")
+        self.assertFalse(payload["artifact_writes"])
+
+    def test_run_bundle_preview_action_requires_objective_and_profile_without_traceback(self) -> None:
+        exit_code, stdout, stderr = run_cli(["run-bundle", "preview", "--objective", "P6-PROFILES", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("run-bundle preview requires --objective and --profile", stderr)
+        self.assertNotIn("Traceback", stderr)
+
     def test_run_bundle_json_preview_does_not_write_ai_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
             exit_code, stdout, stderr = run_cli(
