@@ -29,9 +29,9 @@ RUN_BUNDLE_OBJECTIVE_ALIASES = {
 }
 
 
-def run_bundle_preview_payload(objective_id: str, profile_name: str, run_id: str) -> dict[str, object]:
+def run_bundle_preview_payload(objective_id: str, profile_name: str, run_id: str, *, allow_alias: bool = False) -> dict[str, object]:
     _validate_run_id(run_id)
-    resolved_objective_id = _resolve_preview_objective(objective_id)
+    resolved_objective_id = _resolve_preview_objective(objective_id) if allow_alias else objective_id
     try:
         plan = execution_blueprint_payload(resolved_objective_id, profile_name)
         packets = {actor: execution_packet_payload(resolved_objective_id, profile_name, actor) for actor in ALLOWED_ACTORS}
@@ -79,7 +79,7 @@ def run_bundle_preview_payload(objective_id: str, profile_name: str, run_id: str
 
 
 def _resolve_preview_objective(objective_id: str) -> str:
-    # ponytail: P6-PROFILES is the existing smoke/staged task id; preview resolves it to the static P6-17 objective.
+    # ponytail: P6-PROFILES is a smoke/staged id; only explicit preview maps it to static P6-17.
     return RUN_BUNDLE_OBJECTIVE_ALIASES.get(objective_id, objective_id)
 
 

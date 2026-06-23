@@ -1032,11 +1032,13 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
             if not args.objective or not args.profile:
                 raise RunBundleError("run-bundle preview requires --objective and --profile.")
             run_id = args.run_id or args.objective
+            allow_alias = True
         else:
             if not args.objective or not args.profile or not args.run_id:
                 raise RunBundleError("run-bundle requires --objective, --profile, and --run-id.")
             run_id = args.run_id
-        payload = run_bundle_preview_payload(args.objective, args.profile, run_id)
+            allow_alias = False
+        payload = run_bundle_preview_payload(args.objective, args.profile, run_id, allow_alias=allow_alias)
         if args.out:
             payload = dict(payload)
             payload["write_result"] = write_run_bundle(payload, args.out, PROJECT_ROOT)

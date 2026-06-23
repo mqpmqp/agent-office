@@ -34,10 +34,11 @@
    - Uses `--run-id` when supplied.
    - Defaults the preview-only `run_id` to the requested objective id when `--run-id` is omitted.
    - Preserves existing implicit build behavior, where `run-bundle --objective ... --profile ... --run-id ...` still requires all three fields.
-2. Added a narrow static preview alias in `agent_office/run_bundle.py`:
-   - `P6-PROFILES` resolves to `P6-17` for preview payload planning and packet validation.
+2. Added a narrow explicit `run-bundle preview` alias in `agent_office/run_bundle.py`:
+   - `P6-PROFILES` resolves to `P6-17` only when invoked through the explicit `run-bundle preview` action.
    - The emitted run identity remains `P6-PROFILES`, so the command output still reflects the requested smoke/staged target.
    - The plan and packet payloads remain based on the registered static objective `P6-17`.
+   - The implicit no-action build path rejects `P6-PROFILES` as an unknown objective.
 3. Added focused tests for:
    - explicit `run-bundle preview` with `P6-PROFILES` and `lowest-cost`;
    - deterministic repeated JSON output;
@@ -48,8 +49,8 @@
 
 ## Contracts Preserved
 
-- P8-01 JSON handoff contract: preserved. `run-bundle handoff --path .ai/runs/P8-HANDOFF --json` still returns deterministic JSON.
-- P8-03 human-readable handoff contract: preserved. `run-bundle handoff --path .ai/runs/P8-HANDOFF` still returns reviewer-ready deterministic text.
+- P8-01 JSON handoff contract: preserved. `run-bundle handoff --path .ai/runs/P8-HANDOFF --json` still returns deterministic JSON when the local untracked `.ai/runs/P8-HANDOFF` bundle exists.
+- P8-03 human-readable handoff contract: preserved. `run-bundle handoff --path .ai/runs/P8-HANDOFF` still returns reviewer-ready deterministic text when the local untracked `.ai/runs/P8-HANDOFF` bundle exists.
 - Existing run-bundle implicit build contract: preserved. The no-action build path still requires `--objective`, `--profile`, and `--run-id`.
 - Existing run-bundle inspect/validate/list/status/intake/results/handoff surfaces: unchanged.
 - Invalid path, missing bundle, traversal, symlink, and CLI argument negative paths continue to exit `2` without traceback.
@@ -74,8 +75,8 @@ All required positive validation commands passed on `phase8/p8-batch-completion`
 - `python3 -m agent_office run-staged P6-PROFILES --dry-run --reset`: PASS
 - `python3 -m agent_office profiles --name lowest-cost --plan --json`: PASS
 - `python3 -m agent_office run-bundle preview --objective P6-PROFILES --profile lowest-cost --json`: PASS
-- `python3 -m agent_office run-bundle handoff --path .ai/runs/P8-HANDOFF --json`: PASS
-- `python3 -m agent_office run-bundle handoff --path .ai/runs/P8-HANDOFF`: PASS
+- `python3 -m agent_office run-bundle handoff --path .ai/runs/P8-HANDOFF --json`: PASS on this VPS because local untracked `.ai/runs/P8-HANDOFF` existed; this branch does not create that bundle.
+- `python3 -m agent_office run-bundle handoff --path .ai/runs/P8-HANDOFF`: PASS on this VPS because local untracked `.ai/runs/P8-HANDOFF` existed; this branch does not create that bundle.
 - `git diff --check`: PASS after report write.
 
 ## Negative Validation Results
@@ -92,7 +93,7 @@ All required handoff negative checks exited `2` and produced no traceback.
   - Traceback: no
 - Symlink bundle path: `python3 -m agent_office run-bundle handoff --path .ai/runs/P8-HANDOFF-SYMLINK --json`
   - Exit code: `2`
-  - Error surface: argparse usage plus the existing symlink/path refusal message
+  - Error surface: existing symlink/path refusal message
   - Traceback: no
 - Preview missing profile focused test: exit `2`, no stdout, no traceback.
 
