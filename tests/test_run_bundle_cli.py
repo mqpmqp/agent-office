@@ -499,6 +499,7 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
                 ["run-bundle", "status", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
                 ["run-bundle", "list", "--root", ".ai/runs", "--json"],
                 ["run-bundle", "handoff", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
+                ["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
                 ["run-bundle", "results", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
             ]
             for command in commands:
@@ -784,6 +785,187 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
             self.assertTrue(payload["actor_readiness"][actor]["result_present"])
             self.assertTrue(payload["actor_readiness"][actor]["ready_for_judge"])
             self.assertIn("artifact", payload["actor_readiness"][actor])
+
+    def test_run_bundle_review_json_contract_is_static_and_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            before = self._bundle_file_snapshot(bundle)
+
+            first_code, first_stdout, first_stderr = run_cli(
+                ["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            second_code, second_stdout, second_stderr = run_cli(
+                ["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            after = self._bundle_file_snapshot(bundle)
+
+        self.assertEqual(first_code, 0, first_stderr)
+        self.assertEqual(second_code, 0, second_stderr)
+        self.assertEqual(first_stdout, second_stdout)
+        self.assertEqual(before, after)
+        payload = json.loads(first_stdout)
+        self.assertEqual(
+            list(payload),
+            [
+                "kind",
+                "review_schema_version",
+                "schema_version",
+                "path",
+                "run_id",
+                "objective",
+                "profile",
+                "review_goal",
+                "readiness",
+                "required_review_files",
+                "actor_evidence",
+                "validation",
+                "status",
+                "reviewer_commands",
+                "reviewer_contract",
+                "safety_flags",
+                "execution_boundary",
+                "external_behavior",
+                "read_only",
+                "execution_enabled",
+                "provider_calls",
+                "known_limitations",
+            ],
+        )
+        self.assertEqual(payload["kind"], "static_run_bundle_review_packet")
+        self.assertEqual(payload["review_schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["run_id"], "P7-STATIC-RUN")
+        self.assertEqual(payload["objective"]["id"], "P6-17")
+        self.assertEqual(payload["profile"]["selected"], "lowest-cost")
+        self.assertEqual(
+            payload["readiness"],
+            {
+                "bundle_valid": True,
+                "status": "ready",
+                "packets_ready_for_reviewer": True,
+                "actor_results_complete": False,
+                "claude_review_ready": True,
+                "judge_ready": False,
+            },
+        )
+        self.assertEqual([item["path"] for item in payload["required_review_files"]], list(RUN_BUNDLE_REQUIRED_FILES))
+        self.assertEqual([item["actor"] for item in payload["actor_evidence"]], list(PACKET_ACTORS))
+        for item in payload["actor_evidence"]:
+            actor = item["actor"]
+            self.assertEqual(item["packet_file"], f"packets/{actor}.json")
+            self.assertTrue(item["packet_ready"])
+            self.assertFalse(item["result_present"])
+            self.assertEqual(item["result_file"], f"results/{actor}.json")
+            self.assertIsNone(item["artifact"])
+            self.assertTrue(item["review_focus"])
+        self.assertTrue(payload["validation"]["valid"])
+        self.assertEqual(payload["status"], {"state": "ready", "errors": []})
+        self.assertIn(
+            "python3 -m agent_office run-bundle review --path .ai/runs/P7-STATIC-RUN --json",
+            payload["reviewer_commands"],
+        )
+        self.assertIn("must_review", payload["reviewer_contract"])
+        self.assertIn("must_preserve", payload["reviewer_contract"])
+        self.assertTrue(payload["safety_flags"]["read_only"])
+        self.assertFalse(payload["execution_boundary"]["external_behavior_triggered"])
+        self.assertFalse(payload["external_behavior"]["artifact_writes"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_enabled"])
+        self.assertEqual(payload["provider_calls"], [])
+        self.assertIn("does not execute actors", payload["known_limitations"][0])
+
+    def test_run_bundle_review_text_contract_is_static_and_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            before = self._bundle_file_snapshot(bundle)
+
+            first_code, first_stdout, first_stderr = run_cli(["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN"])
+            second_code, second_stdout, second_stderr = run_cli(["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN"])
+            after = self._bundle_file_snapshot(bundle)
+
+        self.assertEqual(first_code, 0, first_stderr)
+        self.assertEqual(second_code, 0, second_stderr)
+        self.assertEqual(first_stdout, second_stdout)
+        self.assertEqual(before, after)
+        self.assertIn("AgentOffice static run bundle review packet", first_stdout)
+        self.assertIn(f"path: {bundle}", first_stdout)
+        self.assertIn("claude_review_ready: true", first_stdout)
+        self.assertIn("judge_ready: false", first_stdout)
+        self.assertIn("required_review_files:", first_stdout)
+        self.assertIn("  - codex: packet_file=packets/codex.json; packet_ready=true; result_present=false; result_file=results/codex.json", first_stdout)
+        self.assertIn("reviewer_contract:", first_stdout)
+        self.assertIn("provider/runtime/adapter execution: not triggered", first_stdout)
+
+    def test_run_bundle_review_reports_result_evidence_without_reading_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            expected_hashes = {}
+            artifacts = []
+            for actor in PACKET_ACTORS:
+                content = f"{actor} result evidence"
+                artifact = self._write_artifact(project_root, f"artifacts/{actor}.txt", content)
+                expected_hashes[actor] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                artifacts.append(artifact)
+                exit_code, _stdout, stderr = run_cli(
+                    [
+                        "run-bundle",
+                        "intake",
+                        "--path",
+                        ".ai/runs/P7-STATIC-RUN",
+                        "--actor",
+                        actor,
+                        "--artifact",
+                        str(artifact.relative_to(project_root)),
+                        "--json",
+                    ]
+                )
+                self.assertEqual(exit_code, 0, stderr)
+            for artifact in artifacts:
+                artifact.unlink()
+
+            exit_code, stdout, stderr = run_cli(["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["readiness"]["actor_results_complete"])
+        self.assertTrue(payload["readiness"]["judge_ready"])
+        for item in payload["actor_evidence"]:
+            actor = item["actor"]
+            self.assertTrue(item["result_present"])
+            self.assertEqual(item["artifact"]["path"], f"artifacts/{actor}.txt")
+            self.assertEqual(item["artifact"]["sha256"], expected_hashes[actor])
+
+    def test_run_bundle_review_rejects_missing_bundle_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                ["run-bundle", "review", "--path", ".ai/runs/MISSING", "--json"]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Run bundle path is not a directory", stderr)
+
+    def test_run_bundle_review_rejects_bad_bundle_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            (bundle / "packets" / "judge.json").unlink()
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                ["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Missing run bundle file: packets/judge.json", stderr)
+
+    def test_run_bundle_review_rejects_path_traversal_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                ["run-bundle", "review", "--path", "../outside-bundle", "--json"]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Refusing to read run bundle outside project root", stderr)
 
     def test_run_bundle_handoff_text_rejects_missing_bundle_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
@@ -1134,6 +1316,7 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
                 ["run-bundle", "validate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
                 ["run-bundle", "status", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
                 ["run-bundle", "handoff", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
+                ["run-bundle", "review", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
                 ["run-bundle", "results", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
                 [
                     "run-bundle",

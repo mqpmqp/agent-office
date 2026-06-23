@@ -14,6 +14,7 @@ class RunBundleError(ValueError):
 
 RUN_BUNDLE_SCHEMA_VERSION = 1
 HANDOFF_SCHEMA_VERSION = 1
+REVIEW_PACKET_SCHEMA_VERSION = 1
 RUN_BUNDLE_REQUIRED_FILES = (
     "run.json",
     "plan.json",
@@ -418,6 +419,308 @@ def handoff_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str
             "Reject or request changes if required files, actor readiness, or safety flags are incomplete.",
         ],
         "external_behavior": _read_only_external_behavior(),
+    }
+
+
+
+def review_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, object]:
+    handoff = handoff_run_bundle_payload(path, project_root)
+    validation = validate_run_bundle_payload(path, project_root)
+    status = status_run_bundle_payload(path, project_root)
+    result_presence = _expect_dict(handoff, "result_presence")
+    actor_readiness = _expect_dict(handoff, "actor_readiness")
+
+    actor_evidence: list[dict[str, object]] = []
+    for actor in ALLOWED_ACTORS:
+        readiness = actor_readiness.get(actor)
+        if not isinstance(readiness, dict):
+            readiness = {}
+        artifact = readiness.get("artifact") if isinstance(readiness.get("artifact"), dict) else None
+        actor_evidence.append(
+            {
+                "actor": actor,
+                "packet_file": f"packets/{actor}.json",
+                "packet_ready": readiness.get("ready_for_reviewer") is True,
+                "result_present": result_presence.get(actor) is True,
+                "result_file": f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json",
+                "artifact": artifact,
+                "review_focus": _actor_review_focus(actor),
+            }
+        )
+
+    bundle_valid = validation.get("valid") is True and status.get("status") == "ready"
+    packets_ready = all(item["packet_ready"] is True for item in actor_evidence)
+    actor_results_complete = all(item["result_present"] is True for item in actor_evidence)
+    return {
+        "kind": "static_run_bundle_review_packet",
+        "review_schema_version": REVIEW_PACKET_SCHEMA_VERSION,
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "path": handoff["path"],
+        "run_id": handoff["run_id"],
+        "objective": handoff["objective"],
+        "profile": handoff["profile"],
+        "review_goal": "Give Claude Code one deterministic, read-only packet for reviewing the static AgentOffice run bundle lifecycle.",
+        "readiness": {
+            "bundle_valid": bundle_valid,
+            "status": status.get("status"),
+            "packets_ready_for_reviewer": packets_ready,
+            "actor_results_complete": actor_results_complete,
+            "claude_review_ready": bundle_valid and packets_ready,
+            "judge_ready": bundle_valid and packets_ready and actor_results_complete,
+        },
+        "required_review_files": _review_required_files(handoff.get("files")),
+        "actor_evidence": actor_evidence,
+        "validation": {
+            "valid": validation.get("valid") is True,
+            "checks": validation.get("checks") if isinstance(validation.get("checks"), list) else [],
+        },
+        "status": {
+            "state": status.get("status"),
+            "errors": status.get("errors") if isinstance(status.get("errors"), list) else [],
+        },
+        "reviewer_commands": _review_validation_commands(handoff.get("validation_commands"), path),
+        "reviewer_contract": _reviewer_contract(),
+        "safety_flags": handoff["safety_flags"],
+        "execution_boundary": handoff["execution_boundary"],
+        "external_behavior": _read_only_external_behavior(),
+        "read_only": True,
+        "execution_enabled": False,
+        "provider_calls": [],
+        "known_limitations": [
+            "This packet summarizes static bundle metadata only; it does not execute actors or artifact content.",
+            "Actor result artifacts are represented by intake metadata; source artifact bytes are not reread during review.",
+            "judge_ready requires all actor result metadata to be present; claude_review_ready only requires a valid static bundle and reviewer-ready packets.",
+        ],
+    }
+
+
+def format_run_bundle_review(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice static run bundle review packet",
+        f"schema_version: {payload['schema_version']}",
+        f"review_schema_version: {payload['review_schema_version']}",
+        f"path: {payload['path']}",
+        f"run_id: {payload['run_id']}",
+        f"objective: {_format_handoff_objective(payload.get('objective'))}",
+        f"profile: {_format_handoff_profile(payload.get('profile'))}",
+        f"review_goal: {payload['review_goal']}",
+        "readiness:",
+    ]
+    readiness = payload.get("readiness")
+    if isinstance(readiness, dict):
+        for key in (
+            "bundle_valid",
+            "status",
+            "packets_ready_for_reviewer",
+            "actor_results_complete",
+            "claude_review_ready",
+            "judge_ready",
+        ):
+            lines.append(f"  {key}: {_format_scalar(readiness.get(key))}")
+
+    lines.append("required_review_files:")
+    files = payload.get("required_review_files")
+    if isinstance(files, list):
+        for item in files:
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {item.get('path')}: {item.get('status')}; "
+                    f"kind={item.get('kind')}; parsed={_format_scalar(item.get('parsed'))}; "
+                    f"purpose={item.get('purpose')}"
+                )
+
+    lines.append("actor_evidence:")
+    evidence = payload.get("actor_evidence")
+    if isinstance(evidence, list):
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"  - {item.get('actor')}: packet_file={item.get('packet_file')}; "
+                f"packet_ready={_format_scalar(item.get('packet_ready'))}; "
+                f"result_present={_format_scalar(item.get('result_present'))}; "
+                f"result_file={item.get('result_file')}"
+            )
+            artifact = item.get("artifact")
+            if isinstance(artifact, dict):
+                lines.append(
+                    f"    artifact: path={_format_scalar(artifact.get('path'))}; "
+                    f"size_bytes={_format_scalar(artifact.get('size_bytes'))}; "
+                    f"sha256={_format_scalar(artifact.get('sha256'))}"
+                )
+            focus = item.get("review_focus")
+            if isinstance(focus, list):
+                for value in focus:
+                    lines.append(f"    focus: {value}")
+
+    validation = payload.get("validation")
+    lines.append("validation:")
+    if isinstance(validation, dict):
+        lines.append(f"  valid: {_format_scalar(validation.get('valid'))}")
+        checks = validation.get("checks")
+        if isinstance(checks, list):
+            for check in checks:
+                if isinstance(check, dict):
+                    lines.append(f"  - {check.get('name')}: {check.get('status')}")
+
+    status = payload.get("status")
+    lines.append("status:")
+    if isinstance(status, dict):
+        lines.append(f"  state: {_format_scalar(status.get('state'))}")
+        errors = status.get("errors")
+        if isinstance(errors, list) and errors:
+            for error in errors:
+                lines.append(f"  error: {error}")
+        else:
+            lines.append("  errors: []")
+
+    lines.append("reviewer_commands:")
+    commands = payload.get("reviewer_commands")
+    if isinstance(commands, list):
+        for command in commands:
+            lines.append(f"  - {command}")
+
+    contract = payload.get("reviewer_contract")
+    if isinstance(contract, dict):
+        lines.append("reviewer_contract:")
+        for section in ("must_review", "must_preserve", "risk_focus", "non_goals"):
+            lines.append(f"  {section}:")
+            values = contract.get(section)
+            if isinstance(values, list):
+                for value in values:
+                    lines.append(f"    - {value}")
+
+    lines.append("safety_flags:")
+    safety_flags = payload.get("safety_flags")
+    if isinstance(safety_flags, dict):
+        for key in (
+            "no_env_read_expected",
+            "no_env_vars_printed_expected",
+            "no_provider_runtime_adapter_expected",
+            "no_real_runner_expected",
+            "read_only",
+        ):
+            lines.append(f"  {key}: {_format_scalar(safety_flags.get(key))}")
+
+    lines.append("execution_boundary:")
+    boundary = payload.get("execution_boundary")
+    if isinstance(boundary, dict):
+        for key in (
+            "execution_enabled",
+            "provider_calls",
+            "runtime_calls",
+            "adapter_calls",
+            "real_runner",
+            "external_behavior_triggered",
+            "artifact_content_executed",
+        ):
+            lines.append(f"  {key}: {_format_scalar(boundary.get(key))}")
+
+    lines.append("known_limitations:")
+    limitations = payload.get("known_limitations")
+    if isinstance(limitations, list):
+        for value in limitations:
+            lines.append(f"  - {value}")
+
+    lines.extend(
+        [
+            "read_only: true",
+            "execution_enabled: false",
+            "provider_calls: []",
+            "provider/runtime/adapter execution: not triggered",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _review_required_files(files: object) -> list[dict[str, object]]:
+    status_by_path = {item.get("path"): item for item in files if isinstance(item, dict)} if isinstance(files, list) else {}
+    purposes = {
+        "run.json": "run identity, actor list, and static safety flags",
+        "plan.json": "objective/profile plan and validation command source",
+        "packets/codex.json": "Codex implementation packet evidence",
+        "packets/reviewer.json": "Reviewer packet evidence",
+        "packets/judge.json": "Judge packet evidence",
+        "validation.json": "structural bundle validation contract",
+        "README.md": "human bundle summary",
+    }
+    review_files: list[dict[str, object]] = []
+    for relative in RUN_BUNDLE_REQUIRED_FILES:
+        item = status_by_path.get(relative)
+        review_files.append(
+            {
+                "path": relative,
+                "status": item.get("status") if isinstance(item, dict) else "unknown",
+                "kind": item.get("kind") if isinstance(item, dict) else ("markdown" if relative.endswith(".md") else "json"),
+                "parsed": item.get("parsed") if isinstance(item, dict) else False,
+                "purpose": purposes[relative],
+            }
+        )
+    return review_files
+
+
+def _review_validation_commands(commands: object, path: str | Path) -> list[str]:
+    result: list[str] = []
+    if isinstance(commands, list):
+        for command in commands:
+            if isinstance(command, str) and command not in result:
+                result.append(command)
+    path_text = str(path)
+    for command in (
+        f"python3 -m agent_office run-bundle inspect --path {path_text} --json",
+        f"python3 -m agent_office run-bundle validate --path {path_text} --json",
+        f"python3 -m agent_office run-bundle status --path {path_text} --json",
+        f"python3 -m agent_office run-bundle results --path {path_text} --json",
+        f"python3 -m agent_office run-bundle handoff --path {path_text} --json",
+        f"python3 -m agent_office run-bundle review --path {path_text} --json",
+    ):
+        if command not in result:
+            result.append(command)
+    return result
+
+
+def _actor_review_focus(actor: str) -> list[str]:
+    focus = {
+        "codex": [
+            "implementation evidence matches the objective and does not exceed the static packet",
+            "tests and verification commands cover changed behavior",
+        ],
+        "reviewer": [
+            "review findings are evidence-backed and distinguish blockers from limitations",
+            "safety boundaries remain explicit in the handoff and review packet",
+        ],
+        "judge": [
+            "final decision uses static bundle evidence only",
+            "missing actor results prevent judge readiness even when Claude review can proceed",
+        ],
+    }
+    return focus[actor]
+
+
+def _reviewer_contract() -> dict[str, list[str]]:
+    return {
+        "must_review": [
+            "run identity, objective, and profile are consistent across run.json, plan.json, packets, and validation.json.",
+            "actor packets are present, static, and reviewer-ready before judging result evidence.",
+            "actor result metadata, when present, records artifact path, size, and sha256 without executing content.",
+            "validation and smoke commands are reproducible from this packet.",
+        ],
+        "must_preserve": [
+            "No .env reads or environment variable value printing.",
+            "No provider, runtime, adapter, or real runner external behavior.",
+            "No artifact content execution from review, handoff, status, validate, inspect, list, or results actions.",
+            "Expected user errors exit without traceback.",
+        ],
+        "risk_focus": [
+            "Path traversal, symlink, missing file, bad JSON, and non-UTF-8 surfaces remain uniform.",
+            "JSON field order and text headings remain deterministic for reviewer automation.",
+            "judge_ready stays stricter than claude_review_ready when actor results are missing.",
+        ],
+        "non_goals": [
+            "Do not execute actors from the review packet.",
+            "Do not call providers or real adapters.",
+            "Do not mutate the bundle while reviewing it.",
+        ],
     }
 
 

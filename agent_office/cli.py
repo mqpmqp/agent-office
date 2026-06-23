@@ -54,6 +54,7 @@ from .run_bundle import (
     format_run_bundle_handoff,
     format_run_bundle_inspection,
     format_run_bundle_preview,
+    format_run_bundle_review,
     format_run_bundle_results,
     format_run_bundle_status,
     format_run_bundle_validation,
@@ -62,6 +63,7 @@ from .run_bundle import (
     intake_actor_result_payload,
     list_run_bundles_payload,
     results_run_bundle_payload,
+    review_run_bundle_payload,
     run_bundle_preview_payload,
     status_run_bundle_payload,
     validate_run_bundle_payload,
@@ -998,6 +1000,12 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
             payload = handoff_run_bundle_payload(args.path, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_handoff(payload))
             return 0
+        if action == "review":
+            if not args.path:
+                raise RunBundleError("run-bundle review requires --path.")
+            payload = review_run_bundle_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_review(payload))
+            return 0
         if action == "inspect":
             if not args.path:
                 raise RunBundleError("run-bundle inspect requires --path.")
@@ -1224,12 +1232,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_packet)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, or check static local run bundles without executing providers.")
-    p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff"], help="Bundle action.")
+    p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review"], help="Bundle action.")
     p.add_argument("--objective", help="Objective id to bundle, for example P6-17.")
     p.add_argument("--profile", help="Provider profile name to use for the static bundle.")
     p.add_argument("--run-id", help="Static run bundle id.")
     p.add_argument("--out", help="Explicit output directory for writing the local bundle.")
-    p.add_argument("--path", help="Static run bundle directory for inspect, validate, status, intake, results, or handoff.")
+    p.add_argument("--path", help="Static run bundle directory for inspect, validate, status, intake, results, handoff, or review.")
     p.add_argument("--root", help="Static run bundle catalog root for list.")
     p.add_argument("--actor", help="Static actor result owner: codex, reviewer, or judge.")
     p.add_argument("--artifact", help="Project-local artifact file to intake as actor result metadata.")
