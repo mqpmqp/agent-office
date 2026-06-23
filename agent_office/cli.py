@@ -49,13 +49,17 @@ from .profiles import (
 )
 from .run_bundle import (
     RunBundleError,
+    format_actor_result_intake,
     format_run_bundle_catalog,
     format_run_bundle_inspection,
     format_run_bundle_preview,
+    format_run_bundle_results,
     format_run_bundle_status,
     format_run_bundle_validation,
     inspect_run_bundle_payload,
+    intake_actor_result_payload,
     list_run_bundles_payload,
+    results_run_bundle_payload,
     run_bundle_preview_payload,
     status_run_bundle_payload,
     validate_run_bundle_payload,
@@ -1004,6 +1008,18 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
             payload = status_run_bundle_payload(args.path, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_status(payload))
             return 0 if payload["status"] == "ready" else 2
+        if action == "intake":
+            if not args.path or not args.actor or not args.artifact:
+                raise RunBundleError("run-bundle intake requires --path, --actor, and --artifact.")
+            payload = intake_actor_result_payload(args.path, args.actor, args.artifact, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_actor_result_intake(payload))
+            return 0
+        if action == "results":
+            if not args.path:
+                raise RunBundleError("run-bundle results requires --path.")
+            payload = results_run_bundle_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_results(payload))
+            return 0
         if not args.objective or not args.profile or not args.run_id:
             raise RunBundleError("run-bundle requires --objective, --profile, and --run-id.")
         payload = run_bundle_preview_payload(args.objective, args.profile, args.run_id)
@@ -1192,13 +1208,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_packet)
 
     p = sub.add_parser("run-bundle", help="Build, inspect, validate, list, or check static local run bundles without executing providers.")
-    p.add_argument("bundle_action", nargs="?", choices=["inspect", "validate", "list", "status"], help="Read-only bundle action.")
+    p.add_argument("bundle_action", nargs="?", choices=["inspect", "validate", "list", "status", "intake", "results"], help="Bundle action.")
     p.add_argument("--objective", help="Objective id to bundle, for example P6-17.")
     p.add_argument("--profile", help="Provider profile name to use for the static bundle.")
     p.add_argument("--run-id", help="Static run bundle id.")
     p.add_argument("--out", help="Explicit output directory for writing the local bundle.")
-    p.add_argument("--path", help="Static run bundle directory for inspect, validate, or status.")
+    p.add_argument("--path", help="Static run bundle directory for inspect, validate, status, intake, or results.")
     p.add_argument("--root", help="Static run bundle catalog root for list.")
+    p.add_argument("--actor", help="Static actor result owner: codex, reviewer, or judge.")
+    p.add_argument("--artifact", help="Project-local artifact file to intake as actor result metadata.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_run_bundle)
 
