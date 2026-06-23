@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -21,6 +22,7 @@ RUN_BUNDLE_REQUIRED_FILES = (
     "validation.json",
     "README.md",
 )
+RUN_BUNDLE_RESULTS_DIR = "results"
 
 
 def run_bundle_preview_payload(objective_id: str, profile_name: str, run_id: str) -> dict[str, object]:
@@ -217,6 +219,7 @@ def status_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str,
     errors: list[str] = []
     run: dict[str, object] = {}
     files: list[dict[str, object]] = []
+    results: dict[str, dict[str, object]] = {}
     try:
         bundle = _load_existing_bundle(path, project_root)
         try:
@@ -228,6 +231,10 @@ def status_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str,
             if isinstance(maybe_run, dict):
                 run = maybe_run
         files = _bundle_file_statuses(bundle)
+        try:
+            results = _load_actor_results(root)
+        except RunBundleError as exc:
+            errors.append(str(exc))
     except RunBundleError as exc:
         errors.append(str(exc))
     objective = run.get("objective") if isinstance(run.get("objective"), dict) else None
@@ -246,8 +253,55 @@ def status_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str,
         "provider_calls": provider_calls,
         "required_files": list(RUN_BUNDLE_REQUIRED_FILES),
         "files": files,
+        "result_presence": _result_presence(results),
         "status": "invalid" if errors else "ready",
         "errors": errors,
+        "external_behavior": _read_only_external_behavior(),
+    }
+
+
+def intake_actor_result_payload(path: str | Path, actor: str, artifact: str | Path, project_root: Path) -> dict[str, object]:
+    _validate_actor(actor)
+    bundle = _load_existing_bundle(path, project_root)
+    run = _validate_loaded_bundle(bundle)
+    root = _expect_path(bundle, "root")
+    artifact_path = _resolve_artifact_path(artifact, project_root)
+    result = _actor_result_payload(actor, artifact_path, project_root)
+    target = _safe_target(root, f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json")
+    if target.exists() and target.is_symlink():
+        raise RunBundleError(f"Refusing to overwrite symlink actor result: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(target, result)
+    results = _load_actor_results(root)
+    return {
+        "kind": "static_actor_result_intake",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "path": str(root),
+        "run_id": run["run_id"],
+        "actor": actor,
+        "result_file": f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json",
+        "result": result,
+        "result_presence": _result_presence(results),
+        "execution_enabled": False,
+        "provider_calls": [],
+        "external_behavior": _local_write_external_behavior(),
+    }
+
+
+def results_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, object]:
+    bundle = _load_existing_bundle(path, project_root)
+    run = _validate_loaded_bundle(bundle)
+    root = _expect_path(bundle, "root")
+    results = _load_actor_results(root)
+    return {
+        "kind": "static_actor_results",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "path": str(root),
+        "run_id": run["run_id"],
+        "results": [results[actor] for actor in ALLOWED_ACTORS if actor in results],
+        "result_presence": _result_presence(results),
+        "execution_enabled": False,
+        "provider_calls": [],
         "external_behavior": _read_only_external_behavior(),
     }
 
@@ -316,6 +370,11 @@ def format_run_bundle_status(payload: dict[str, object]) -> str:
     ]
     for relative in payload["required_files"]:
         lines.append(f"  - {relative}")
+    lines.append("results:")
+    result_presence = payload.get("result_presence")
+    if isinstance(result_presence, dict):
+        for actor in ALLOWED_ACTORS:
+            lines.append(f"  - {actor}: {str(bool(result_presence.get(actor))).lower()}")
     lines.append(f"status: {payload['status']}")
     errors = payload.get("errors")
     if isinstance(errors, list) and errors:
@@ -325,6 +384,40 @@ def format_run_bundle_status(payload: dict[str, object]) -> str:
     else:
         lines.append("errors: []")
     lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
+def format_actor_result_intake(payload: dict[str, object]) -> str:
+    result = _expect_dict(payload, "result")
+    artifact = _expect_dict(result, "artifact")
+    return "\n".join(
+        [
+            "AgentOffice static actor result intake",
+            f"path: {payload['path']}",
+            f"run_id: {payload['run_id']}",
+            f"actor: {payload['actor']}",
+            f"artifact: {artifact['path']}",
+            f"result_file: {payload['result_file']}",
+            "execution_enabled: false",
+            "provider_calls: []",
+            "provider/runtime/adapter execution: not triggered",
+        ]
+    )
+
+
+def format_run_bundle_results(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice static actor results",
+        f"path: {payload['path']}",
+        f"run_id: {payload['run_id']}",
+        "results:",
+    ]
+    for result in payload["results"]:
+        if isinstance(result, dict):
+            artifact = result.get("artifact")
+            path = artifact.get("path") if isinstance(artifact, dict) else None
+            lines.append(f"  - {result.get('actor')}: {path}")
+    lines.extend(["execution_enabled: false", "provider_calls: []", "provider/runtime/adapter execution: not triggered"])
     return "\n".join(lines)
 
 
@@ -418,6 +511,86 @@ def _packet_actors_present(bundle: dict[str, object]) -> bool:
     return all(_expect_dict(json_files, f"packets/{actor}.json").get("actor") == actor for actor in ALLOWED_ACTORS)
 
 
+def _load_actor_results(root: Path) -> dict[str, dict[str, object]]:
+    results: dict[str, dict[str, object]] = {}
+    for actor in ALLOWED_ACTORS:
+        relative = f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json"
+        target = _safe_existing_bundle_file(root, relative)
+        if not target.exists():
+            continue
+        if target.is_symlink() or not target.is_file():
+            raise RunBundleError(f"Invalid actor result file: {relative}")
+        value = _read_json_file(target, relative)
+        if not isinstance(value, dict):
+            raise RunBundleError(f"Malformed actor result file: {relative}")
+        if value.get("actor") != actor:
+            raise RunBundleError(f"Actor result mismatch: {relative}")
+        if value.get("execution_enabled") is not False:
+            raise RunBundleError(f"Actor result execution_enabled must be false: {relative}")
+        if value.get("provider_calls") != []:
+            raise RunBundleError(f"Actor result provider_calls must be empty: {relative}")
+        results[actor] = value
+    return results
+
+
+def _result_presence(results: dict[str, dict[str, object]]) -> dict[str, bool]:
+    return {actor: actor in results for actor in ALLOWED_ACTORS}
+
+
+def _actor_result_payload(actor: str, artifact_path: Path, project_root: Path) -> dict[str, object]:
+    # ponytail: P7-04 records artifact metadata only; bundle-portable byte copies are out of scope.
+    stat = artifact_path.stat()
+    return {
+        "kind": "static_actor_result",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "actor": actor,
+        "artifact": {
+            "path": _project_relative_path(artifact_path, project_root),
+            "size_bytes": stat.st_size,
+            "sha256": _sha256_file(artifact_path),
+        },
+        "execution_enabled": False,
+        "provider_calls": [],
+        "runtime_calls": False,
+        "adapter_calls": False,
+        "real_runner": False,
+    }
+
+
+def _validate_actor(actor: str) -> None:
+    if actor not in ALLOWED_ACTORS:
+        raise RunBundleError("run-bundle actor must be codex, reviewer, or judge")
+
+
+def _resolve_artifact_path(path: str | Path, project_root: Path) -> Path:
+    base = project_root.resolve()
+    requested = Path(path)
+    if not requested.is_absolute():
+        requested = project_root / requested
+    if requested.is_symlink():
+        raise RunBundleError(f"Refusing symlink artifact: {path}")
+    resolved = requested.resolve(strict=False)
+    if resolved != base and base not in resolved.parents:
+        raise RunBundleError(f"Refusing artifact outside project root: {path}")
+    if not requested.exists():
+        raise RunBundleError(f"Missing artifact file: {path}")
+    if not requested.is_file():
+        raise RunBundleError(f"Artifact path is not a file: {path}")
+    return requested.resolve(strict=True)
+
+
+def _project_relative_path(path: Path, project_root: Path) -> str:
+    return path.resolve().relative_to(project_root.resolve()).as_posix()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _read_only_external_behavior() -> dict[str, bool]:
     return {
         "env_reads": False,
@@ -428,6 +601,12 @@ def _read_only_external_behavior() -> dict[str, bool]:
         "artifact_writes": False,
         "real_runner": False,
     }
+
+
+def _local_write_external_behavior() -> dict[str, bool]:
+    behavior = _read_only_external_behavior()
+    behavior["artifact_writes"] = True
+    return behavior
 
 
 def _format_identity(value: object) -> str:
@@ -546,6 +725,13 @@ This bundle is static and local. Execution is disabled, provider calls are empty
 def _expect_dict(payload: dict[str, object], key: str) -> dict[str, object]:
     value = payload.get(key)
     if not isinstance(value, dict):
+        raise RunBundleError(f"Malformed run bundle payload: missing {key}")
+    return value
+
+
+def _expect_path(payload: dict[str, object], key: str) -> Path:
+    value = payload.get(key)
+    if not isinstance(value, Path):
         raise RunBundleError(f"Malformed run bundle payload: missing {key}")
     return value
 

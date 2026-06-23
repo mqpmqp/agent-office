@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tempfile
@@ -297,6 +298,281 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertEqual(status["status"], "invalid")
         self.assertIn("Missing run bundle file: packets/judge.json", status["errors"])
         self.assertNotIn("Traceback", stdout)
+
+    def _write_artifact(self, project_root: Path, relative: str, content: str = "artifact") -> Path:
+        artifact = project_root / relative
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(content, encoding="utf-8")
+        return artifact
+
+    def assert_exit_two_without_traceback(self, argv: list[str]) -> tuple[str, str]:
+        exit_code, stdout, stderr = run_cli(argv)
+        self.assertEqual(exit_code, 2)
+        self.assertNotIn("Traceback", stdout)
+        self.assertNotIn("Traceback", stderr)
+        return stdout, stderr
+
+    def test_run_bundle_intake_results_and_status_json_for_all_actors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            expected_hashes = {}
+
+            for actor in PACKET_ACTORS:
+                content = f"{actor} local result artifact"
+                artifact = self._write_artifact(project_root, f"artifacts/{actor}.txt", content)
+                expected_hashes[actor] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                exit_code, stdout, stderr = run_cli(
+                    [
+                        "run-bundle",
+                        "intake",
+                        "--path",
+                        ".ai/runs/P7-STATIC-RUN",
+                        "--actor",
+                        actor,
+                        "--artifact",
+                        str(artifact.relative_to(project_root)),
+                        "--json",
+                    ]
+                )
+
+                self.assertEqual(exit_code, 0, stderr)
+                payload = json.loads(stdout)
+                self.assertEqual(payload["kind"], "static_actor_result_intake")
+                self.assertEqual(payload["actor"], actor)
+                self.assertFalse(payload["execution_enabled"])
+                self.assertEqual(payload["provider_calls"], [])
+                self.assertFalse(payload["external_behavior"]["provider_calls"])
+                self.assertFalse(payload["external_behavior"]["runtime_calls"])
+                self.assertFalse(payload["external_behavior"]["adapter_calls"])
+                self.assertTrue(payload["external_behavior"]["artifact_writes"])
+                self.assertEqual(payload["result"]["artifact"]["path"], f"artifacts/{actor}.txt")
+                self.assertEqual(payload["result"]["artifact"]["sha256"], expected_hashes[actor])
+                self.assertTrue((bundle / "results" / f"{actor}.json").is_file())
+
+            results_code, results_stdout, results_stderr = run_cli(
+                ["run-bundle", "results", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            self.assertEqual(results_code, 0, results_stderr)
+            results_payload = json.loads(results_stdout)
+            self.assertEqual(results_payload["kind"], "static_actor_results")
+            self.assertFalse(results_payload["execution_enabled"])
+            self.assertEqual(results_payload["provider_calls"], [])
+            self.assertFalse(results_payload["external_behavior"]["artifact_writes"])
+            self.assertEqual([item["actor"] for item in results_payload["results"]], list(PACKET_ACTORS))
+            self.assertEqual(results_payload["result_presence"], {actor: True for actor in PACKET_ACTORS})
+
+            status_code, status_stdout, status_stderr = run_cli(
+                ["run-bundle", "status", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            self.assertEqual(status_code, 0, status_stderr)
+            status_payload = json.loads(status_stdout)
+            self.assertEqual(status_payload["status"], "ready")
+            self.assertEqual(status_payload["result_presence"], {actor: True for actor in PACKET_ACTORS})
+
+    def test_run_bundle_status_list_and_results_do_not_write_result_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            self.assertFalse((bundle / "results").exists())
+
+            commands = [
+                ["run-bundle", "status", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
+                ["run-bundle", "list", "--root", ".ai/runs", "--json"],
+                ["run-bundle", "results", "--path", ".ai/runs/P7-STATIC-RUN", "--json"],
+            ]
+            for command in commands:
+                exit_code, _stdout, stderr = run_cli(command)
+                self.assertEqual(exit_code, 0, stderr)
+
+            self.assertFalse((bundle / "results").exists())
+
+    def test_run_bundle_intake_rejects_unknown_actor_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            artifact = self._write_artifact(project_root, "artifacts/codex.txt")
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "unknown",
+                    "--artifact",
+                    str(artifact.relative_to(project_root)),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("run-bundle actor must be codex, reviewer, or judge", stderr)
+
+    def test_run_bundle_intake_rejects_missing_artifact_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            self._write_bundle(Path(tmpdir))
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    "artifacts/missing.txt",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Missing artifact file", stderr)
+
+    def test_run_bundle_intake_rejects_outside_project_artifact_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as outside, patch.object(
+            cli, "PROJECT_ROOT", Path(tmpdir)
+        ):
+            self._write_bundle(Path(tmpdir))
+            outside_artifact = Path(outside) / "artifact.txt"
+            outside_artifact.write_text("outside", encoding="utf-8")
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(outside_artifact),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Refusing artifact outside project root", stderr)
+
+    def test_run_bundle_intake_rejects_symlink_artifact_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            target = self._write_artifact(project_root, "artifacts/target.txt")
+            symlink = project_root / "artifacts" / "link.txt"
+            symlink.symlink_to(target)
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    "artifacts/link.txt",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Refusing symlink artifact", stderr)
+
+    def test_run_bundle_intake_rejects_directory_artifact_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            (project_root / "artifacts" / "dir").mkdir(parents=True)
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    "artifacts/dir",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Artifact path is not a file", stderr)
+
+    def test_run_bundle_intake_rejects_missing_bundle_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            artifact = self._write_artifact(Path(tmpdir), "artifacts/codex.txt")
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/MISSING",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(artifact.relative_to(Path(tmpdir))),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Run bundle path is not a directory", stderr)
+
+    def test_run_bundle_results_rejects_missing_bundle_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                ["run-bundle", "results", "--path", ".ai/runs/MISSING", "--json"]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Run bundle path is not a directory", stderr)
+
+    def test_run_bundle_intake_rejects_bad_bundle_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            (bundle / "packets" / "judge.json").unlink()
+            artifact = self._write_artifact(project_root, "artifacts/codex.txt")
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(artifact.relative_to(project_root)),
+                    "--json",
+                ]
+            )
+
+            self.assertFalse((bundle / "results").exists())
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Missing run bundle file: packets/judge.json", stderr)
+
+    def test_run_bundle_intake_rejects_path_traversal_target_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            artifact = self._write_artifact(project_root, "artifacts/codex.txt")
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    "../outside-bundle",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(artifact.relative_to(project_root)),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Refusing to read run bundle outside project root", stderr)
 
     def test_run_bundle_validate_missing_run_json_exits_two_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
