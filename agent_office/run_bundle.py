@@ -13,6 +13,7 @@ class RunBundleError(ValueError):
 
 
 RUN_BUNDLE_SCHEMA_VERSION = 1
+HANDOFF_SCHEMA_VERSION = 1
 RUN_BUNDLE_REQUIRED_FILES = (
     "run.json",
     "plan.json",
@@ -306,6 +307,141 @@ def results_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str
     }
 
 
+
+def handoff_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, object]:
+    bundle = _load_existing_bundle(path, project_root)
+    run = _validate_loaded_bundle(bundle)
+    root = _expect_path(bundle, "root")
+    json_files = _expect_dict(bundle, "json")
+    plan = _expect_dict(json_files, "plan.json")
+    validation = _expect_dict(json_files, "validation.json")
+    objective = _expect_dict(run, "objective")
+    profile = _expect_dict(run, "profile")
+    results = _load_actor_results(root)
+    result_presence = _result_presence(results)
+    expected_files = validation.get("required_files")
+    if not _string_list(expected_files):
+        expected_files = list(RUN_BUNDLE_REQUIRED_FILES)
+
+    actor_packet_identities: dict[str, object] = {}
+    actor_readiness: dict[str, object] = {}
+    for actor in ALLOWED_ACTORS:
+        packet = _expect_dict(json_files, f"packets/{actor}.json")
+        identity = _actor_packet_identity(packet)
+        packet_ready = _packet_ready(actor, identity)
+        readiness: dict[str, object] = {
+            "actor": actor,
+            "packet_present": True,
+            "packet_identity": identity,
+            "result_present": result_presence[actor],
+            "ready_for_reviewer": packet_ready,
+            "ready_for_judge": packet_ready and result_presence[actor],
+        }
+        result = results.get(actor)
+        if result is not None:
+            artifact = result.get("artifact")
+            if isinstance(artifact, dict):
+                readiness["artifact"] = {
+                    "path": artifact.get("path"),
+                    "size_bytes": artifact.get("size_bytes"),
+                    "sha256": artifact.get("sha256"),
+                }
+        actor_packet_identities[actor] = identity
+        actor_readiness[actor] = readiness
+
+    execution_boundary = {
+        "execution_enabled": False,
+        "provider_calls": [],
+        "runtime_calls": False,
+        "adapter_calls": False,
+        "real_runner": False,
+        "external_behavior_triggered": False,
+        "artifact_content_executed": False,
+    }
+    safety_flags = {
+        "no_env_read_expected": True,
+        "no_env_vars_printed_expected": True,
+        "no_provider_runtime_adapter_expected": True,
+        "no_real_runner_expected": True,
+        "read_only": True,
+    }
+    return {
+        "kind": "static_run_bundle_handoff",
+        "handoff_schema_version": HANDOFF_SCHEMA_VERSION,
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "path": str(root),
+        "run_id": run["run_id"],
+        "objective": objective,
+        "profile": profile,
+        "objective_summary": objective.get("summary"),
+        "profile_summary": {
+            "selected": profile.get("selected"),
+            "default": profile.get("default"),
+            "is_default": profile.get("is_default"),
+        },
+        "required_files": list(RUN_BUNDLE_REQUIRED_FILES),
+        "expected_files": list(expected_files),
+        "files": _bundle_file_statuses(bundle),
+        "actor_packet_identities": actor_packet_identities,
+        "actor_readiness": actor_readiness,
+        "result_presence": result_presence,
+        "validation_commands": _handoff_validation_commands(plan, path),
+        "execution_enabled": False,
+        "provider_calls": [],
+        "execution_boundary": execution_boundary,
+        "safety_flags": safety_flags,
+        "external_behavior_triggered": False,
+        "artifact_content_executed": False,
+        "read_only": True,
+        "non_goals": [
+            "Do not execute actors from this handoff.",
+            "Do not call providers, runtimes, adapters, or a real runner.",
+            "Do not read .env or print environment variable values.",
+            "Do not modify the run bundle or actor result artifacts.",
+        ],
+        "reviewer_guidance": [
+            "Confirm required files and actor result presence before review.",
+            "Use validation_commands as the local read-only review checklist.",
+            "Report missing or invalid evidence without modifying the bundle.",
+        ],
+        "judge_guidance": [
+            "Decide only from static bundle evidence and reviewer findings.",
+            "Reject or request changes if required files, actor readiness, or safety flags are incomplete.",
+        ],
+        "external_behavior": _read_only_external_behavior(),
+    }
+
+
+def format_run_bundle_handoff(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice static run bundle handoff",
+        f"path: {payload['path']}",
+        f"run_id: {payload['run_id']}",
+        f"objective: {_format_identity(payload['objective'])}",
+        f"profile: {_format_identity(payload['profile'])}",
+        f"execution_enabled: {str(payload['execution_enabled']).lower()}",
+        "provider_calls: []",
+        "actors:",
+    ]
+    readiness = payload.get("actor_readiness")
+    if isinstance(readiness, dict):
+        for actor in ALLOWED_ACTORS:
+            item = readiness.get(actor)
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {actor}: packet_present={str(bool(item.get('packet_present'))).lower()}; "
+                    f"result_present={str(bool(item.get('result_present'))).lower()}; "
+                    f"ready_for_judge={str(bool(item.get('ready_for_judge'))).lower()}"
+                )
+    lines.extend(
+        [
+            "read_only: true",
+            "artifact_content_executed: false",
+            "provider/runtime/adapter execution: not triggered",
+        ]
+    )
+    return "\n".join(lines)
+
 def format_run_bundle_catalog(payload: dict[str, object]) -> str:
     lines = [
         "AgentOffice static run bundle catalog",
@@ -551,6 +687,53 @@ def _load_actor_results(root: Path) -> dict[str, dict[str, object]]:
         results[actor] = value
     return results
 
+
+
+def _actor_packet_identity(packet: dict[str, object]) -> dict[str, object]:
+    objective = packet.get("objective") if isinstance(packet.get("objective"), dict) else {}
+    profile = packet.get("profile") if isinstance(packet.get("profile"), dict) else {}
+    return {
+        "actor": packet.get("actor"),
+        "packet_version": packet.get("packet_version"),
+        "objective": objective.get("id"),
+        "profile": profile.get("selected"),
+        "execution_enabled": packet.get("execution_enabled"),
+        "env_required": packet.get("env_required"),
+        "runtime_calls": packet.get("runtime_calls"),
+        "adapter_calls": packet.get("adapter_calls"),
+    }
+
+
+def _packet_ready(actor: str, identity: dict[str, object]) -> bool:
+    return (
+        identity.get("actor") == actor
+        and identity.get("execution_enabled") is False
+        and identity.get("env_required") is False
+        and identity.get("runtime_calls") is False
+        and identity.get("adapter_calls") is False
+    )
+
+
+def _handoff_validation_commands(plan: dict[str, object], path: str | Path) -> list[str]:
+    commands: list[str] = []
+    raw_commands = plan.get("validation_commands")
+    if isinstance(raw_commands, list):
+        for command in raw_commands:
+            if isinstance(command, str) and command not in commands:
+                commands.append(command)
+    path_text = str(path)
+    for command in (
+        f"python3 -m agent_office run-bundle validate --path {path_text} --json",
+        f"python3 -m agent_office run-bundle status --path {path_text} --json",
+        f"python3 -m agent_office run-bundle handoff --path {path_text} --json",
+    ):
+        if command not in commands:
+            commands.append(command)
+    return commands
+
+
+def _string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 def _result_presence(results: dict[str, dict[str, object]]) -> dict[str, bool]:
     return {actor: actor in results for actor in ALLOWED_ACTORS}
