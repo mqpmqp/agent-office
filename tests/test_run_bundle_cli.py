@@ -472,6 +472,165 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertIn("Confirm required files and actor result presence before review.", payload["reviewer_guidance"])
         self.assertIn("Decide only from static bundle evidence and reviewer findings.", payload["judge_guidance"])
 
+    def test_run_bundle_handoff_text_contract_is_static_and_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            before = self._bundle_file_snapshot(bundle)
+
+            first_code, first_stdout, first_stderr = run_cli(["run-bundle", "handoff", "--path", ".ai/runs/P7-STATIC-RUN"])
+            second_code, second_stdout, second_stderr = run_cli(["run-bundle", "handoff", "--path", ".ai/runs/P7-STATIC-RUN"])
+            after = self._bundle_file_snapshot(bundle)
+
+        self.assertEqual(first_code, 0, first_stderr)
+        self.assertEqual(second_code, 0, second_stderr)
+        self.assertEqual(first_stdout, second_stdout)
+        self.assertEqual(before, after)
+        lines = first_stdout.rstrip("\n").splitlines()
+        self.assertEqual(
+            lines,
+            [
+                "AgentOffice static run bundle handoff",
+                "schema_version: 1",
+                "handoff_schema_version: 1",
+                f"path: {bundle}",
+                "run_id: P7-STATIC-RUN",
+                "objective: P6-17 - Static Objective Registry Extension",
+                "profile: lowest-cost (default=lowest-cost; is_default=true)",
+                "objective_summary: Add P6-17 as a static objective spec that proves the multi-objective registry can extend objectives, plan, packet, packet validation, and packet golden fixtures without file discovery, environment reads, provider calls, runtime calls, adapter calls, or artifact writes.",
+                "required_files:",
+                "  - run.json",
+                "  - plan.json",
+                "  - packets/codex.json",
+                "  - packets/reviewer.json",
+                "  - packets/judge.json",
+                "  - validation.json",
+                "  - README.md",
+                "expected_files:",
+                "  - run.json",
+                "  - plan.json",
+                "  - packets/codex.json",
+                "  - packets/reviewer.json",
+                "  - packets/judge.json",
+                "  - validation.json",
+                "  - README.md",
+                "file_summary:",
+                "  - run.json: present; kind=json; parsed=true",
+                "  - plan.json: present; kind=json; parsed=true",
+                "  - packets/codex.json: present; kind=json; parsed=true",
+                "  - packets/reviewer.json: present; kind=json; parsed=true",
+                "  - packets/judge.json: present; kind=json; parsed=true",
+                "  - validation.json: present; kind=json; parsed=true",
+                "  - README.md: present; kind=markdown; parsed=true",
+                "actor_packet_identities:",
+                "  - codex: packet_version=1; objective=P6-17; profile=lowest-cost; execution_enabled=false; env_required=false; runtime_calls=false; adapter_calls=false",
+                "  - reviewer: packet_version=1; objective=P6-17; profile=lowest-cost; execution_enabled=false; env_required=false; runtime_calls=false; adapter_calls=false",
+                "  - judge: packet_version=1; objective=P6-17; profile=lowest-cost; execution_enabled=false; env_required=false; runtime_calls=false; adapter_calls=false",
+                "actor_readiness:",
+                "  - codex: packet_present=true; result_present=false; ready_for_reviewer=true; ready_for_judge=false",
+                "  - reviewer: packet_present=true; result_present=false; ready_for_reviewer=true; ready_for_judge=false",
+                "  - judge: packet_present=true; result_present=false; ready_for_reviewer=true; ready_for_judge=false",
+                "result_presence:",
+                "  - codex: false",
+                "  - reviewer: false",
+                "  - judge: false",
+                "validation_commands:",
+                "  - python3 -m compileall agent_office tests",
+                "  - python3 -m unittest",
+                "  - python3 -m unittest discover -s tests -p 'test_*.py'",
+                "  - python3 -m agent_office doctor --adapters",
+                "  - ./scripts/verify.sh",
+                "  - ./scripts/smoke-test.sh P6-PROFILES",
+                "  - python3 -m agent_office run-staged P6-PROFILES --dry-run --reset",
+                "  - python3 -m agent_office objectives --validate --json",
+                "  - python3 -m agent_office objectives --phase P6-17",
+                "  - python3 -m agent_office objectives --phase P6-17 --json",
+                "  - python3 -m agent_office objectives --show P6-17",
+                "  - python3 -m agent_office objectives --show P6-17 --json",
+                "  - python3 -m agent_office plan --objective P6-17 --profile lowest-cost",
+                "  - python3 -m agent_office plan --objective P6-17 --profile lowest-cost --json",
+                "  - python3 -m agent_office packet --objective P6-17 --profile lowest-cost --actor codex --json",
+                "  - python3 -m agent_office packet --objective P6-17 --profile lowest-cost --actor reviewer --json",
+                "  - python3 -m agent_office packet --objective P6-17 --profile lowest-cost --actor judge --json",
+                "  - python3 -m agent_office packet --objective P6-17 --profile lowest-cost --actor codex --validate --json",
+                "  - python3 -m agent_office packet --objective P6-17 --profile lowest-cost --actor reviewer --validate --json",
+                "  - python3 -m agent_office packet --objective P6-17 --profile lowest-cost --actor judge --validate --json",
+                "  - python3 -m agent_office objectives --validate",
+                "  - python3 -m agent_office run-bundle validate --path .ai/runs/P7-STATIC-RUN --json",
+                "  - python3 -m agent_office run-bundle status --path .ai/runs/P7-STATIC-RUN --json",
+                "  - python3 -m agent_office run-bundle handoff --path .ai/runs/P7-STATIC-RUN --json",
+                "execution_boundary:",
+                "  execution_enabled: false",
+                "  provider_calls: []",
+                "  runtime_calls: false",
+                "  adapter_calls: false",
+                "  real_runner: false",
+                "  external_behavior_triggered: false",
+                "  artifact_content_executed: false",
+                "safety_flags:",
+                "  no_env_read_expected: true",
+                "  no_env_vars_printed_expected: true",
+                "  no_provider_runtime_adapter_expected: true",
+                "  no_real_runner_expected: true",
+                "  read_only: true",
+                "reviewer_guidance:",
+                "  - Confirm required files and actor result presence before review.",
+                "  - Use validation_commands as the local read-only review checklist.",
+                "  - Report missing or invalid evidence without modifying the bundle.",
+                "judge_guidance:",
+                "  - Decide only from static bundle evidence and reviewer findings.",
+                "  - Reject or request changes if required files, actor readiness, or safety flags are incomplete.",
+                "external_behavior:",
+                "  env_reads: false",
+                "  env_var_printing: false",
+                "  provider_calls: false",
+                "  runtime_calls: false",
+                "  adapter_calls: false",
+                "  artifact_writes: false",
+                "  real_runner: false",
+                "read_only: true",
+                "artifact_content_executed: false",
+                "provider/runtime/adapter execution: not triggered",
+            ],
+        )
+
+    def test_run_bundle_handoff_text_reports_result_presence_without_reading_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            expected_hashes = {}
+            for actor in PACKET_ACTORS:
+                content = f"{actor} result"
+                artifact = self._write_artifact(project_root, f"artifacts/{actor}.txt", content)
+                expected_hashes[actor] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                exit_code, _stdout, stderr = run_cli(
+                    [
+                        "run-bundle",
+                        "intake",
+                        "--path",
+                        ".ai/runs/P7-STATIC-RUN",
+                        "--actor",
+                        actor,
+                        "--artifact",
+                        str(artifact.relative_to(project_root)),
+                        "--json",
+                    ]
+                )
+                self.assertEqual(exit_code, 0, stderr)
+                artifact.unlink()
+
+            exit_code, stdout, stderr = run_cli(["run-bundle", "handoff", "--path", ".ai/runs/P7-STATIC-RUN"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        for actor in PACKET_ACTORS:
+            self.assertIn(
+                f"  - {actor}: packet_present=true; result_present=true; ready_for_reviewer=true; ready_for_judge=true",
+                stdout,
+            )
+            self.assertIn(f"  - {actor}: true", stdout)
+            self.assertIn(f"path=artifacts/{actor}.txt", stdout)
+            self.assertIn(f"sha256={expected_hashes[actor]}", stdout)
+
     def test_run_bundle_handoff_reports_result_presence_without_reading_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
             project_root = Path(tmpdir)
@@ -506,6 +665,15 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
             self.assertTrue(payload["actor_readiness"][actor]["result_present"])
             self.assertTrue(payload["actor_readiness"][actor]["ready_for_judge"])
             self.assertIn("artifact", payload["actor_readiness"][actor])
+
+    def test_run_bundle_handoff_text_rejects_missing_bundle_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            stdout, stderr = self.assert_exit_two_without_traceback(
+                ["run-bundle", "handoff", "--path", ".ai/runs/MISSING"]
+            )
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Run bundle path is not a directory", stderr)
 
     def test_run_bundle_handoff_rejects_missing_bundle_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):

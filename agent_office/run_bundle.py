@@ -415,24 +415,125 @@ def handoff_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str
 def format_run_bundle_handoff(payload: dict[str, object]) -> str:
     lines = [
         "AgentOffice static run bundle handoff",
+        f"schema_version: {payload['schema_version']}",
+        f"handoff_schema_version: {payload['handoff_schema_version']}",
         f"path: {payload['path']}",
         f"run_id: {payload['run_id']}",
-        f"objective: {_format_identity(payload['objective'])}",
-        f"profile: {_format_identity(payload['profile'])}",
-        f"execution_enabled: {str(payload['execution_enabled']).lower()}",
-        "provider_calls: []",
-        "actors:",
+        f"objective: {_format_handoff_objective(payload.get('objective'))}",
+        f"profile: {_format_handoff_profile(payload.get('profile'))}",
+        f"objective_summary: {payload.get('objective_summary')}",
+        "required_files:",
     ]
+
+    for relative in payload.get("required_files", []):
+        lines.append(f"  - {relative}")
+    lines.append("expected_files:")
+    for relative in payload.get("expected_files", []):
+        lines.append(f"  - {relative}")
+
+    lines.append("file_summary:")
+    files = payload.get("files")
+    if isinstance(files, list):
+        for item in files:
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {item.get('path')}: {item.get('status')}; "
+                    f"kind={item.get('kind')}; parsed={_format_scalar(item.get('parsed'))}"
+                )
+
+    lines.append("actor_packet_identities:")
+    identities = payload.get("actor_packet_identities")
+    if isinstance(identities, dict):
+        for actor in ALLOWED_ACTORS:
+            item = identities.get(actor)
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {actor}: packet_version={_format_scalar(item.get('packet_version'))}; "
+                    f"objective={_format_scalar(item.get('objective'))}; "
+                    f"profile={_format_scalar(item.get('profile'))}; "
+                    f"execution_enabled={_format_scalar(item.get('execution_enabled'))}; "
+                    f"env_required={_format_scalar(item.get('env_required'))}; "
+                    f"runtime_calls={_format_scalar(item.get('runtime_calls'))}; "
+                    f"adapter_calls={_format_scalar(item.get('adapter_calls'))}"
+                )
+
+    lines.append("actor_readiness:")
     readiness = payload.get("actor_readiness")
     if isinstance(readiness, dict):
         for actor in ALLOWED_ACTORS:
             item = readiness.get(actor)
             if isinstance(item, dict):
                 lines.append(
-                    f"  - {actor}: packet_present={str(bool(item.get('packet_present'))).lower()}; "
-                    f"result_present={str(bool(item.get('result_present'))).lower()}; "
-                    f"ready_for_judge={str(bool(item.get('ready_for_judge'))).lower()}"
+                    f"  - {actor}: packet_present={_format_scalar(item.get('packet_present'))}; "
+                    f"result_present={_format_scalar(item.get('result_present'))}; "
+                    f"ready_for_reviewer={_format_scalar(item.get('ready_for_reviewer'))}; "
+                    f"ready_for_judge={_format_scalar(item.get('ready_for_judge'))}"
                 )
+                artifact = item.get("artifact")
+                if isinstance(artifact, dict):
+                    lines.append(
+                        f"    artifact: path={_format_scalar(artifact.get('path'))}; "
+                        f"size_bytes={_format_scalar(artifact.get('size_bytes'))}; "
+                        f"sha256={_format_scalar(artifact.get('sha256'))}"
+                    )
+
+    lines.append("result_presence:")
+    result_presence = payload.get("result_presence")
+    if isinstance(result_presence, dict):
+        for actor in ALLOWED_ACTORS:
+            lines.append(f"  - {actor}: {_format_scalar(result_presence.get(actor))}")
+
+    lines.append("validation_commands:")
+    for command in payload.get("validation_commands", []):
+        lines.append(f"  - {command}")
+
+    lines.append("execution_boundary:")
+    boundary = payload.get("execution_boundary")
+    if isinstance(boundary, dict):
+        for key in (
+            "execution_enabled",
+            "provider_calls",
+            "runtime_calls",
+            "adapter_calls",
+            "real_runner",
+            "external_behavior_triggered",
+            "artifact_content_executed",
+        ):
+            lines.append(f"  {key}: {_format_scalar(boundary.get(key))}")
+
+    lines.append("safety_flags:")
+    safety_flags = payload.get("safety_flags")
+    if isinstance(safety_flags, dict):
+        for key in (
+            "no_env_read_expected",
+            "no_env_vars_printed_expected",
+            "no_provider_runtime_adapter_expected",
+            "no_real_runner_expected",
+            "read_only",
+        ):
+            lines.append(f"  {key}: {_format_scalar(safety_flags.get(key))}")
+
+    for section in ("reviewer_guidance", "judge_guidance"):
+        lines.append(f"{section}:")
+        values = payload.get(section)
+        if isinstance(values, list):
+            for value in values:
+                lines.append(f"  - {value}")
+
+    lines.append("external_behavior:")
+    external_behavior = payload.get("external_behavior")
+    if isinstance(external_behavior, dict):
+        for key in (
+            "env_reads",
+            "env_var_printing",
+            "provider_calls",
+            "runtime_calls",
+            "adapter_calls",
+            "artifact_writes",
+            "real_runner",
+        ):
+            lines.append(f"  {key}: {_format_scalar(external_behavior.get(key))}")
+
     lines.extend(
         [
             "read_only: true",
@@ -441,6 +542,34 @@ def format_run_bundle_handoff(payload: dict[str, object]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _format_handoff_objective(value: object) -> str:
+    if isinstance(value, dict):
+        objective_id = value.get("id")
+        name = value.get("name")
+        if name:
+            return f"{objective_id} - {name}"
+        return _format_scalar(objective_id)
+    return _format_scalar(value)
+
+
+def _format_handoff_profile(value: object) -> str:
+    if isinstance(value, dict):
+        selected = value.get("selected")
+        default = value.get("default")
+        is_default = value.get("is_default")
+        return f"{selected} (default={default}; is_default={_format_scalar(is_default)})"
+    return _format_scalar(value)
+
+
+def _format_scalar(value: object) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if value is None:
+        return "null"
+    return str(value)
+
 
 def format_run_bundle_catalog(payload: dict[str, object]) -> str:
     lines = [
