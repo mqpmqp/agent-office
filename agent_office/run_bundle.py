@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from pathlib import Path
 
 from .packets import ALLOWED_ACTORS, PacketError, execution_packet_payload, packet_contract_validation_payload
@@ -627,6 +628,7 @@ def export_review_run_bundle_payload(path: str | Path, out: str | Path, project_
         byte_count = out_path.stat().st_size
     except OSError as exc:
         raise RunBundleError(f"Unable to stat review artifact: {out_path}") from exc
+    verify = _export_review_verification_metadata(out_path, sha256_path)
 
     warnings = workflow.get("warnings") if isinstance(workflow.get("warnings"), list) else []
     blocking_reasons = workflow.get("blocking_reasons") if isinstance(workflow.get("blocking_reasons"), list) else []
@@ -639,6 +641,10 @@ def export_review_run_bundle_payload(path: str | Path, out: str | Path, project_
         "path": str(root),
         "out": str(out_path),
         "sha256_path": str(sha256_path),
+        "artifact_dir": verify["artifact_dir"],
+        "artifact_basename": verify["artifact_basename"],
+        "sha256_basename": verify["sha256_basename"],
+        "sha256_verify_command": verify["sha256_verify_command"],
         "sha256": sha256,
         "byte_count": byte_count,
         "sections": list(RUN_BUNDLE_REVIEW_ARTIFACT_SECTIONS),
@@ -646,6 +652,17 @@ def export_review_run_bundle_payload(path: str | Path, out: str | Path, project_
         "empty_section_markers": 0,
         "warnings": warnings,
         "blocking_reasons": blocking_reasons,
+    }
+
+
+def _export_review_verification_metadata(out_path: Path, sha256_path: Path) -> dict[str, str]:
+    artifact_dir = str(out_path.parent)
+    sha256_basename = sha256_path.name
+    return {
+        "artifact_dir": artifact_dir,
+        "artifact_basename": out_path.name,
+        "sha256_basename": sha256_basename,
+        "sha256_verify_command": f"cd {shlex.quote(artifact_dir)} && sha256sum -c {shlex.quote(sha256_basename)}",
     }
 
 
@@ -675,6 +692,8 @@ def format_run_bundle_export_review(payload: dict[str, object]) -> str:
             "Run bundle review artifact exported",
             f"Run ID: {payload['run_id']}",
             f"Artifact: {payload['out']}",
+            f"SHA256 sidecar: {payload['sha256_path']}",
+            f"Verification command: {payload['sha256_verify_command']}",
             f"SHA256: {payload['sha256']}",
             f"Byte count: {payload['byte_count']}",
             f"Missing markers: {payload['missing_file_markers']}",
