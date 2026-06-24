@@ -47,6 +47,14 @@ from .profiles import (
     profile_plans_payload,
     profile_plans_contract_audit_payload,
 )
+from .review_artifact import (
+    ReviewArtifactError,
+    export_review_artifact_payload,
+    format_review_artifact_export,
+    format_review_artifact_self_check,
+    review_artifact_error_payload,
+    self_check_review_artifact_payload,
+)
 from .run_bundle import (
     RunBundleError,
     export_review_error_payload,
@@ -1092,6 +1100,37 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_artifact(args: argparse.Namespace) -> int:
+    if args.review_artifact_action == "self-check":
+        payload = self_check_review_artifact_payload(artifact=args.artifact, sha256_path=args.sha256, project_root=PROJECT_ROOT)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_review_artifact_self_check(payload))
+        return 0 if payload["valid"] else 2
+    if args.review_artifact_action != "export":
+        raise AgentOfficeError("review-artifact requires the export or self-check action.")
+    try:
+        payload = export_review_artifact_payload(
+            base=args.base,
+            review=args.review,
+            branch=args.branch,
+            out=args.out,
+            title=args.title,
+            project_root=PROJECT_ROOT,
+        )
+    except ReviewArtifactError as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    review_artifact_error_payload(base=args.base, review=args.review, branch=args.branch, out=args.out, title=args.title, error=str(exc)),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return 2
+        raise AgentOfficeError(str(exc)) from exc
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_review_artifact_export(payload))
+    return 0
+
+
 def cmd_run_demo(args: argparse.Namespace) -> int:
     demo_mode = resolve_mode(args, "run-demo")
     validate_task_id(args.task_id)
@@ -1278,6 +1317,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifact", help="Project-local artifact file to intake as actor result metadata.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_run_bundle)
+
+    p = sub.add_parser("review-artifact", help="Export or self-check a Claude review artifact without calling providers.")
+    review_sub = p.add_subparsers(dest="review_artifact_action", required=True)
+    export = review_sub.add_parser("export", help="Export a Git commit-range review artifact.")
+    export.add_argument("--base", required=True, help="Base commit for diff evidence.")
+    export.add_argument("--review", required=True, help="Review commit for diff evidence and file snapshots.")
+    export.add_argument("--branch", required=True, help="Branch name recorded in the integrity guard.")
+    export.add_argument("--out", required=True, help="Markdown artifact output path. The .sha256 sidecar is written next to it.")
+    export.add_argument("--title", required=True, help="Artifact title.")
+    export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    export.set_defaults(func=cmd_review_artifact)
+    check = review_sub.add_parser("self-check", help="Verify an exported review artifact and sidecar.")
+    check.add_argument("--artifact", required=True, help="Markdown artifact path to verify.")
+    check.add_argument("--sha256", required=True, help="SHA256 sidecar path to verify from its own directory.")
+    check.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    check.set_defaults(func=cmd_review_artifact)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
