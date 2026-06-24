@@ -1891,6 +1891,38 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertIn("judge_result_has_no_static_decision", payload["warnings"])
         self.assertIn("judge_decision_missing", payload["blocking_reasons"])
 
+
+    def test_run_bundle_workflow_missing_reviewer_result_next_action_run_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            self._write_bundle(Path(tmpdir))
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertNotIn("Traceback", stdout)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            payload["summary"],
+            {"final_state": "incomplete", "safe_to_merge": False, "next_action": "run_review"},
+        )
+        self.assertIn("review_result_missing", payload["blocking_reasons"])
+
+    def test_run_bundle_workflow_missing_judge_result_next_action_run_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            self._write_gate_actor_result(bundle, "reviewer", "pass")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertNotIn("Traceback", stdout)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            payload["summary"],
+            {"final_state": "incomplete", "safe_to_merge": False, "next_action": "run_gate"},
+        )
+        self.assertIn("judge_result_missing", payload["blocking_reasons"])
+
     def test_run_bundle_workflow_propagates_blocked_and_fail_gate_states(self) -> None:
         with tempfile.TemporaryDirectory() as blocked_tmp, patch.object(cli, "PROJECT_ROOT", Path(blocked_tmp)):
             blocked_bundle = self._write_bundle(Path(blocked_tmp))

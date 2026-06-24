@@ -239,6 +239,8 @@ python -m agent_office run-bundle workflow --path .ai/runs/<RUN_ID> --json
 
 The JSON payload is deterministic and includes `schema_version`, `workflow_schema_version`, `valid_bundle`, `run_id`, `objective`, `profile`, `path`, `phase`, `summary`, `readiness`, `gate`, `actors`, `missing_actors`, `blocking_reasons`, `warnings`, `safety`, and `commands`. Text output is the same operator summary in a reviewer-friendly form: run identity, bundle validity, handoff/review/gate readiness, gate final state, safe-to-merge flag, next action, blocking reasons, warnings, and copy-paste commands.
 
+`missing_actors` is informational. Not every missing actor result is a gate blocker; specifically, missing `codex` result metadata does not block `summary.safe_to_merge=true` when the reviewer/judge gate state is already pass. Automation should still rely on `summary.safe_to_merge`, `summary.final_state`, and `blocking_reasons` for decisions.
+
 Exit code `0` means the workflow payload was readable. It does not mean the run is safe to merge. Automation must inspect `summary.safe_to_merge`, `summary.final_state`, and `blocking_reasons`.
 
 Final-state precedence is deterministic:
