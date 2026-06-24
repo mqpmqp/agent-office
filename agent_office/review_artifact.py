@@ -20,6 +20,7 @@ REVIEW_ARTIFACT_SCHEMA_VERSION = 1
 REVIEW_ARTIFACT_SECTIONS = (
     "Integrity guard",
     "Self-audit",
+    "Review gate status",
     "Artifact-based review caveat",
     "Git state",
     "Diff evidence",
@@ -29,6 +30,12 @@ REVIEW_ARTIFACT_SECTIONS = (
     "Report snapshots",
     "README snapshot",
 )
+GATE_MODES = ("claude_pass", "codex_interim", "codex_self_check", "unknown")
+CLAUDE_REVIEW_STATUSES = ("pass", "pending", "unavailable", "not_required", "unknown")
+CODEX_SELF_CHECK_STATUSES = ("pass", "fail", "not_run", "unknown")
+CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP = "claude_artifact_review"
+CODEX_INTERIM_GATE_CAVEAT = "Codex interim gate only; this is not a Claude review. Claude artifact review remains pending."
+UNKNOWN_GATE_CAVEAT = "Review gate status was not asserted; do not treat this artifact as Claude review evidence."
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,9 @@ def export_review_artifact_payload(
     out: str | Path,
     title: str,
     project_root: Path,
+    gate_mode: str = "unknown",
+    claude_review_status: str = "unknown",
+    codex_self_check_status: str = "not_run",
 ) -> dict[str, object]:
     root = project_root.resolve()
     out_path = _resolve_artifact_out_path(out, root)
@@ -87,6 +97,14 @@ def export_review_artifact_payload(
     warnings.extend(evidence_consistency_warnings)
 
     verify = _verification_metadata(out_path, sha256_path)
+    review_gate = _review_gate_status(
+        gate_mode=gate_mode,
+        claude_review_status=claude_review_status,
+        codex_self_check_status=codex_self_check_status,
+        out_path=out_path,
+        sha256_path=sha256_path,
+    )
+    warnings.extend(str(item) for item in review_gate["warnings"])
     section_audit = _section_audit(
         out_path=out_path,
         sha256_path=sha256_path,
@@ -119,6 +137,7 @@ def export_review_artifact_payload(
         report_snapshots=report_snapshots,
         readme_snapshot=readme_snapshot,
         section_audit=section_audit,
+        review_gate=review_gate,
     )
     section_counts = _artifact_section_counts(artifact_text, REVIEW_ARTIFACT_SECTIONS)
     if section_counts["missing_section_count"] or section_counts["empty_section_count"]:
@@ -141,6 +160,7 @@ def export_review_artifact_payload(
             report_snapshots=report_snapshots,
             readme_snapshot=readme_snapshot,
             section_audit=section_audit,
+            review_gate=review_gate,
         )
     _write_text(out_path, artifact_text)
     sha256 = _sha256_file(out_path)
@@ -173,6 +193,7 @@ def export_review_artifact_payload(
         "missing_file_markers": 0,
         "empty_section_markers": 0,
         "section_audit": section_audit,
+        "review_gate": review_gate,
         "evidence_consistency_warnings": evidence_consistency_warnings,
         "warnings": warnings,
         "blocking_reasons": [],
@@ -374,6 +395,7 @@ def review_artifact_error_payload(
         "missing_file_markers": 0,
         "empty_section_markers": 0,
         "section_audit": {},
+        "review_gate": _review_gate_error_status(),
         "evidence_consistency_warnings": [],
         "warnings": [error],
         "blocking_reasons": [_error_reason(error)],
@@ -393,6 +415,10 @@ def format_review_artifact_export(payload: dict[str, object]) -> str:
             f"validation_success: {str(payload['validation_success']).lower()}",
             f"smoke_success: {str(payload['smoke_success']).lower()}",
             f"command_failures: {len(payload.get('command_failures', []))}",
+            f"gate_mode: {payload.get('review_gate', {}).get('gate_mode')}",
+            f"claude_review_status: {payload.get('review_gate', {}).get('claude_review_status')}",
+            f"codex_self_check_status: {payload.get('review_gate', {}).get('codex_self_check_status')}",
+            f"gate_caveat: {payload.get('review_gate', {}).get('gate_caveat')}",
             "PowerShell download:",
             f"  scp -o BatchMode=yes agentoffice-vps:{payload['out']} $env:USERPROFILE\\Desktop\\",
             f"  scp -o BatchMode=yes agentoffice-vps:{payload['sha256_path']} $env:USERPROFILE\\Desktop\\",
@@ -419,6 +445,7 @@ def _artifact_markdown(
     report_snapshots: list[dict[str, str]],
     readme_snapshot: dict[str, str],
     section_audit: dict[str, object],
+    review_gate: dict[str, object],
 ) -> str:
     lines = [
         f"# {title}",
@@ -454,6 +481,16 @@ def _artifact_markdown(
         "### evidence_consistency_warnings",
         _fence(json.dumps(section_audit["evidence_consistency_warnings"], indent=2, ensure_ascii=False), "json"),
         "",
+        "## Review gate status",
+        f"- gate_mode: {review_gate['gate_mode']}",
+        f"- claude_review_status: {review_gate['claude_review_status']}",
+        f"- codex_self_check_status: {review_gate['codex_self_check_status']}",
+        f"- interim_merge: {str(review_gate['interim_merge']).lower()}",
+        f"- gate_valid: {str(review_gate['gate_valid']).lower()}",
+        f"- gate_caveat: {review_gate['gate_caveat']}",
+        "### review_gate JSON",
+        _fence(json.dumps(review_gate, indent=2, ensure_ascii=False), "json"),
+        "",
         "## Artifact-based review caveat",
         "Claude should review this uploaded artifact as captured evidence. Claude should not claim it personally ran VPS validation unless it separately did so. Validation and smoke sections are VPS captured transcripts.",
         "",
@@ -486,6 +523,74 @@ def _artifact_markdown(
     lines.extend(["", "REVIEW_ARTIFACT_EXPORT_COMPLETE", ""])
     return "\n".join(lines)
 
+
+
+def _review_gate_status(
+    *,
+    gate_mode: str,
+    claude_review_status: str,
+    codex_self_check_status: str,
+    out_path: Path,
+    sha256_path: Path,
+) -> dict[str, object]:
+    gate_mode = gate_mode if gate_mode in GATE_MODES else "unknown"
+    claude_review_status = claude_review_status if claude_review_status in CLAUDE_REVIEW_STATUSES else "unknown"
+    codex_self_check_status = codex_self_check_status if codex_self_check_status in CODEX_SELF_CHECK_STATUSES else "unknown"
+    follow_up_required: list[str] = []
+    warnings: list[str] = []
+    gate_valid = True
+    interim_merge = gate_mode == "codex_interim"
+    pending_artifact: str | None = None
+    pending_sha256: str | None = None
+    caveat = UNKNOWN_GATE_CAVEAT
+
+    if gate_mode == "codex_interim":
+        caveat = CODEX_INTERIM_GATE_CAVEAT
+        pending_artifact = str(out_path)
+        pending_sha256 = str(sha256_path)
+        if claude_review_status in {"pending", "unavailable", "unknown"}:
+            follow_up_required.append(CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP)
+        if claude_review_status == "pass":
+            warnings.append("codex_interim_with_claude_pass_status")
+    elif gate_mode == "claude_pass":
+        caveat = "Claude artifact review is marked pass. Verify reviewer evidence before relying on this gate."
+        if claude_review_status != "pass":
+            gate_valid = False
+            warnings.append("claude_pass_gate_requires_claude_review_status_pass")
+    elif gate_mode == "codex_self_check":
+        caveat = "Codex self-check gate only; this is not a Claude review."
+        if claude_review_status in {"pending", "unavailable"}:
+            follow_up_required.append(CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP)
+    elif gate_mode == "unknown" and claude_review_status in {"pending", "unavailable"}:
+        follow_up_required.append(CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP)
+
+    return {
+        "gate_mode": gate_mode,
+        "claude_review_status": claude_review_status,
+        "codex_self_check_status": codex_self_check_status,
+        "interim_merge": interim_merge,
+        "follow_up_required": follow_up_required,
+        "pending_review_artifact": pending_artifact,
+        "pending_review_sha256": pending_sha256,
+        "gate_caveat": caveat,
+        "gate_valid": gate_valid,
+        "warnings": warnings,
+    }
+
+
+def _review_gate_error_status() -> dict[str, object]:
+    return {
+        "gate_mode": "unknown",
+        "claude_review_status": "unknown",
+        "codex_self_check_status": "unknown",
+        "interim_merge": False,
+        "follow_up_required": [],
+        "pending_review_artifact": None,
+        "pending_review_sha256": None,
+        "gate_caveat": UNKNOWN_GATE_CAVEAT,
+        "gate_valid": False,
+        "warnings": [],
+    }
 
 def _section_audit(
     *,
@@ -640,6 +745,12 @@ def self_check_review_artifact_payload(*, artifact: str | Path, sha256_path: str
         failures.append("empty_section_markers_nonzero")
 
     section_counts = _artifact_section_counts(text, REVIEW_ARTIFACT_SECTIONS)
+    review_gate = _extract_review_gate(text)
+    if not bool(review_gate.get("gate_valid", False)):
+        failures.append("review_gate_invalid")
+    if review_gate.get("gate_mode") == "codex_interim" and review_gate.get("claude_review_status") == "pending":
+        if CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP not in review_gate.get("follow_up_required", []):
+            failures.append("missing_claude_artifact_review_follow_up")
     if section_counts["missing_section_count"]:
         failures.append("missing_required_sections")
     if section_counts["empty_section_count"]:
@@ -663,6 +774,9 @@ def self_check_review_artifact_payload(*, artifact: str | Path, sha256_path: str
         "empty_section_markers": empty_section_markers,
         "required_sections": list(REVIEW_ARTIFACT_SECTIONS),
         "section_audit": section_counts,
+        "review_gate": review_gate,
+        "follow_up_required": review_gate.get("follow_up_required", []),
+        "gate_caveat": review_gate.get("gate_caveat"),
         "failures": failures,
         "warnings": warnings,
     }
@@ -676,11 +790,47 @@ def format_review_artifact_self_check(payload: dict[str, object]) -> str:
         f"Verification command: {payload['sha256_verify_command']}",
         f"valid: {str(payload['valid']).lower()}",
         f"failures: {len(payload.get('failures', []))}",
+        f"gate_mode: {payload.get('review_gate', {}).get('gate_mode')}",
+        f"claude_review_status: {payload.get('review_gate', {}).get('claude_review_status')}",
+        f"follow_up_required: {payload.get('follow_up_required', [])}",
+        f"gate_caveat: {payload.get('gate_caveat')}",
     ]
     for failure in payload.get("failures", []):
         lines.append(f"- {failure}")
     return "\n".join(lines)
 
+
+
+def _extract_review_gate(text: str) -> dict[str, object]:
+    marker = "### review_gate JSON"
+    if marker not in text:
+        return _review_gate_error_status()
+    tail = text.split(marker, 1)[1]
+    match = re.search(r"```json\s*(.*?)\s*```", tail, flags=re.DOTALL)
+    if not match:
+        return _review_gate_error_status()
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return _review_gate_error_status()
+    if not isinstance(value, dict):
+        return _review_gate_error_status()
+    status = _review_gate_error_status()
+    status.update({key: value.get(key, status[key]) for key in status})
+    status["gate_mode"] = status["gate_mode"] if status["gate_mode"] in GATE_MODES else "unknown"
+    status["claude_review_status"] = status["claude_review_status"] if status["claude_review_status"] in CLAUDE_REVIEW_STATUSES else "unknown"
+    status["codex_self_check_status"] = status["codex_self_check_status"] if status["codex_self_check_status"] in CODEX_SELF_CHECK_STATUSES else "unknown"
+    follow_up = status.get("follow_up_required", [])
+    if not isinstance(follow_up, list):
+        status["follow_up_required"] = []
+    status["interim_merge"] = bool(status.get("interim_merge"))
+    status["gate_valid"] = bool(status.get("gate_valid"))
+    if status["gate_mode"] == "claude_pass" and status["claude_review_status"] != "pass":
+        status["gate_valid"] = False
+    if status["gate_mode"] == "codex_interim" and status["claude_review_status"] == "pending":
+        if CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP not in status["follow_up_required"]:
+            status["gate_valid"] = False
+    return status
 
 def _parse_sha256_sidecar(text: str) -> tuple[str, str, int | None] | None:
     line = next((item.strip() for item in text.splitlines() if item.strip()), "")
