@@ -1669,6 +1669,48 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertIn("review_result_missing", payload["blocking_reasons"])
         self.assertFalse(payload["judge_ready"])
 
+
+    def test_run_bundle_gate_intaked_results_without_decisions_are_incomplete(self) -> None:
+        decision_keys = {"final_state", "verdict", "decision", "status", "outcome", "passed"}
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+
+            for actor in ("reviewer", "judge"):
+                artifact = self._write_artifact(project_root, f"artifacts/{actor}.txt", f"{actor} metadata only")
+                intake_code, _intake_stdout, intake_stderr = run_cli(
+                    [
+                        "run-bundle",
+                        "intake",
+                        "--path",
+                        ".ai/runs/P7-STATIC-RUN",
+                        "--actor",
+                        actor,
+                        "--artifact",
+                        str(artifact.relative_to(project_root)),
+                        "--json",
+                    ]
+                )
+                self.assertEqual(intake_code, 0, intake_stderr)
+                result = json.loads((bundle / "results" / f"{actor}.json").read_text(encoding="utf-8"))
+                self.assertTrue(decision_keys.isdisjoint(result))
+
+            gate_code, gate_stdout, gate_stderr = run_cli(
+                ["run-bundle", "gate", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+
+        self.assertEqual(gate_code, 0, gate_stderr)
+        self.assertEqual(gate_stderr, "")
+        self.assertNotIn("Traceback", gate_stdout)
+        payload = json.loads(gate_stdout)
+        self.assertTrue(payload["review_intake"])
+        self.assertTrue(payload["judge_ready"])
+        self.assertTrue(payload["judge_intake"])
+        self.assertEqual(payload["final_state"], "incomplete")
+        self.assertIn("review_result_has_no_static_decision", payload["warnings"])
+        self.assertIn("judge_result_has_no_static_decision", payload["warnings"])
+        self.assertIn("judge_decision_missing", payload["blocking_reasons"])
+
     def test_run_bundle_gate_review_blocker_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
             bundle = self._write_bundle(Path(tmpdir))
