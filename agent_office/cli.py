@@ -49,6 +49,8 @@ from .profiles import (
 )
 from .run_bundle import (
     RunBundleError,
+    export_review_error_payload,
+    export_review_run_bundle_payload,
     format_actor_result_intake,
     format_run_bundle_catalog,
     format_run_bundle_gate,
@@ -60,6 +62,7 @@ from .run_bundle import (
     format_run_bundle_status,
     format_run_bundle_validation,
     format_run_bundle_workflow,
+    format_run_bundle_export_review,
     gate_run_bundle_payload,
     handoff_run_bundle_payload,
     inspect_run_bundle_payload,
@@ -992,6 +995,22 @@ def cmd_packet(args: argparse.Namespace) -> int:
 def cmd_run_bundle(args: argparse.Namespace) -> int:
     action = getattr(args, "bundle_action", None)
     try:
+        if action == "export-review":
+            if not args.path or not args.out:
+                error = "run-bundle export-review requires --path and --out."
+                if args.json:
+                    print(json.dumps(export_review_error_payload(args.path, args.out, error), indent=2, ensure_ascii=False))
+                    return 2
+                raise RunBundleError(error)
+            try:
+                payload = export_review_run_bundle_payload(args.path, args.out, PROJECT_ROOT)
+            except RunBundleError as exc:
+                if args.json:
+                    print(json.dumps(export_review_error_payload(args.path, args.out, str(exc)), indent=2, ensure_ascii=False))
+                    return 2
+                raise
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_export_review(payload))
+            return 0
         if action == "list":
             if not args.root:
                 raise RunBundleError("run-bundle list requires --root.")
@@ -1247,13 +1266,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--validate", action="store_true", help="Validate the static packet contract without executing it.")
     p.set_defaults(func=cmd_packet)
 
-    p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, or check static local run bundles without executing providers.")
-    p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow"], help="Bundle action.")
+    p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
+    p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
     p.add_argument("--objective", help="Objective id to bundle, for example P6-17.")
     p.add_argument("--profile", help="Provider profile name to use for the static bundle.")
     p.add_argument("--run-id", help="Static run bundle id.")
-    p.add_argument("--out", help="Explicit output directory for writing the local bundle.")
-    p.add_argument("--path", help="Static run bundle directory for inspect, validate, status, intake, results, handoff, review, gate, or workflow.")
+    p.add_argument("--out", help="Explicit output directory for bundle writes or artifact file for export-review.")
+    p.add_argument("--path", help="Static run bundle directory for inspect, validate, status, intake, results, handoff, review, gate, workflow, or export-review.")
     p.add_argument("--root", help="Static run bundle catalog root for list.")
     p.add_argument("--actor", help="Static actor result owner: codex, reviewer, or judge.")
     p.add_argument("--artifact", help="Project-local artifact file to intake as actor result metadata.")

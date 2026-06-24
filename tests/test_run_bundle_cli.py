@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import json
 import tempfile
@@ -1527,6 +1528,331 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         target = bundle / "results" / f"{actor}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+    def test_run_bundle_export_review_help_lists_action(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+            cli.main(["run-bundle", "export-review", "--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("export-review", stdout.getvalue())
+        self.assertIn("--out", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_run_bundle_export_review_json_writes_artifact_and_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, patch.object(
+            cli, "PROJECT_ROOT", Path(tmpdir)
+        ):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            self._write_gate_actor_result(bundle, "reviewer", "pass")
+            self._write_gate_actor_result(bundle, "judge", "pass")
+            out = Path(export_dir) / "review.md"
+            exit_code, stdout, stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", str(out), "--json"]
+            )
+
+            self.assertEqual(exit_code, 0, stderr)
+            payload = json.loads(stdout)
+            artifact = out.read_text(encoding="utf-8")
+            digest = hashlib.sha256(out.read_bytes()).hexdigest()
+            sha_text = Path(f"{out}.sha256").read_text(encoding="utf-8")
+
+        self.assertEqual(
+            list(payload),
+            [
+                "schema_version",
+                "export_review_schema_version",
+                "kind",
+                "valid_bundle",
+                "run_id",
+                "path",
+                "out",
+                "sha256_path",
+                "sha256",
+                "byte_count",
+                "sections",
+                "missing_file_markers",
+                "empty_section_markers",
+                "warnings",
+                "blocking_reasons",
+            ],
+        )
+        self.assertEqual(payload["kind"], "run_bundle_export_review")
+        self.assertTrue(payload["valid_bundle"])
+        self.assertEqual(payload["run_id"], "P7-STATIC-RUN")
+        self.assertEqual(payload["out"], str(out))
+        self.assertEqual(payload["sha256"], digest)
+        self.assertEqual(payload["byte_count"], len(artifact.encode("utf-8")))
+        self.assertEqual(payload["missing_file_markers"], 0)
+        self.assertEqual(payload["empty_section_markers"], 0)
+        self.assertIn(digest, sha_text)
+        self.assertIn("review.md", sha_text)
+        self.assertIn("# AgentOffice Run Bundle Review Artifact", artifact)
+        self.assertIn("MISSING_FILE_MARKERS: 0", artifact)
+        self.assertIn("EMPTY_SECTION_MARKERS: 0", artifact)
+        for section in payload["sections"]:
+            self.assertIn(f"## {section}", artifact)
+        self.assertIn("RUN_BUNDLE_REVIEW_ARTIFACT_EXPORT_COMPLETE", artifact)
+
+    def test_run_bundle_export_review_twice_is_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, patch.object(
+            cli, "PROJECT_ROOT", Path(tmpdir)
+        ):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            out = Path(export_dir) / "repeat.md"
+
+            first_code, first_stdout, first_stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", str(out), "--json"]
+            )
+            first_artifact = out.read_bytes()
+            first_sha = Path(f"{out}.sha256").read_text(encoding="utf-8")
+            second_code, second_stdout, second_stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", str(out), "--json"]
+            )
+            second_artifact = out.read_bytes()
+            second_sha = Path(f"{out}.sha256").read_text(encoding="utf-8")
+
+        self.assertEqual(first_code, 0, first_stderr)
+        self.assertEqual(second_code, 0, second_stderr)
+        self.assertEqual(first_artifact, second_artifact)
+        self.assertEqual(first_sha, second_sha)
+        first_payload = json.loads(first_stdout)
+        second_payload = json.loads(second_stdout)
+        self.assertEqual(first_payload["sha256"], hashlib.sha256(first_artifact).hexdigest())
+        self.assertEqual(second_payload["sha256"], hashlib.sha256(second_artifact).hexdigest())
+        self.assertIn(first_payload["sha256"], first_sha)
+
+    def test_run_bundle_export_review_text_writes_artifact_and_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            export_dir = project_root / "exports"
+            export_dir.mkdir()
+            out = export_dir / "review-text.md"
+            exit_code, stdout, stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", "exports/review-text.md"]
+            )
+
+            self.assertEqual(exit_code, 0, stderr)
+            digest = hashlib.sha256(out.read_bytes()).hexdigest()
+            sha_text = Path(f"{out}.sha256").read_text(encoding="utf-8")
+
+        self.assertIn("Run bundle review artifact exported", stdout)
+        self.assertIn("Run ID: P7-STATIC-RUN", stdout)
+        self.assertIn(f"SHA256: {digest}", stdout)
+        self.assertIn("Missing markers: 0", stdout)
+        self.assertIn("Empty sections: 0", stdout)
+        self.assertIn(digest, sha_text)
+
+    def test_run_bundle_export_review_refuses_missing_out_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            self._write_bundle(Path(tmpdir))
+            exit_code, stdout, stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertFalse(payload["valid_bundle"])
+        self.assertEqual(payload["blocking_reasons"], ["invalid_output"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_run_bundle_export_review_refuses_output_inside_runs_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            self._write_bundle(Path(tmpdir))
+            exit_code, stdout, stderr = run_cli(
+                [
+                    "run-bundle",
+                    "export-review",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--out",
+                    ".ai/runs/P7-STATIC-RUN/review.md",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["blocking_reasons"], ["invalid_output"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_run_bundle_export_review_refuses_existing_directory_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, patch.object(
+            cli, "PROJECT_ROOT", Path(tmpdir)
+        ):
+            self._write_bundle(Path(tmpdir))
+            out_dir = Path(export_dir) / "directory-output"
+            out_dir.mkdir()
+            exit_code, stdout, stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", str(out_dir), "--json"]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["blocking_reasons"], ["invalid_output"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_run_bundle_export_review_refuses_missing_parent_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            self._write_bundle(Path(tmpdir))
+            exit_code, stdout, stderr = run_cli(
+                [
+                    "run-bundle",
+                    "export-review",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--out",
+                    "missing-parent/review.md",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["blocking_reasons"], ["invalid_output"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_run_bundle_export_review_refuses_symlink_out_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, patch.object(
+            cli, "PROJECT_ROOT", Path(tmpdir)
+        ):
+            self._write_bundle(Path(tmpdir))
+            target = Path(export_dir) / "target.md"
+            target.write_text("do not overwrite", encoding="utf-8")
+            link = Path(export_dir) / "link.md"
+            try:
+                link.symlink_to(target)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+            exit_code, stdout, stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", str(link), "--json"]
+            )
+            target_text = target.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        self.assertEqual(target_text, "do not overwrite")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["blocking_reasons"], ["unsafe_path"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_run_bundle_export_review_stat_error_is_stable_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, patch.object(
+            cli, "PROJECT_ROOT", Path(tmpdir)
+        ):
+            self._write_bundle(Path(tmpdir))
+            out = Path(export_dir) / "stat-error.md"
+            original_stat = Path.stat
+
+            def stat_side_effect(path: Path, *args: object, **kwargs: object):
+                if path.name == "run.json" and any(frame.function == "_export_review_source_metadata" for frame in inspect.stack()):
+                    raise OSError("stat denied")
+                return original_stat(path, *args, **kwargs)
+
+            with patch.object(Path, "stat", stat_side_effect):
+                exit_code, stdout, stderr = run_cli(
+                    ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", str(out), "--json"]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertFalse(payload["valid_bundle"])
+        self.assertEqual(payload["blocking_reasons"], ["invalid_bundle"])
+        self.assertIn("Unable to stat source metadata file: run.json", payload["warnings"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_run_bundle_export_review_refuses_existing_project_file_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            self._write_bundle(project_root)
+            readme = project_root / "README.md"
+            readme.write_text("do not overwrite", encoding="utf-8")
+            exit_code, stdout, stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", "README.md", "--json"]
+            )
+            readme_text = readme.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        self.assertEqual(readme_text, "do not overwrite")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["blocking_reasons"], ["invalid_output"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_run_bundle_export_review_refuses_missing_and_unsafe_input_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            out_dir = project_root / "exports"
+            out_dir.mkdir()
+            for bundle_path, expected_reason in ((".ai/runs/MISSING", "missing_path"), ("../outside", "unsafe_path")):
+                exit_code, stdout, stderr = run_cli(
+                    [
+                        "run-bundle",
+                        "export-review",
+                        "--path",
+                        bundle_path,
+                        "--out",
+                        f"exports/{bundle_path.replace('/', '_')}.md",
+                        "--json",
+                    ]
+                )
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(stderr, "")
+                payload = json.loads(stdout)
+                self.assertFalse(payload["valid_bundle"])
+                self.assertEqual(payload["blocking_reasons"], [expected_reason])
+                self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_run_bundle_export_review_metadata_only_and_does_not_mutate_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            actor_content = "DO_NOT_COPY_ACTOR_ARTIFACT_CONTENT"
+            artifact = self._write_artifact(project_root, "artifacts/codex.txt", actor_content)
+            intake_code, _stdout, intake_stderr = run_cli(
+                [
+                    "run-bundle",
+                    "intake",
+                    "--path",
+                    ".ai/runs/P7-STATIC-RUN",
+                    "--actor",
+                    "codex",
+                    "--artifact",
+                    str(artifact.relative_to(project_root)),
+                    "--json",
+                ]
+            )
+            self.assertEqual(intake_code, 0, intake_stderr)
+            artifact.unlink()
+            before = self._bundle_file_snapshot(bundle)
+            export_dir = project_root / "exports"
+            export_dir.mkdir()
+            out = export_dir / "metadata-only.md"
+
+            exit_code, stdout, stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", str(out), "--json"]
+            )
+            after = self._bundle_file_snapshot(bundle)
+            artifact_text = out.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(before, after)
+        self.assertNotIn(actor_content, artifact_text)
+        self.assertIn("path=artifacts/codex.txt", artifact_text)
+        self.assertIn("results/codex.json", artifact_text)
+        self.assertFalse((bundle / "review.md").exists())
+        payload = json.loads(stdout)
+        self.assertEqual(payload["missing_file_markers"], 0)
+        self.assertEqual(payload["empty_section_markers"], 0)
 
     def test_run_bundle_gate_json_judge_pass_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):

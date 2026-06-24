@@ -94,6 +94,8 @@ agent-office run-bundle handoff --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle review --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle gate --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle workflow --path .ai/runs/<RUN_ID> --json
+agent-office run-bundle export-review --path .ai/runs/<RUN_ID> --out /tmp/agentoffice-review.md
+agent-office run-bundle export-review --path .ai/runs/<RUN_ID> --out /tmp/agentoffice-review.md --json
 ```
 
 ## State Machine
@@ -252,6 +254,41 @@ Final-state precedence is deterministic:
 - Gate `incomplete` chooses the nearest missing closure step: missing review readiness or missing reviewer result maps to `run_review`; intaked reviewer/judge metadata without static decision fields maps to `fix_actor_results`; remaining missing gate closure maps to `run_gate`.
 
 `run-bundle workflow` is static and local. It does not read `.env`, print environment values, execute actor artifacts, call providers, call adapters, call runtimes, create `.ai/` outputs, write `.ai/runs/*`, or mutate bundle/result/artifact files. It inherits the current gate/intake limitation: intake records artifact and safety metadata only, while gate and workflow consume static decision fields that must currently be authored externally, by actor tooling, or by a future intake extension.
+
+## Static Run Bundle Review Artifact Export
+
+P12 adds a controlled local export for a single Markdown review artifact plus a matching SHA256 file:
+
+```bash
+python3 -m agent_office run-bundle export-review --path .ai/runs/<RUN_ID> --out /tmp/agentoffice-review.md
+python3 -m agent_office run-bundle export-review --path .ai/runs/<RUN_ID> --out /tmp/agentoffice-review.md --json
+```
+
+The export turns the existing static bundle, handoff, review, gate, workflow, and result metadata into one reviewer-friendly Markdown file. It also writes `<out>.sha256`. `--out` is required so the command never defaults to writing a report in the repository root.
+
+Safety boundary:
+
+- No `.env` reads and no environment variable value printing.
+- No provider, adapter, runtime, real runner, or model calls.
+- No actor artifact execution and no actor artifact content copy; actor artifacts are represented by path, size, sha256, and static metadata only.
+- No writes under `.ai/runs/*` and no mutation of bundle/result/source artifact files.
+- Relative `--out` paths stay inside the project root; absolute `--out` paths are allowed for operator exports when the parent directory already exists.
+
+Exit code `0` means the artifact and `<out>.sha256` were written. Exit code `2` means invalid input, unsafe path, missing bundle, invalid bundle, unsafe output, or I/O failure. JSON mode returns a stable error payload without traceback.
+
+Operator workflow from Windows PowerShell:
+
+```powershell
+$dst = "$env:USERPROFILE\Desktop\<ARTIFACT_DIR>"
+New-Item -ItemType Directory -Force -Path $dst
+scp -o BatchMode=yes agentoffice-vps:/path/to/artifact.md $dst\
+scp -o BatchMode=yes agentoffice-vps:/path/to/artifact.md.sha256 $dst\
+cd $dst
+Get-FileHash .\artifact.md -Algorithm SHA256
+Get-Content .\artifact.md.sha256
+```
+
+Upload both the Markdown artifact and `.sha256` file to Claude/reviewer so review can be artifact-based and hash-checkable.
 
 ## Objective Specs
 
