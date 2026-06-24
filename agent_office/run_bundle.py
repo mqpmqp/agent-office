@@ -16,6 +16,7 @@ RUN_BUNDLE_SCHEMA_VERSION = 1
 HANDOFF_SCHEMA_VERSION = 1
 REVIEW_PACKET_SCHEMA_VERSION = 1
 GATE_SCHEMA_VERSION = 1
+WORKFLOW_SCHEMA_VERSION = 1
 RUN_BUNDLE_REQUIRED_FILES = (
     "run.json",
     "plan.json",
@@ -559,6 +560,184 @@ def gate_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, o
         "recommended_next_commands": _gate_recommended_next_commands(path, valid_bundle, review_ready, review_intake, judge_ready, judge_intake, final_state),
         "safety": _gate_safety(),
     }
+
+
+
+def workflow_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, object]:
+    command = f"python3 -m agent_office run-bundle workflow --path {path}"
+    gate = gate_run_bundle_payload(path, project_root)
+    if gate.get("valid_bundle") is not True:
+        return _workflow_payload(path, command, gate, None, None)
+    try:
+        handoff = handoff_run_bundle_payload(path, project_root)
+        review = review_run_bundle_payload(path, project_root)
+    except RunBundleError as exc:
+        gate = _gate_error_payload(path, project_root, command, str(exc))
+        return _workflow_payload(path, command, gate, None, None)
+    return _workflow_payload(path, command, gate, handoff, review)
+
+
+def _workflow_payload(
+    path: str | Path,
+    command: str,
+    gate: dict[str, object],
+    handoff: dict[str, object] | None,
+    review: dict[str, object] | None,
+) -> dict[str, object]:
+    valid_bundle = gate.get("valid_bundle") is True
+    readiness = {
+        "handoff_ready": valid_bundle,
+        "review_ready": gate.get("review_ready") is True,
+        "gate_ready": bool(valid_bundle and gate.get("review_ready") is True),
+    }
+    summary = _workflow_summary(gate, readiness)
+    actors = _workflow_actors(gate, review)
+    missing_actors = [actor for actor, item in actors.items() if item.get("result_present") is not True]
+    gate_summary = {
+        "final_state": gate.get("final_state") if isinstance(gate.get("final_state"), str) else "blocked",
+        "blocking_reasons": gate.get("blocking_reasons") if isinstance(gate.get("blocking_reasons"), list) else [],
+        "warnings": gate.get("warnings") if isinstance(gate.get("warnings"), list) else [],
+    }
+    return {
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "workflow_schema_version": WORKFLOW_SCHEMA_VERSION,
+        "kind": "static_run_bundle_workflow",
+        "valid_bundle": valid_bundle,
+        "run_id": gate.get("run_id"),
+        "objective": handoff.get("objective") if handoff is not None else None,
+        "profile": handoff.get("profile") if handoff is not None else None,
+        "path": gate.get("path") if isinstance(gate.get("path"), str) else str(path),
+        "phase": "workflow",
+        "summary": summary,
+        "readiness": readiness,
+        "gate": gate_summary,
+        "actors": actors,
+        "missing_actors": missing_actors,
+        "blocking_reasons": gate_summary["blocking_reasons"],
+        "warnings": gate_summary["warnings"],
+        "safety": _gate_safety(),
+        "commands": _workflow_commands(path, summary),
+    }
+
+
+def _workflow_summary(gate: dict[str, object], readiness: dict[str, object]) -> dict[str, object]:
+    if gate.get("valid_bundle") is not True:
+        return {"final_state": "invalid", "safe_to_merge": False, "next_action": "fix_bundle"}
+    gate_state = gate.get("final_state") if isinstance(gate.get("final_state"), str) else "blocked"
+    if gate_state == "pass":
+        return {"final_state": "pass", "safe_to_merge": True, "next_action": "merge"}
+    if gate_state == "fail":
+        return {"final_state": "fail", "safe_to_merge": False, "next_action": "fix_actor_results"}
+    if gate_state == "blocked":
+        return {"final_state": "blocked", "safe_to_merge": False, "next_action": "blocked"}
+    if gate_state != "incomplete":
+        return {"final_state": "blocked", "safe_to_merge": False, "next_action": "blocked"}
+
+    reasons = gate.get("blocking_reasons") if isinstance(gate.get("blocking_reasons"), list) else []
+    warnings = gate.get("warnings") if isinstance(gate.get("warnings"), list) else []
+    if "invalid_bundle" in reasons:
+        next_action = "fix_bundle"
+    elif readiness.get("review_ready") is not True or "review_result_missing" in reasons:
+        next_action = "run_review"
+    elif any(str(warning).endswith("_has_no_static_decision") for warning in warnings) or "judge_decision_missing" in reasons:
+        next_action = "fix_actor_results"
+    else:
+        next_action = "run_gate"
+    return {"final_state": "incomplete", "safe_to_merge": False, "next_action": next_action}
+
+
+def _workflow_actors(gate: dict[str, object], review: dict[str, object] | None) -> dict[str, object]:
+    review_evidence: dict[str, dict[str, object]] = {}
+    if review is not None and isinstance(review.get("actor_evidence"), list):
+        for item in review["actor_evidence"]:
+            if isinstance(item, dict) and item.get("actor") in ALLOWED_ACTORS:
+                review_evidence[str(item["actor"])] = item
+
+    gate_evidence: dict[str, dict[str, object]] = {}
+    if isinstance(gate.get("evidence"), list):
+        for item in gate["evidence"]:
+            if isinstance(item, dict) and item.get("actor") in ALLOWED_ACTORS:
+                gate_evidence[str(item["actor"])] = item
+
+    actors: dict[str, object] = {}
+    for actor in ALLOWED_ACTORS:
+        review_item = review_evidence.get(actor, {})
+        gate_item = gate_evidence.get(actor, {})
+        artifact = review_item.get("artifact") if isinstance(review_item.get("artifact"), dict) else None
+        if artifact is None and isinstance(gate_item.get("artifact"), dict):
+            artifact = gate_item["artifact"]
+        result_present = review_item.get("result_present") is True or gate_item.get("status") == "present"
+        actor_summary: dict[str, object] = {
+            "packet_ready": review_item.get("packet_ready") is True,
+            "result_present": result_present,
+            "result_file": f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json",
+            "artifact": artifact,
+        }
+        decision = gate_item.get("decision")
+        if isinstance(decision, dict):
+            actor_summary["decision"] = decision
+        elif actor in {"reviewer", "judge"}:
+            actor_summary["decision"] = {
+                "actor": actor,
+                "state": "unknown" if result_present else "missing",
+                "signals": [],
+                "blocking_reasons": [],
+            }
+        actors[actor] = actor_summary
+    return actors
+
+
+def _workflow_commands(path: str | Path, summary: dict[str, object]) -> dict[str, str]:
+    path_text = str(path)
+    merge_guidance = "Do not merge until summary.safe_to_merge is true and the reviewed branch is approved."
+    if summary.get("safe_to_merge") is True:
+        merge_guidance = "summary.safe_to_merge is true; merge only through the reviewed branch gate."
+    return {
+        "handoff": f"python3 -m agent_office run-bundle handoff --path {path_text} --json",
+        "review": f"python3 -m agent_office run-bundle review --path {path_text} --json",
+        "gate": f"python3 -m agent_office run-bundle gate --path {path_text} --json",
+        "merge_guidance": merge_guidance,
+    }
+
+
+def format_run_bundle_workflow(payload: dict[str, object]) -> str:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
+    gate = payload.get("gate") if isinstance(payload.get("gate"), dict) else {}
+    objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else None
+    profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else None
+    lines = [
+        "Run bundle workflow",
+        f"Run ID: {_format_scalar(payload.get('run_id'))}",
+        f"Objective: {_format_handoff_objective(objective) if objective is not None else 'none'}",
+        f"Profile: {_format_handoff_profile(profile) if profile is not None else 'none'}",
+        f"Valid bundle: {_format_scalar(payload.get('valid_bundle'))}",
+        f"Handoff ready: {_format_scalar(readiness.get('handoff_ready'))}",
+        f"Review ready: {_format_scalar(readiness.get('review_ready'))}",
+        f"Gate ready: {_format_scalar(readiness.get('gate_ready'))}",
+        f"Gate final state: {_format_scalar(gate.get('final_state'))}",
+        f"Safe to merge: {_format_scalar(summary.get('safe_to_merge'))}",
+        f"Next action: {_format_scalar(summary.get('next_action'))}",
+        "Blocking reasons:",
+    ]
+    _append_workflow_items(lines, payload.get("blocking_reasons"))
+    lines.append("Warnings:")
+    _append_workflow_items(lines, payload.get("warnings"))
+    lines.append("Commands:")
+    commands = payload.get("commands")
+    if isinstance(commands, dict):
+        for key in ("handoff", "review", "gate", "merge_guidance"):
+            lines.append(f"  {key}: {_format_scalar(commands.get(key))}")
+    lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
+def _append_workflow_items(lines: list[str], values: object) -> None:
+    if isinstance(values, list) and values:
+        for value in values:
+            lines.append(f"  - {value}")
+    else:
+        lines.append("  - none")
 
 
 def format_run_bundle_gate(payload: dict[str, object]) -> str:

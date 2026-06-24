@@ -93,6 +93,7 @@ agent-office run-bundle status --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle handoff --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle review --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle gate --path .ai/runs/<RUN_ID> --json
+agent-office run-bundle workflow --path .ai/runs/<RUN_ID> --json
 ```
 
 ## State Machine
@@ -226,6 +227,29 @@ Exit code `0` means the bundle was readable and valid enough to produce a gate p
 `run-bundle gate` reads only local bundle files and intaked `results/*.json` metadata. It does not read `.env`, print environment values, execute result artifacts, call providers, call adapters, call runtimes, create `.ai/` outputs, or mutate the bundle.
 
 Current decision population limitation: `run-bundle intake` records artifact metadata and static safety metadata only; it does not record actor decision fields. `run-bundle gate` consumes static decision fields from `results/<actor>.json`, so those decisions currently must be authored externally, by actor tooling, or by a future intake extension.
+
+## Static Run Bundle Workflow Summary
+
+P11 adds a read-only closure summary layer over handoff, review, and gate state:
+
+```bash
+python -m agent_office run-bundle workflow --path .ai/runs/<RUN_ID>
+python -m agent_office run-bundle workflow --path .ai/runs/<RUN_ID> --json
+```
+
+The JSON payload is deterministic and includes `schema_version`, `workflow_schema_version`, `valid_bundle`, `run_id`, `objective`, `profile`, `path`, `phase`, `summary`, `readiness`, `gate`, `actors`, `missing_actors`, `blocking_reasons`, `warnings`, `safety`, and `commands`. Text output is the same operator summary in a reviewer-friendly form: run identity, bundle validity, handoff/review/gate readiness, gate final state, safe-to-merge flag, next action, blocking reasons, warnings, and copy-paste commands.
+
+Exit code `0` means the workflow payload was readable. It does not mean the run is safe to merge. Automation must inspect `summary.safe_to_merge`, `summary.final_state`, and `blocking_reasons`.
+
+Final-state precedence is deterministic:
+
+- Invalid, missing, unsafe, malformed, or non-UTF8 bundles set `summary.final_state=invalid`, `summary.safe_to_merge=false`, and `summary.next_action=fix_bundle`.
+- Gate `pass` sets `summary.safe_to_merge=true` and `summary.next_action=merge`.
+- Gate `fail` sets `summary.safe_to_merge=false` and `summary.next_action=fix_actor_results`.
+- Gate `blocked` sets `summary.safe_to_merge=false` and `summary.next_action=blocked`.
+- Gate `incomplete` chooses the nearest missing closure step: missing review readiness or missing reviewer result maps to `run_review`; intaked reviewer/judge metadata without static decision fields maps to `fix_actor_results`; remaining missing gate closure maps to `run_gate`.
+
+`run-bundle workflow` is static and local. It does not read `.env`, print environment values, execute actor artifacts, call providers, call adapters, call runtimes, create `.ai/` outputs, write `.ai/runs/*`, or mutate bundle/result/artifact files. It inherits the current gate/intake limitation: intake records artifact and safety metadata only, while gate and workflow consume static decision fields that must currently be authored externally, by actor tooling, or by a future intake extension.
 
 ## Objective Specs
 
