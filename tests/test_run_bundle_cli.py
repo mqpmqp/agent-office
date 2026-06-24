@@ -1570,6 +1570,10 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
                 "path",
                 "out",
                 "sha256_path",
+                "artifact_dir",
+                "artifact_basename",
+                "sha256_basename",
+                "sha256_verify_command",
                 "sha256",
                 "byte_count",
                 "sections",
@@ -1583,6 +1587,11 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertTrue(payload["valid_bundle"])
         self.assertEqual(payload["run_id"], "P7-STATIC-RUN")
         self.assertEqual(payload["out"], str(out))
+        self.assertEqual(payload["sha256_path"], f"{out}.sha256")
+        self.assertEqual(payload["artifact_dir"], str(out.parent))
+        self.assertEqual(payload["artifact_basename"], "review.md")
+        self.assertEqual(payload["sha256_basename"], "review.md.sha256")
+        self.assertEqual(payload["sha256_verify_command"], f"cd {out.parent} && sha256sum -c review.md.sha256")
         self.assertEqual(payload["sha256"], digest)
         self.assertEqual(payload["byte_count"], len(artifact.encode("utf-8")))
         self.assertEqual(payload["missing_file_markers"], 0)
@@ -1625,6 +1634,28 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertEqual(second_payload["sha256"], hashlib.sha256(second_artifact).hexdigest())
         self.assertIn(first_payload["sha256"], first_sha)
 
+    def test_run_bundle_export_review_verification_metadata_handles_spaced_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, patch.object(
+            cli, "PROJECT_ROOT", Path(tmpdir)
+        ):
+            self._write_bundle(Path(tmpdir))
+            spaced_dir = Path(export_dir) / "dir with space"
+            spaced_dir.mkdir()
+            out = spaced_dir / "review with space.md"
+            exit_code, stdout, stderr = run_cli(
+                ["run-bundle", "export-review", "--path", ".ai/runs/P7-STATIC-RUN", "--out", str(out), "--json"]
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["artifact_dir"], str(spaced_dir))
+        self.assertEqual(payload["artifact_basename"], "review with space.md")
+        self.assertEqual(payload["sha256_basename"], "review with space.md.sha256")
+        self.assertEqual(
+            payload["sha256_verify_command"],
+            f"cd '{spaced_dir}' && sha256sum -c 'review with space.md.sha256'",
+        )
+
     def test_run_bundle_export_review_text_writes_artifact_and_sha(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
             project_root = Path(tmpdir)
@@ -1643,6 +1674,8 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertIn("Run bundle review artifact exported", stdout)
         self.assertIn("Run ID: P7-STATIC-RUN", stdout)
         self.assertIn(f"SHA256: {digest}", stdout)
+        self.assertIn(f"SHA256 sidecar: {out}.sha256", stdout)
+        self.assertIn(f"Verification command: cd {out.parent} && sha256sum -c review-text.md.sha256", stdout)
         self.assertIn("Missing markers: 0", stdout)
         self.assertIn("Empty sections: 0", stdout)
         self.assertIn(digest, sha_text)

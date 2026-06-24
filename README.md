@@ -266,6 +266,20 @@ python3 -m agent_office run-bundle export-review --path .ai/runs/<RUN_ID> --out 
 
 The export turns the existing static bundle, handoff, review, gate, workflow, and result metadata into one reviewer-friendly Markdown file. It also writes `<out>.sha256`. `--out` is required so the command never defaults to writing a report in the repository root.
 
+The `.sha256` sidecar stores the artifact basename, not an absolute path, for example:
+
+```text
+<sha256>  agentoffice-review.md
+```
+
+Run `sha256sum -c` from the artifact directory:
+
+```bash
+cd /tmp && sha256sum -c agentoffice-review.md.sha256
+```
+
+JSON and text output include the exact `sha256_verify_command`/verification command in this directory-aware form.
+
 Safety boundary:
 
 - No `.env` reads and no environment variable value printing.
@@ -286,9 +300,27 @@ scp -o BatchMode=yes agentoffice-vps:/path/to/artifact.md.sha256 $dst\
 cd $dst
 Get-FileHash .\artifact.md -Algorithm SHA256
 Get-Content .\artifact.md.sha256
+# Compare the Get-FileHash Hash value to the first field in artifact.md.sha256.
 ```
 
-Upload both the Markdown artifact and `.sha256` file to Claude/reviewer so review can be artifact-based and hash-checkable.
+When verifying on the VPS with `sha256sum -c`, first `cd` into the artifact directory because the sidecar intentionally uses the bare artifact basename.
+
+Positive smoke recipe:
+
+```bash
+python3 -m agent_office run-bundle preview --objective P6-17 --profile lowest-cost --run-id EXPORT-REVIEW-SMOKE --out .tmp-export-review-smoke/bundle --json
+python3 -m agent_office run-bundle export-review --path .tmp-export-review-smoke/bundle --out /tmp/agentoffice-review.md --json
+cd /tmp && sha256sum -c agentoffice-review.md.sha256
+```
+
+Negative smokes should still pass a valid `--out` path so the failing condition is the bundle path, not output validation:
+
+```bash
+python3 -m agent_office run-bundle export-review --path .ai/runs/MISSING --out /tmp/agentoffice-review-missing.md --json
+python3 -m agent_office run-bundle export-review --path ../bad --out /tmp/agentoffice-review-unsafe.md --json
+```
+
+Upload both the Markdown artifact and `.sha256` file to Claude/reviewer so review can be artifact-based and hash-checkable. Claude/reviewer can review uploaded artifacts and hashes, but should not claim to have personally executed VPS validation unless it actually did.
 
 ## Objective Specs
 
