@@ -6,6 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .run_bundle import RunBundleError, validate_run_bundle_payload
+
 
 class ReviewArtifactError(ValueError):
     pass
@@ -137,9 +139,12 @@ def build_smoke_commands(project_root: Path) -> tuple[list[CaptureCommand], list
         )
     ]
     notes: list[str] = []
-    sample = _existing_run_bundle_sample(project_root)
+    sample, invalid_sample_count = _existing_run_bundle_sample(project_root)
     if sample is None:
-        notes.append("NO_EXISTING_RUN_DIRECTORY_FOUND")
+        if invalid_sample_count:
+            notes.append("NO_USABLE_EXISTING_RUN_DIRECTORY_FOUND")
+        else:
+            notes.append("NO_EXISTING_RUN_DIRECTORY_FOUND")
     else:
         positive_out = Path("/tmp/agentoffice-review-artifact-export-review-smoke.md")
         commands.extend(
@@ -488,17 +493,25 @@ def _decode(data: object) -> str:
     return str(data)
 
 
-def _existing_run_bundle_sample(project_root: Path) -> str | None:
+def _existing_run_bundle_sample(project_root: Path) -> tuple[str | None, int]:
     root = project_root / ".ai" / "runs"
+    invalid_count = 0
     try:
         if root.is_symlink() or not root.is_dir():
-            return None
+            return None, invalid_count
         for child in sorted(root.iterdir()):
-            if child.is_dir() and not child.is_symlink() and (child / "run.json").is_file():
-                return child.relative_to(project_root).as_posix()
+            if not child.is_dir() or child.is_symlink() or not (child / "run.json").is_file():
+                continue
+            relative = child.relative_to(project_root).as_posix()
+            try:
+                validate_run_bundle_payload(relative, project_root)
+            except RunBundleError:
+                invalid_count += 1
+                continue
+            return relative, invalid_count
     except OSError:
-        return None
-    return None
+        return None, invalid_count
+    return None, invalid_count
 
 
 def _report_snapshots(project_root: Path, branch: str, title: str) -> list[dict[str, str]]:
