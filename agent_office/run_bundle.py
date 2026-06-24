@@ -1541,7 +1541,10 @@ def _export_review_source_metadata(bundle: dict[str, object]) -> list[dict[str, 
     items: list[dict[str, object]] = []
     for relative in RUN_BUNDLE_REQUIRED_FILES:
         target = _safe_existing_bundle_file(root, relative)
-        stat = target.stat()
+        try:
+            stat = target.stat()
+        except OSError as exc:
+            raise RunBundleError(f"Unable to stat source metadata file: {relative}") from exc
         items.append(
             {
                 "path": relative,
@@ -1555,7 +1558,10 @@ def _export_review_source_metadata(bundle: dict[str, object]) -> list[dict[str, 
         relative = f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json"
         target = _safe_existing_bundle_file(root, relative)
         if _exists(target, relative):
-            stat = target.stat()
+            try:
+                stat = target.stat()
+            except OSError as exc:
+                raise RunBundleError(f"Unable to stat source metadata file: {relative}") from exc
             items.append(
                 {
                     "path": relative,
@@ -1571,17 +1577,18 @@ def _export_review_source_metadata(bundle: dict[str, object]) -> list[dict[str, 
 
 
 def _export_review_error_reason(error: str) -> str:
-    if "--out" in error or "output" in error or "review artifact" in error or "sha256" in error:
-        return "invalid_output"
-    if "outside project root" in error or "unsafe" in error or "symlink" in error:
+    normalized = error.lower()
+    if "outside project root" in normalized or "unsafe" in normalized or "symlink" in normalized:
         return "unsafe_path"
-    if "Run bundle path is not a directory" in error:
+    if "--out" in normalized or "output" in normalized or "review artifact" in normalized or "sha256" in normalized:
+        return "invalid_output"
+    if "run bundle path is not a directory" in normalized:
         return "missing_path"
-    if "Missing run bundle file" in error:
+    if "missing run bundle file" in normalized:
         return "missing_required_file"
-    if "Invalid UTF-8" in error:
+    if "invalid utf-8" in normalized:
         return "non_utf8"
-    if "Invalid JSON" in error:
+    if "invalid json" in normalized:
         return "malformed_json"
     return "invalid_bundle"
 
