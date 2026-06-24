@@ -15,6 +15,7 @@ class RunBundleError(ValueError):
 RUN_BUNDLE_SCHEMA_VERSION = 1
 HANDOFF_SCHEMA_VERSION = 1
 REVIEW_PACKET_SCHEMA_VERSION = 1
+GATE_SCHEMA_VERSION = 1
 RUN_BUNDLE_REQUIRED_FILES = (
     "run.json",
     "plan.json",
@@ -494,6 +495,149 @@ def review_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str,
     }
 
 
+
+def gate_run_bundle_payload(path: str | Path, project_root: Path) -> dict[str, object]:
+    command = f"python3 -m agent_office run-bundle gate --path {path}"
+    try:
+        bundle = _load_existing_bundle(path, project_root)
+        run = _validate_loaded_bundle(bundle)
+        validation = validate_run_bundle_payload(path, project_root)
+        root = _expect_path(bundle, "root")
+        results = _load_actor_results(root)
+    except RunBundleError as exc:
+        return _gate_error_payload(path, project_root, command, str(exc))
+
+    json_files = _expect_dict(bundle, "json")
+    valid_bundle = validation.get("valid") is True
+    packet_readiness = {
+        actor: _packet_ready(actor, _actor_packet_identity(_expect_dict(json_files, f"packets/{actor}.json")))
+        for actor in ALLOWED_ACTORS
+    }
+    review_ready = bool(valid_bundle and all(packet_readiness.values()))
+    result_presence = _result_presence(results)
+    review_intake = result_presence["reviewer"]
+    judge_intake = result_presence["judge"]
+    reviewer_decision = _gate_actor_decision("reviewer", results.get("reviewer"))
+    judge_decision = _gate_actor_decision("judge", results.get("judge"))
+
+    review_blocked = reviewer_decision["state"] == "blocked"
+    review_failed = reviewer_decision["state"] == "fail"
+    judge_ready = bool(review_ready and review_intake and not review_blocked and not review_failed)
+    final_state = _gate_final_state(valid_bundle, review_ready, reviewer_decision, judge_decision)
+    blocking_reasons = _gate_blocking_reasons(
+        valid_bundle=valid_bundle,
+        review_ready=review_ready,
+        review_intake=review_intake,
+        judge_ready=judge_ready,
+        judge_intake=judge_intake,
+        reviewer_decision=reviewer_decision,
+        judge_decision=judge_decision,
+    )
+    warnings = _gate_warnings(
+        review_intake=review_intake,
+        judge_intake=judge_intake,
+        reviewer_decision=reviewer_decision,
+        judge_decision=judge_decision,
+    )
+    return {
+        "kind": "static_run_bundle_gate",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "gate_schema_version": GATE_SCHEMA_VERSION,
+        "command": command,
+        "run_id": run["run_id"],
+        "path": str(root),
+        "exists": True,
+        "valid_bundle": valid_bundle,
+        "review_ready": review_ready,
+        "review_intake": review_intake,
+        "judge_ready": judge_ready,
+        "judge_intake": judge_intake,
+        "final_state": final_state,
+        "blocking_reasons": blocking_reasons,
+        "warnings": warnings,
+        "evidence": _gate_evidence(bundle, results, reviewer_decision, judge_decision),
+        "recommended_next_commands": _gate_recommended_next_commands(path, valid_bundle, review_ready, review_intake, judge_ready, judge_intake, final_state),
+        "safety": _gate_safety(),
+    }
+
+
+def format_run_bundle_gate(payload: dict[str, object]) -> str:
+    lines = [
+        "AgentOffice static run bundle gate",
+        f"schema_version: {payload['schema_version']}",
+        f"gate_schema_version: {payload['gate_schema_version']}",
+        f"command: {payload['command']}",
+        f"path: {payload['path']}",
+        f"run_id: {_format_scalar(payload.get('run_id'))}",
+        f"exists: {_format_scalar(payload.get('exists'))}",
+        f"valid_bundle: {_format_scalar(payload.get('valid_bundle'))}",
+        f"final_state: {payload['final_state']}",
+        "review:",
+        f"  ready: {_format_scalar(payload.get('review_ready'))}",
+        f"  intake: {_format_scalar(payload.get('review_intake'))}",
+        "judge:",
+        f"  ready: {_format_scalar(payload.get('judge_ready'))}",
+        f"  intake: {_format_scalar(payload.get('judge_intake'))}",
+        "blocking_reasons:",
+    ]
+    reasons = payload.get("blocking_reasons")
+    if isinstance(reasons, list) and reasons:
+        for reason in reasons:
+            lines.append(f"  - {reason}")
+    else:
+        lines.append("  - none")
+
+    lines.append("warnings:")
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        for warning in warnings:
+            lines.append(f"  - {warning}")
+    else:
+        lines.append("  - none")
+
+    lines.append("evidence:")
+    evidence = payload.get("evidence")
+    if isinstance(evidence, list) and evidence:
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            line = f"  - {item.get('type')}: {item.get('path')} ({item.get('status')})"
+            actor = item.get("actor")
+            if actor:
+                line += f"; actor={actor}"
+            artifact = item.get("artifact")
+            if isinstance(artifact, dict):
+                line += f"; artifact={_format_scalar(artifact.get('path'))}"
+            decision = item.get("decision")
+            if isinstance(decision, dict):
+                line += f"; decision={decision.get('state')}"
+            lines.append(line)
+    else:
+        lines.append("  - none")
+
+    lines.append("next_commands:")
+    commands = payload.get("recommended_next_commands")
+    if isinstance(commands, list):
+        for command in commands:
+            lines.append(f"  - {command}")
+
+    lines.append("safety:")
+    safety = payload.get("safety")
+    if isinstance(safety, dict):
+        for key in (
+            "local_only",
+            "env_not_read",
+            "provider_calls",
+            "runtime_calls",
+            "adapter_calls",
+            "external_calls",
+            "artifact_content_executed",
+            "read_only",
+        ):
+            lines.append(f"  {key}: {_format_scalar(safety.get(key))}")
+    lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
 def format_run_bundle_review(payload: dict[str, object]) -> str:
     lines = [
         "AgentOffice static run bundle review packet",
@@ -723,6 +867,243 @@ def _reviewer_contract() -> dict[str, list[str]]:
         ],
     }
 
+
+
+def _gate_error_payload(path: str | Path, project_root: Path, command: str, error: str) -> dict[str, object]:
+    path_text = str(path)
+    exists = False
+    try:
+        root = _resolve_bundle_path(path, project_root)
+        path_text = str(root)
+        exists = _exists(root, str(path))
+    except RunBundleError:
+        pass
+    reason = _gate_error_reason(error)
+    return {
+        "kind": "static_run_bundle_gate",
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "gate_schema_version": GATE_SCHEMA_VERSION,
+        "command": command,
+        "run_id": None,
+        "path": path_text,
+        "exists": exists,
+        "valid_bundle": False,
+        "review_ready": False,
+        "review_intake": False,
+        "judge_ready": False,
+        "judge_intake": False,
+        "final_state": "blocked",
+        "blocking_reasons": [reason],
+        "warnings": [error],
+        "evidence": [],
+        "recommended_next_commands": _gate_recommended_next_commands(path, False, False, False, False, False, "blocked"),
+        "safety": _gate_safety(),
+    }
+
+
+def _gate_error_reason(error: str) -> str:
+    if "results/" in error or "actor result" in error:
+        return "malformed_actor_result"
+    if "symlink" in error or "outside project root" in error or "unsafe" in error:
+        return "unsafe_path"
+    if "Run bundle path is not a directory" in error:
+        return "missing_path"
+    if "Missing run bundle file" in error:
+        return "missing_required_file"
+    if "Invalid UTF-8" in error:
+        return "non_utf8"
+    if "Invalid JSON" in error:
+        return "malformed_json"
+    return "invalid_bundle"
+
+
+def _gate_actor_decision(actor: str, result: dict[str, object] | None) -> dict[str, object]:
+    if result is None:
+        return {"actor": actor, "state": "missing", "signals": [], "blocking_reasons": []}
+    signals: list[str] = []
+    for key in ("final_state", "verdict", "decision", "status", "outcome"):
+        value = result.get(key)
+        if isinstance(value, str):
+            signals.append(_normalize_gate_signal(value))
+    passed = result.get("passed")
+    if passed is True:
+        signals.append("pass")
+    elif passed is False:
+        signals.append("fail")
+
+    blocking_reasons: list[str] = []
+    for key in ("blocking_reasons", "blockers"):
+        value = result.get(key)
+        if _string_list(value):
+            blocking_reasons.extend(value)
+    if result.get("blocked") is True or result.get("blocker") is True:
+        blocking_reasons.append(f"{actor}_blocked")
+
+    # ponytail: P10 recognizes a small static verdict vocabulary; richer provider-specific parsing stays out of scope.
+    if blocking_reasons or any(signal in {"blocked", "blocker", "blockers"} for signal in signals):
+        state = "blocked"
+    elif any(signal in {"fail", "failed", "failure", "reject", "rejected", "request_changes", "changes_requested"} for signal in signals):
+        state = "fail"
+    elif any(signal in {"pass", "passed", "approved", "approve", "accepted", "ok", "success"} for signal in signals):
+        state = "pass"
+    else:
+        state = "unknown"
+    return {"actor": actor, "state": state, "signals": signals, "blocking_reasons": blocking_reasons}
+
+
+def _normalize_gate_signal(value: str) -> str:
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _gate_final_state(
+    valid_bundle: bool,
+    review_ready: bool,
+    reviewer_decision: dict[str, object],
+    judge_decision: dict[str, object],
+) -> str:
+    if not valid_bundle or not review_ready:
+        return "blocked"
+    if reviewer_decision["state"] == "blocked" or judge_decision["state"] == "blocked":
+        return "blocked"
+    if reviewer_decision["state"] == "fail" or judge_decision["state"] == "fail":
+        return "fail"
+    if judge_decision["state"] == "pass":
+        return "pass"
+    return "incomplete"
+
+
+def _gate_blocking_reasons(
+    *,
+    valid_bundle: bool,
+    review_ready: bool,
+    review_intake: bool,
+    judge_ready: bool,
+    judge_intake: bool,
+    reviewer_decision: dict[str, object],
+    judge_decision: dict[str, object],
+) -> list[str]:
+    reasons: list[str] = []
+    if not valid_bundle:
+        reasons.append("invalid_bundle")
+    if not review_ready:
+        reasons.append("review_not_ready")
+    if not review_intake:
+        reasons.append("review_result_missing")
+    if reviewer_decision["state"] == "blocked":
+        reasons.append("review_blocker")
+    if reviewer_decision["state"] == "fail":
+        reasons.append("review_failed")
+    if not judge_ready:
+        reasons.append("judge_not_ready")
+    if judge_ready and not judge_intake:
+        reasons.append("judge_result_missing")
+    if judge_intake and judge_decision["state"] == "unknown":
+        reasons.append("judge_decision_missing")
+    if judge_decision["state"] == "blocked":
+        reasons.append("judge_blocked")
+    if judge_decision["state"] == "fail":
+        reasons.append("judge_failed")
+    return _dedupe_strings(reasons)
+
+
+def _gate_warnings(
+    *,
+    review_intake: bool,
+    judge_intake: bool,
+    reviewer_decision: dict[str, object],
+    judge_decision: dict[str, object],
+) -> list[str]:
+    warnings: list[str] = []
+    if review_intake and reviewer_decision["state"] == "unknown":
+        warnings.append("review_result_has_no_static_decision")
+    if judge_intake and judge_decision["state"] == "unknown":
+        warnings.append("judge_result_has_no_static_decision")
+    return warnings
+
+
+def _gate_evidence(
+    bundle: dict[str, object],
+    results: dict[str, dict[str, object]],
+    reviewer_decision: dict[str, object],
+    judge_decision: dict[str, object],
+) -> list[dict[str, object]]:
+    evidence: list[dict[str, object]] = []
+    for item in _bundle_file_statuses(bundle):
+        if isinstance(item, dict):
+            evidence.append({"type": "bundle_file", "path": item["path"], "status": item["status"], "kind": item["kind"]})
+    decisions = {"reviewer": reviewer_decision, "judge": judge_decision}
+    for actor in ALLOWED_ACTORS:
+        result = results.get(actor)
+        evidence_type = {"codex": "result_artifact", "reviewer": "review_artifact", "judge": "judge_artifact"}[actor]
+        item: dict[str, object] = {
+            "type": evidence_type,
+            "actor": actor,
+            "path": f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json",
+            "status": "present" if result is not None else "missing",
+        }
+        if result is not None:
+            artifact = result.get("artifact")
+            if isinstance(artifact, dict):
+                item["artifact"] = {
+                    "path": artifact.get("path"),
+                    "size_bytes": artifact.get("size_bytes"),
+                    "sha256": artifact.get("sha256"),
+                }
+            if actor in decisions:
+                item["decision"] = decisions[actor]
+        evidence.append(item)
+    return evidence
+
+
+def _gate_recommended_next_commands(
+    path: str | Path,
+    valid_bundle: bool,
+    review_ready: bool,
+    review_intake: bool,
+    judge_ready: bool,
+    judge_intake: bool,
+    final_state: str,
+) -> list[str]:
+    path_text = str(path)
+    commands = [
+        f"python3 -m agent_office run-bundle inspect --path {path_text} --json",
+        f"python3 -m agent_office run-bundle validate --path {path_text} --json",
+    ]
+    if not valid_bundle:
+        return commands
+    commands.append(f"python3 -m agent_office run-bundle review --path {path_text} --json")
+    if review_ready and not review_intake:
+        commands.append(f"python3 -m agent_office run-bundle intake --path {path_text} --actor reviewer --artifact <review-artifact>")
+    if judge_ready and not judge_intake:
+        commands.append(f"python3 -m agent_office run-bundle intake --path {path_text} --actor judge --artifact <judge-artifact>")
+    commands.append(f"python3 -m agent_office run-bundle results --path {path_text} --json")
+    commands.append(f"python3 -m agent_office run-bundle gate --path {path_text} --json")
+    if final_state in {"pass", "fail", "blocked"}:
+        commands.append(f"python3 -m agent_office run-bundle status --path {path_text} --json")
+    return _dedupe_strings(commands)
+
+
+def _gate_safety() -> dict[str, bool]:
+    return {
+        "local_only": True,
+        "env_not_read": True,
+        "env_var_printing": False,
+        "provider_calls": False,
+        "runtime_calls": False,
+        "adapter_calls": False,
+        "external_calls": False,
+        "artifact_writes": False,
+        "artifact_content_executed": False,
+        "read_only": True,
+    }
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result
 
 def format_run_bundle_handoff(payload: dict[str, object]) -> str:
     lines = [

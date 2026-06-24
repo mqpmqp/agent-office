@@ -92,6 +92,7 @@ agent-office run-bundle validate --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle status --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle handoff --path .ai/runs/<RUN_ID> --json
 agent-office run-bundle review --path .ai/runs/<RUN_ID> --json
+agent-office run-bundle gate --path .ai/runs/<RUN_ID> --json
 ```
 
 ## State Machine
@@ -207,6 +208,24 @@ It summarizes run identity, objective/profile, bundle readiness, required review
 The action is static and local. It does not read `.env`, print environment values, execute actor artifacts, call providers, call adapters, call runtimes, create `.ai/` outputs, or mutate the bundle.
 
 `run-bundle review` exits 0 when the bundle is readable. Automation should read `readiness.claude_review_ready` and `readiness.judge_ready` from the payload instead of treating the process exit code as review readiness.
+
+
+## Static Run Bundle Closure Gate
+
+P10 adds a deterministic local closure gate for reviewer and judge workflow state:
+
+```bash
+python -m agent_office run-bundle gate --path .ai/runs/<RUN_ID>
+python -m agent_office run-bundle gate --path .ai/runs/<RUN_ID> --json
+```
+
+The command reports whether the bundle is ready for Claude/reviewer review, whether reviewer and judge results have been intaked, whether judge can run, and the final static state: `pass`, `fail`, `blocked`, or `incomplete`. The JSON contract includes `schema_version`, `command`, `run_id`, `path`, `exists`, `valid_bundle`, `review_ready`, `review_intake`, `judge_ready`, `judge_intake`, `final_state`, `blocking_reasons`, `warnings`, `evidence`, `recommended_next_commands`, and `safety`.
+
+Exit code `0` means the bundle was readable and valid enough to produce a gate payload. It does not mean the workflow passed: `final_state` may still be `fail`, `blocked`, or `incomplete`. Automation must inspect `final_state` and `blocking_reasons`, not the process exit code, before treating a run as accepted.
+
+`run-bundle gate` reads only local bundle files and intaked `results/*.json` metadata. It does not read `.env`, print environment values, execute result artifacts, call providers, call adapters, call runtimes, create `.ai/` outputs, or mutate the bundle.
+
+Current decision population limitation: `run-bundle intake` records artifact metadata and static safety metadata only; it does not record actor decision fields. `run-bundle gate` consumes static decision fields from `results/<actor>.json`, so those decisions currently must be authored externally, by actor tooling, or by a future intake extension.
 
 ## Objective Specs
 
