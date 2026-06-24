@@ -87,6 +87,11 @@ agent-office doctor --profiles
 agent-office doctor --json
 python -m agent_office.doctor --adapters
 python -m agent_office.doctor --profiles
+agent-office run-bundle preview --objective P6-17 --profile lowest-cost --json
+agent-office run-bundle validate --path .ai/runs/<RUN_ID> --json
+agent-office run-bundle status --path .ai/runs/<RUN_ID> --json
+agent-office run-bundle handoff --path .ai/runs/<RUN_ID> --json
+agent-office run-bundle review --path .ai/runs/<RUN_ID> --json
 ```
 
 ## State Machine
@@ -179,6 +184,29 @@ bash scripts/smoke-test.sh demo-task
 ```
 
 Both scripts are repeatable. `smoke-test.sh` runs the requested task with `--reset`; `verify.sh` uses a fixed local verification task and resets it before each run.
+
+## Static Run Bundle Review Packet
+
+P9 adds a read-only reviewer packet for static run bundles:
+
+```bash
+python -m agent_office run-bundle review --path .ai/runs/<RUN_ID>
+python -m agent_office run-bundle review --path .ai/runs/<RUN_ID> --json
+```
+
+The JSON contract is deterministic and starts with:
+
+```text
+kind=static_run_bundle_review_packet
+review_schema_version=1
+schema_version=1
+```
+
+It summarizes run identity, objective/profile, bundle readiness, required review files, actor packet/result evidence, validation status, reviewer commands, reviewer contract, safety flags, execution boundary, and known limitations. It is stricter than handoff for reviewer workflow: `claude_review_ready` requires a valid bundle and reviewer-ready packets, while `judge_ready` also requires all actor result metadata to be present.
+
+The action is static and local. It does not read `.env`, print environment values, execute actor artifacts, call providers, call adapters, call runtimes, create `.ai/` outputs, or mutate the bundle.
+
+`run-bundle review` exits 0 when the bundle is readable. Automation should read `readiness.claude_review_ready` and `readiness.judge_ready` from the payload instead of treating the process exit code as review readiness.
 
 ## Objective Specs
 
