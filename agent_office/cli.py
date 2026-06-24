@@ -47,6 +47,12 @@ from .profiles import (
     profile_plans_payload,
     profile_plans_contract_audit_payload,
 )
+from .review_artifact import (
+    ReviewArtifactError,
+    export_review_artifact_payload,
+    format_review_artifact_export,
+    review_artifact_error_payload,
+)
 from .run_bundle import (
     RunBundleError,
     export_review_error_payload,
@@ -1092,6 +1098,33 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_artifact(args: argparse.Namespace) -> int:
+    if args.review_artifact_action != "export":
+        raise AgentOfficeError("review-artifact requires the export action.")
+    try:
+        payload = export_review_artifact_payload(
+            base=args.base,
+            review=args.review,
+            branch=args.branch,
+            out=args.out,
+            title=args.title,
+            project_root=PROJECT_ROOT,
+        )
+    except ReviewArtifactError as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    review_artifact_error_payload(base=args.base, review=args.review, branch=args.branch, out=args.out, title=args.title, error=str(exc)),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return 2
+        raise AgentOfficeError(str(exc)) from exc
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_review_artifact_export(payload))
+    return 0
+
+
 def cmd_run_demo(args: argparse.Namespace) -> int:
     demo_mode = resolve_mode(args, "run-demo")
     validate_task_id(args.task_id)
@@ -1278,6 +1311,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifact", help="Project-local artifact file to intake as actor result metadata.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_run_bundle)
+
+    p = sub.add_parser("review-artifact", help="Export a Claude review artifact for a Git commit range without calling providers.")
+    p.add_argument("review_artifact_action", choices=["export"], help="Review artifact action.")
+    p.add_argument("--base", required=True, help="Base commit for diff evidence.")
+    p.add_argument("--review", required=True, help="Review commit for diff evidence and file snapshots.")
+    p.add_argument("--branch", required=True, help="Branch name recorded in the integrity guard.")
+    p.add_argument("--out", required=True, help="Markdown artifact output path. The .sha256 sidecar is written next to it.")
+    p.add_argument("--title", required=True, help="Artifact title.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_review_artifact)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")

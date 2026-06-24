@@ -322,6 +322,68 @@ python3 -m agent_office run-bundle export-review --path ../bad --out /tmp/agento
 
 Upload both the Markdown artifact and `.sha256` file to Claude/reviewer so review can be artifact-based and hash-checkable. Claude/reviewer can review uploaded artifacts and hashes, but should not claim to have personally executed VPS validation unless it actually did.
 
+## Claude Review Artifact Exporter
+
+P14 adds a commit-range review artifact exporter for Claude artifact-based review:
+
+```bash
+python3 -m agent_office review-artifact export \
+  --base <base_commit> \
+  --review <review_commit> \
+  --branch <branch_name> \
+  --out /tmp/agentoffice-p14-review.md \
+  --title "P14 Claude Review Artifact"
+
+python3 -m agent_office review-artifact export \
+  --base <base_commit> \
+  --review <review_commit> \
+  --branch <branch_name> \
+  --out /tmp/agentoffice-p14-review.md \
+  --title "P14 Claude Review Artifact" \
+  --json
+```
+
+This is separate from `run-bundle export-review`. `run-bundle export-review` exports one static run bundle. `review-artifact export` exports a Git review packet for a base/review commit range, including diff evidence, changed-file snapshots from the review commit, captured validation transcripts, captured smoke transcripts, matching phase report snapshots when present, and the README snapshot.
+
+Claude review boundary:
+
+- Claude reviews the uploaded Markdown artifact and `.sha256` sidecar as artifact-based evidence.
+- Claude must not claim it personally ran VPS validation unless it actually ran those commands itself.
+- `validation_success=false` means one or more captured validation commands returned a nonzero exit. That is not an exporter traceback; it is evidence in the artifact.
+- `smoke_success=false` means one or more captured smoke commands did not match the expected exit code. Failed smoke transcripts are included for review instead of being hidden.
+- Reports must not claim validation passed when the artifact or JSON payload says `validation_success=false`.
+
+Hard failures return exit code `2` with stable text/JSON and no traceback: malformed arguments, unresolved base/review commits, unsafe output paths, directory outputs, missing output parents, symlink outputs, Git identity failures, and artifact write/read/stat failures. Captured validation command failures and captured smoke command failures are not hard failures by default; they are recorded with command, expected exit, actual exit, stdout, and stderr.
+
+The exporter artifact writer creates only the requested Markdown artifact and `<artifact>.sha256` sidecar. Captured validation commands may refresh ignored dry-run `.ai` task/runtime state; they must still not write `.ai/runs` or source files. The sidecar uses the bare artifact basename:
+
+```text
+<sha256>  agentoffice-p14-review.md
+```
+
+Run `sha256sum -c` from the artifact directory:
+
+```bash
+cd /tmp && sha256sum -c agentoffice-p14-review.md.sha256
+```
+
+JSON and text output include the exact directory-aware verification command as `sha256_verify_command` / `Verification command`.
+
+PowerShell download and local check:
+
+```powershell
+$dst = "$env:USERPROFILE\Desktop\agentoffice-review"
+New-Item -ItemType Directory -Force -Path $dst
+scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-p14-review.md $dst\
+scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-p14-review.md.sha256 $dst\
+cd $dst
+Get-FileHash .\agentoffice-p14-review.md -Algorithm SHA256
+Get-Content .\agentoffice-p14-review.md.sha256
+# Compare Get-FileHash.Hash to the first field in the sidecar.
+```
+
+VPS verification with `sha256sum -c` proves the file matches the sidecar in that VPS directory. PowerShell `Get-FileHash` after `scp` proves the downloaded local copy matches the sidecar hash. Both checks use the same SHA256 value, but they verify different file copies.
+
 ## Objective Specs
 
 P6-09 is the P6-10 objective spec bootstrap. It converts the completed P6-06/P6-07/P6-08 profile plan, doctor, and audit surfaces into a concrete P6-10 objective that can be inspected locally before implementation work starts.
