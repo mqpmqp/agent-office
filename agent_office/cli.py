@@ -59,6 +59,7 @@ from .run_bundle import (
     format_run_bundle_results,
     format_run_bundle_status,
     format_run_bundle_validation,
+    format_run_bundle_workflow,
     gate_run_bundle_payload,
     handoff_run_bundle_payload,
     inspect_run_bundle_payload,
@@ -69,6 +70,7 @@ from .run_bundle import (
     run_bundle_preview_payload,
     status_run_bundle_payload,
     validate_run_bundle_payload,
+    workflow_run_bundle_payload,
     write_run_bundle,
 )
 
@@ -1002,6 +1004,12 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
             payload = handoff_run_bundle_payload(args.path, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_handoff(payload))
             return 0
+        if action == "workflow":
+            if not args.path:
+                raise RunBundleError("run-bundle workflow requires --path.")
+            payload = workflow_run_bundle_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_run_bundle_workflow(payload))
+            return 0 if payload["valid_bundle"] else 2
         if action == "gate":
             if not args.path:
                 raise RunBundleError("run-bundle gate requires --path.")
@@ -1239,13 +1247,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--validate", action="store_true", help="Validate the static packet contract without executing it.")
     p.set_defaults(func=cmd_packet)
 
-    p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, or check static local run bundles without executing providers.")
-    p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate"], help="Bundle action.")
+    p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, or check static local run bundles without executing providers.")
+    p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow"], help="Bundle action.")
     p.add_argument("--objective", help="Objective id to bundle, for example P6-17.")
     p.add_argument("--profile", help="Provider profile name to use for the static bundle.")
     p.add_argument("--run-id", help="Static run bundle id.")
     p.add_argument("--out", help="Explicit output directory for writing the local bundle.")
-    p.add_argument("--path", help="Static run bundle directory for inspect, validate, status, intake, results, handoff, review, or gate.")
+    p.add_argument("--path", help="Static run bundle directory for inspect, validate, status, intake, results, handoff, review, gate, or workflow.")
     p.add_argument("--root", help="Static run bundle catalog root for list.")
     p.add_argument("--actor", help="Static actor result owner: codex, reviewer, or judge.")
     p.add_argument("--artifact", help="Project-local artifact file to intake as actor result metadata.")

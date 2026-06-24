@@ -1752,6 +1752,256 @@ class RunBundleInspectValidateCliTests(unittest.TestCase):
         self.assertFalse(payload["judge_ready"])
         self.assertIn("review_failed", payload["blocking_reasons"])
 
+
+    def test_run_bundle_workflow_help_lists_action(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+            cli.main(["run-bundle", "workflow", "--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("workflow", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_run_bundle_workflow_json_pass_contract_is_static_and_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            self._write_gate_actor_result(bundle, "codex", "pass")
+            self._write_gate_actor_result(bundle, "reviewer", "pass")
+            self._write_gate_actor_result(bundle, "judge", "pass")
+            before = self._bundle_file_snapshot(bundle)
+
+            first_code, first_stdout, first_stderr = run_cli(
+                ["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            second_code, second_stdout, second_stderr = run_cli(
+                ["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+            after = self._bundle_file_snapshot(bundle)
+
+        self.assertEqual(first_code, 0, first_stderr)
+        self.assertEqual(second_code, 0, second_stderr)
+        self.assertEqual(first_stdout, second_stdout)
+        self.assertEqual(before, after)
+        payload = json.loads(first_stdout)
+        self.assertEqual(
+            list(payload),
+            [
+                "schema_version",
+                "workflow_schema_version",
+                "kind",
+                "valid_bundle",
+                "run_id",
+                "objective",
+                "profile",
+                "path",
+                "phase",
+                "summary",
+                "readiness",
+                "gate",
+                "actors",
+                "missing_actors",
+                "blocking_reasons",
+                "warnings",
+                "safety",
+                "commands",
+            ],
+        )
+        self.assertEqual(payload["kind"], "static_run_bundle_workflow")
+        self.assertEqual(payload["workflow_schema_version"], 1)
+        self.assertTrue(payload["valid_bundle"])
+        self.assertEqual(payload["run_id"], "P7-STATIC-RUN")
+        self.assertEqual(payload["objective"]["id"], "P6-17")
+        self.assertEqual(payload["profile"]["selected"], "lowest-cost")
+        self.assertEqual(payload["phase"], "workflow")
+        self.assertEqual(payload["summary"], {"final_state": "pass", "safe_to_merge": True, "next_action": "merge"})
+        self.assertEqual(payload["readiness"], {"handoff_ready": True, "review_ready": True, "gate_ready": True})
+        self.assertEqual(payload["gate"], {"final_state": "pass", "blocking_reasons": [], "warnings": []})
+        self.assertEqual(payload["missing_actors"], [])
+        self.assertEqual(set(payload["actors"]), set(PACKET_ACTORS))
+        for actor in PACKET_ACTORS:
+            self.assertTrue(payload["actors"][actor]["packet_ready"])
+            self.assertTrue(payload["actors"][actor]["result_present"])
+            self.assertEqual(payload["actors"][actor]["result_file"], f"results/{actor}.json")
+        self.assertEqual(payload["actors"]["reviewer"]["decision"]["state"], "pass")
+        self.assertEqual(payload["actors"]["judge"]["decision"]["state"], "pass")
+        self.assertTrue(payload["safety"]["read_only"])
+        self.assertFalse(payload["safety"]["provider_calls"])
+        self.assertIn("run-bundle gate --path .ai/runs/P7-STATIC-RUN --json", payload["commands"]["gate"])
+
+    def test_run_bundle_workflow_text_pass_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            self._write_gate_actor_result(bundle, "reviewer", "pass")
+            self._write_gate_actor_result(bundle, "judge", "pass")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Run bundle workflow", stdout)
+        self.assertIn("Run ID: P7-STATIC-RUN", stdout)
+        self.assertIn("Objective: P6-17 - Static Objective Registry Extension", stdout)
+        self.assertIn("Profile: lowest-cost (default=lowest-cost; is_default=true)", stdout)
+        self.assertIn("Valid bundle: true", stdout)
+        self.assertIn("Handoff ready: true", stdout)
+        self.assertIn("Review ready: true", stdout)
+        self.assertIn("Gate final state: pass", stdout)
+        self.assertIn("Safe to merge: true", stdout)
+        self.assertIn("Next action: merge", stdout)
+        self.assertIn("Blocking reasons:", stdout)
+        self.assertIn("Warnings:", stdout)
+        self.assertIn("Commands:", stdout)
+        self.assertIn("provider/runtime/adapter execution: not triggered", stdout)
+
+    def test_run_bundle_workflow_intaked_results_without_decisions_need_actor_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            project_root = Path(tmpdir)
+            bundle = self._write_bundle(project_root)
+            for actor in ("reviewer", "judge"):
+                artifact = self._write_artifact(project_root, f"artifacts/{actor}.txt", f"{actor} metadata only")
+                intake_code, _stdout, intake_stderr = run_cli(
+                    [
+                        "run-bundle",
+                        "intake",
+                        "--path",
+                        ".ai/runs/P7-STATIC-RUN",
+                        "--actor",
+                        actor,
+                        "--artifact",
+                        str(artifact.relative_to(project_root)),
+                        "--json",
+                    ]
+                )
+                self.assertEqual(intake_code, 0, intake_stderr)
+            before = self._bundle_file_snapshot(bundle)
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+            after = self._bundle_file_snapshot(bundle)
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(before, after)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            payload["summary"],
+            {"final_state": "incomplete", "safe_to_merge": False, "next_action": "fix_actor_results"},
+        )
+        self.assertTrue(payload["actors"]["reviewer"]["result_present"])
+        self.assertEqual(payload["actors"]["reviewer"]["decision"]["state"], "unknown")
+        self.assertIn("review_result_has_no_static_decision", payload["warnings"])
+        self.assertIn("judge_result_has_no_static_decision", payload["warnings"])
+        self.assertIn("judge_decision_missing", payload["blocking_reasons"])
+
+
+    def test_run_bundle_workflow_missing_reviewer_result_next_action_run_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            self._write_bundle(Path(tmpdir))
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertNotIn("Traceback", stdout)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            payload["summary"],
+            {"final_state": "incomplete", "safe_to_merge": False, "next_action": "run_review"},
+        )
+        self.assertIn("review_result_missing", payload["blocking_reasons"])
+
+    def test_run_bundle_workflow_missing_judge_result_next_action_run_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            self._write_gate_actor_result(bundle, "reviewer", "pass")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertNotIn("Traceback", stdout)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            payload["summary"],
+            {"final_state": "incomplete", "safe_to_merge": False, "next_action": "run_gate"},
+        )
+        self.assertIn("judge_result_missing", payload["blocking_reasons"])
+
+    def test_run_bundle_workflow_propagates_blocked_and_fail_gate_states(self) -> None:
+        with tempfile.TemporaryDirectory() as blocked_tmp, patch.object(cli, "PROJECT_ROOT", Path(blocked_tmp)):
+            blocked_bundle = self._write_bundle(Path(blocked_tmp))
+            self._write_gate_actor_result(blocked_bundle, "reviewer", "blocked", ["needs_fix"])
+            blocked_code, blocked_stdout, blocked_stderr = run_cli(
+                ["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+
+        self.assertEqual(blocked_code, 0, blocked_stderr)
+        blocked_payload = json.loads(blocked_stdout)
+        self.assertEqual(blocked_payload["summary"], {"final_state": "blocked", "safe_to_merge": False, "next_action": "blocked"})
+        self.assertIn("review_blocker", blocked_payload["blocking_reasons"])
+
+        with tempfile.TemporaryDirectory() as fail_tmp, patch.object(cli, "PROJECT_ROOT", Path(fail_tmp)):
+            fail_bundle = self._write_bundle(Path(fail_tmp))
+            self._write_gate_actor_result(fail_bundle, "reviewer", "pass")
+            self._write_gate_actor_result(fail_bundle, "judge", "fail")
+            fail_code, fail_stdout, fail_stderr = run_cli(
+                ["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"]
+            )
+
+        self.assertEqual(fail_code, 0, fail_stderr)
+        fail_payload = json.loads(fail_stdout)
+        self.assertEqual(fail_payload["summary"], {"final_state": "fail", "safe_to_merge": False, "next_action": "fix_actor_results"})
+        self.assertIn("judge_failed", fail_payload["blocking_reasons"])
+
+    def test_run_bundle_workflow_unsafe_path_stable_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", "../outside", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertFalse(payload["valid_bundle"])
+        self.assertEqual(payload["summary"], {"final_state": "invalid", "safe_to_merge": False, "next_action": "fix_bundle"})
+        self.assertEqual(payload["blocking_reasons"], ["unsafe_path"])
+        self.assertNotIn("Traceback", stdout)
+
+    def test_run_bundle_workflow_missing_path_stable_text_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/MISSING"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        self.assertIn("Run bundle workflow", stdout)
+        self.assertIn("Valid bundle: false", stdout)
+        self.assertIn("Next action: fix_bundle", stdout)
+        self.assertIn("missing_path", stdout)
+        self.assertNotIn("Traceback", stdout)
+
+    def test_run_bundle_workflow_malformed_actor_result_stable_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            result = bundle / "results" / "reviewer.json"
+            result.parent.mkdir(parents=True)
+            result.write_text("{bad json", encoding="utf-8")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["summary"]["final_state"], "invalid")
+        self.assertEqual(payload["blocking_reasons"], ["malformed_actor_result"])
+        self.assertIn("Invalid JSON in run bundle file: results/reviewer.json", payload["warnings"])
+        self.assertNotIn("Traceback", stdout)
+
+    def test_run_bundle_workflow_non_utf8_bundle_file_stable_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "PROJECT_ROOT", Path(tmpdir)):
+            bundle = self._write_bundle(Path(tmpdir))
+            (bundle / "README.md").write_bytes(b"\xff\xfe\x00")
+            exit_code, stdout, stderr = run_cli(["run-bundle", "workflow", "--path", ".ai/runs/P7-STATIC-RUN", "--json"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["summary"]["final_state"], "invalid")
+        self.assertEqual(payload["blocking_reasons"], ["non_utf8"])
+        self.assertNotIn("Traceback", stdout)
+
     def _bundle_file_snapshot(self, root: Path) -> list[tuple[str, int, str]]:
         snapshot = []
         for path in sorted(item for item in root.rglob("*") if item.is_file()):
