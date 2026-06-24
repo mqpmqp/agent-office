@@ -98,6 +98,7 @@ class ReviewArtifactCliTests(unittest.TestCase):
             artifact = out.read_text(encoding="utf-8")
             sidecar = Path(f"{out}.sha256").read_text(encoding="utf-8")
             digest = hashlib.sha256(out.read_bytes()).hexdigest()
+            artifact_bytes = out.stat().st_size
 
         self.assertEqual(payload["kind"], "review_artifact_export")
         self.assertTrue(payload["valid"])
@@ -107,13 +108,23 @@ class ReviewArtifactCliTests(unittest.TestCase):
         self.assertEqual(payload["sha256_basename"], "artifact.md.sha256")
         self.assertEqual(payload["sha256_verify_command"], f"cd {out.parent} && sha256sum -c artifact.md.sha256")
         self.assertEqual(payload["sha256"], digest)
+        self.assertEqual(payload["artifact_sha256"], digest)
+        self.assertEqual(payload["artifact_bytes"], artifact_bytes)
         self.assertEqual(sidecar, f"{digest}  artifact.md\n")
         self.assertTrue(payload["validation_success"])
         self.assertTrue(payload["smoke_success"])
+        self.assertEqual(payload["command_failures"], [])
+        self.assertEqual(payload["evidence_consistency_warnings"], [])
         self.assertEqual(payload["missing_file_markers"], 0)
         self.assertEqual(payload["empty_section_markers"], 0)
+        self.assertEqual(payload["section_audit"]["changed_file_snapshot_count"], 3)
+        self.assertEqual(payload["section_audit"]["deleted_file_marker_count"], 1)
+        self.assertEqual(payload["section_audit"]["report_snapshot_count"], 0)
+        self.assertEqual(payload["section_audit"]["readme_snapshot_included"], "yes")
         for section in payload["sections"]:
             self.assertIn(f"## {section}", artifact)
+        self.assertIn("## Self-audit", artifact)
+        self.assertIn("### command_failures", artifact)
         self.assertIn("MISSING_FILE_MARKERS: 0", artifact)
         self.assertIn("EMPTY_SECTION_MARKERS: 0", artifact)
         self.assertIn("validation_success: true", artifact)
@@ -282,11 +293,118 @@ class ReviewArtifactCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0, stderr)
         payload = json.loads(stdout)
         self.assertFalse(payload["validation_success"])
+        self.assertEqual(payload["command_failures"][0]["kind"], "validation")
+        self.assertEqual(payload["command_failures"][0]["exit_code"], 7)
         self.assertIn("validation_success=false; see Validation outputs section", payload["warnings"])
         self.assertIn("validation_success: false", artifact)
         self.assertIn("exit_code: 7", artifact)
         self.assertIn("bad", artifact)
         self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_review_artifact_report_mismatch_warning_is_non_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            (root / "P14_MISMATCH_REPORT.md").write_text(
+                "claimed sha: " + "a" * 64 + "\nartifact_bytes: 999999\n",
+                encoding="utf-8",
+            )
+            out = Path(export_dir) / "artifact.md"
+
+            exit_code, stdout, stderr = self._export(root, out, base, review)
+            artifact = out.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["valid"])
+        self.assertIn("possible_report_hash_mismatch", payload["evidence_consistency_warnings"])
+        self.assertIn("possible_report_size_mismatch", payload["evidence_consistency_warnings"])
+        self.assertIn("possible_report_hash_mismatch", payload["warnings"])
+        self.assertIn("possible_report_size_mismatch", artifact)
+        self.assertEqual(payload["section_audit"]["report_snapshot_count"], 1)
+
+    def test_review_artifact_smoke_plan_includes_negative_review_artifact_smokes_or_not_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            commands, notes = review_artifact.build_smoke_commands(root, base, review, "phase14/p14-claude-review-artifact-exporter")
+
+        names = [command.name for command in commands]
+        self.assertIn("negative review-artifact missing commit", names)
+        self.assertIn("negative review-artifact unsafe out", names)
+        self.assertIn("negative review-artifact directory out", names)
+        self.assertIn("negative review-artifact parent missing", names)
+        self.assertTrue(any(note.startswith("NOT_RUN_WITH_REASON: positive review-artifact export smoke") for note in notes))
+
+    def test_review_artifact_self_check_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            out = Path(export_dir) / "artifact.md"
+            exit_code, stdout, stderr = self._export(root, out, base, review)
+            self.assertEqual(exit_code, 0, stderr)
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                check_code, check_stdout, check_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(out), "--sha256", f"{out}.sha256", "--json"]
+                )
+
+        self.assertEqual(check_code, 0, check_stderr)
+        payload = json.loads(check_stdout)
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["failures"], [])
+        self.assertEqual(payload["missing_file_markers"], 0)
+        self.assertEqual(payload["empty_section_markers"], 0)
+        self.assertEqual(payload["section_audit"]["missing_section_count"], 0)
+        self.assertNotIn("Traceback", check_stdout + check_stderr)
+
+    def test_review_artifact_self_check_sha_mismatch_is_stable_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            out = Path(export_dir) / "artifact.md"
+            exit_code, stdout, stderr = self._export(root, out, base, review)
+            self.assertEqual(exit_code, 0, stderr)
+            Path(f"{out}.sha256").write_text(f"{'0' * 64}  artifact.md\n", encoding="utf-8")
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                check_code, check_stdout, check_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(out), "--sha256", f"{out}.sha256", "--json"]
+                )
+
+        self.assertEqual(check_code, 2)
+        self.assertEqual(check_stderr, "")
+        payload = json.loads(check_stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIn("sha256_mismatch", payload["failures"])
+        self.assertNotIn("Traceback", check_stdout + check_stderr)
+
+    def test_review_artifact_self_check_marker_and_section_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            out = Path(export_dir) / "artifact.md"
+            exit_code, stdout, stderr = self._export(root, out, base, review)
+            self.assertEqual(exit_code, 0, stderr)
+            artifact = out.read_text(encoding="utf-8")
+            artifact = artifact.replace("MISSING_FILE_MARKERS: 0", "MISSING_FILE_MARKERS: 1", 1)
+            artifact = artifact.replace("## Self-audit", "## Self-audit removed", 1)
+            out.write_text(artifact, encoding="utf-8")
+            digest = hashlib.sha256(out.read_bytes()).hexdigest()
+            Path(f"{out}.sha256").write_text(f"{digest}  artifact.md\n", encoding="utf-8")
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                check_code, check_stdout, check_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(out), "--sha256", f"{out}.sha256", "--json"]
+                )
+
+        self.assertEqual(check_code, 2)
+        self.assertEqual(check_stderr, "")
+        payload = json.loads(check_stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIn("missing_file_markers_nonzero", payload["failures"])
+        self.assertIn("missing_required_sections", payload["failures"])
+        self.assertNotIn("Traceback", check_stdout + check_stderr)
 
     def test_review_artifact_does_not_mutate_repo_or_write_ai_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:

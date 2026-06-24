@@ -369,6 +369,33 @@ cd /tmp && sha256sum -c agentoffice-p14-review.md.sha256
 
 JSON and text output include the exact directory-aware verification command as `sha256_verify_command` / `Verification command`.
 
+JSON success output also includes stable self-audit fields for fallback review:
+
+- `artifact_sha256` and the P14-compatible `sha256`
+- `artifact_bytes` and the P14-compatible `byte_count`
+- `validation_success`, `smoke_success`, and `command_failures`
+- `section_audit` with section counts, snapshot counts, report count, README inclusion, and consistency warnings
+- `evidence_consistency_warnings` for non-blocking report-vs-transcript mismatches
+
+The Markdown artifact includes a `## Self-audit` section with the same review readiness summary. Validation command failures and smoke command failures are evidence, not exporter hard failures; the exporter exits 0 when it wrote the artifact and sidecar successfully, then records failed commands in `command_failures`.
+
+Self-check an exported artifact without Claude:
+
+```bash
+python3 -m agent_office review-artifact self-check \
+  --artifact /tmp/agentoffice-p14-review.md \
+  --sha256 /tmp/agentoffice-p14-review.md.sha256 \
+  --json
+```
+
+Self-check verifies the sidecar from its own directory, the artifact hash, optional byte count claims in the sidecar, `MISSING_FILE_MARKERS: 0`, `EMPTY_SECTION_MARKERS: 0`, and all required sections. Exit code `0` means the artifact passed self-check. Exit code `2` means stable JSON with `valid=false`, `failures`, and no traceback.
+
+Claude unavailable fallback:
+
+- Run the Codex self-check gate and `review-artifact self-check`.
+- Treat that as an interim gate only.
+- Still prefer Claude artifact review before merge when Claude is available.
+
 PowerShell download and local check:
 
 ```powershell
