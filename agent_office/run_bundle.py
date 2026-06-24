@@ -17,6 +17,20 @@ HANDOFF_SCHEMA_VERSION = 1
 REVIEW_PACKET_SCHEMA_VERSION = 1
 GATE_SCHEMA_VERSION = 1
 WORKFLOW_SCHEMA_VERSION = 1
+EXPORT_REVIEW_SCHEMA_VERSION = 1
+RUN_BUNDLE_REVIEW_ARTIFACT_SECTIONS = (
+    "Bundle summary",
+    "Workflow summary",
+    "Handoff summary",
+    "Review summary",
+    "Gate summary",
+    "Actor results",
+    "Safety summary",
+    "Commands",
+    "Source snapshots / metadata",
+    "Contract notes",
+    "Completion marker",
+)
 RUN_BUNDLE_REQUIRED_FILES = (
     "run.json",
     "plan.json",
@@ -575,6 +589,98 @@ def workflow_run_bundle_payload(path: str | Path, project_root: Path) -> dict[st
         gate = _gate_error_payload(path, project_root, command, str(exc))
         return _workflow_payload(path, command, gate, None, None)
     return _workflow_payload(path, command, gate, handoff, review)
+
+
+def export_review_run_bundle_payload(path: str | Path, out: str | Path, project_root: Path) -> dict[str, object]:
+    out_path = _resolve_export_review_out_path(out, project_root)
+    sha256_path = _resolve_export_review_sha256_path(out_path, project_root)
+    bundle = _load_existing_bundle(path, project_root)
+    run = _validate_loaded_bundle(bundle)
+    root = _expect_path(bundle, "root")
+    validation = validate_run_bundle_payload(path, project_root)
+    status = status_run_bundle_payload(path, project_root)
+    handoff = handoff_run_bundle_payload(path, project_root)
+    review = review_run_bundle_payload(path, project_root)
+    gate = gate_run_bundle_payload(path, project_root)
+    workflow = workflow_run_bundle_payload(path, project_root)
+    if workflow.get("valid_bundle") is not True:
+        warnings = workflow.get("warnings") if isinstance(workflow.get("warnings"), list) else []
+        message = "; ".join(str(item) for item in warnings) or "Invalid run bundle"
+        raise RunBundleError(message)
+
+    artifact_text = _export_review_artifact_text(
+        project_root=project_root,
+        bundle=bundle,
+        run=run,
+        validation=validation,
+        status=status,
+        handoff=handoff,
+        review=review,
+        gate=gate,
+        workflow=workflow,
+    )
+    _write_export_text(out_path, artifact_text)
+    sha256 = _sha256_file(out_path)
+    sha256_text = f"{sha256}  {out_path.name}\n"
+    _write_export_text(sha256_path, sha256_text)
+    try:
+        byte_count = out_path.stat().st_size
+    except OSError as exc:
+        raise RunBundleError(f"Unable to stat review artifact: {out_path}") from exc
+
+    warnings = workflow.get("warnings") if isinstance(workflow.get("warnings"), list) else []
+    blocking_reasons = workflow.get("blocking_reasons") if isinstance(workflow.get("blocking_reasons"), list) else []
+    return {
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "export_review_schema_version": EXPORT_REVIEW_SCHEMA_VERSION,
+        "kind": "run_bundle_export_review",
+        "valid_bundle": True,
+        "run_id": run["run_id"],
+        "path": str(root),
+        "out": str(out_path),
+        "sha256_path": str(sha256_path),
+        "sha256": sha256,
+        "byte_count": byte_count,
+        "sections": list(RUN_BUNDLE_REVIEW_ARTIFACT_SECTIONS),
+        "missing_file_markers": 0,
+        "empty_section_markers": 0,
+        "warnings": warnings,
+        "blocking_reasons": blocking_reasons,
+    }
+
+
+def export_review_error_payload(path: str | Path | None, out: str | Path | None, error: str) -> dict[str, object]:
+    return {
+        "schema_version": RUN_BUNDLE_SCHEMA_VERSION,
+        "export_review_schema_version": EXPORT_REVIEW_SCHEMA_VERSION,
+        "kind": "run_bundle_export_review",
+        "valid_bundle": False,
+        "run_id": None,
+        "path": str(path) if path is not None else None,
+        "out": str(out) if out is not None else None,
+        "sha256_path": f"{out}.sha256" if out else None,
+        "sha256": None,
+        "byte_count": 0,
+        "sections": [],
+        "missing_file_markers": 0,
+        "empty_section_markers": 0,
+        "warnings": [error],
+        "blocking_reasons": [_export_review_error_reason(error)],
+    }
+
+
+def format_run_bundle_export_review(payload: dict[str, object]) -> str:
+    return "\n".join(
+        [
+            "Run bundle review artifact exported",
+            f"Run ID: {payload['run_id']}",
+            f"Artifact: {payload['out']}",
+            f"SHA256: {payload['sha256']}",
+            f"Byte count: {payload['byte_count']}",
+            f"Missing markers: {payload['missing_file_markers']}",
+            f"Empty sections: {payload['empty_section_markers']}",
+        ]
+    )
 
 
 def _workflow_payload(
@@ -1277,6 +1383,209 @@ def _gate_safety() -> dict[str, bool]:
     }
 
 
+def _export_review_artifact_text(
+    *,
+    project_root: Path,
+    bundle: dict[str, object],
+    run: dict[str, object],
+    validation: dict[str, object],
+    status: dict[str, object],
+    handoff: dict[str, object],
+    review: dict[str, object],
+    gate: dict[str, object],
+    workflow: dict[str, object],
+) -> str:
+    root = _expect_path(bundle, "root")
+    objective = run.get("objective")
+    profile = run.get("profile")
+    summary = workflow.get("summary") if isinstance(workflow.get("summary"), dict) else {}
+    readiness = workflow.get("readiness") if isinstance(workflow.get("readiness"), dict) else {}
+    gate_summary = workflow.get("gate") if isinstance(workflow.get("gate"), dict) else {}
+    review_readiness = review.get("readiness") if isinstance(review.get("readiness"), dict) else {}
+    result_presence = handoff.get("result_presence") if isinstance(handoff.get("result_presence"), dict) else {}
+    lines = [
+        "# AgentOffice Run Bundle Review Artifact",
+        "",
+        "## Integrity guard",
+        "MISSING_FILE_MARKERS: 0",
+        "EMPTY_SECTION_MARKERS: 0",
+        "",
+        "## Reviewed state",
+        f"- repo root: {project_root.resolve()}",
+        f"- bundle path: {root}",
+        f"- run_id: {run['run_id']}",
+        f"- objective: {_format_handoff_objective(objective)}",
+        f"- profile: {_format_handoff_profile(profile)}",
+        "",
+        "## Bundle summary",
+        f"- status: {_format_scalar(status.get('status'))}",
+        f"- valid: {_format_scalar(validation.get('valid'))}",
+        f"- required_files: {len(RUN_BUNDLE_REQUIRED_FILES)}",
+        "- provider/runtime/adapter execution: not triggered",
+        "",
+        "## Workflow summary",
+        f"- final_state: {_format_scalar(summary.get('final_state'))}",
+        f"- safe_to_merge: {_format_scalar(summary.get('safe_to_merge'))}",
+        f"- next_action: {_format_scalar(summary.get('next_action'))}",
+        f"- handoff_ready: {_format_scalar(readiness.get('handoff_ready'))}",
+        f"- review_ready: {_format_scalar(readiness.get('review_ready'))}",
+        f"- gate_ready: {_format_scalar(readiness.get('gate_ready'))}",
+        "",
+        "## Handoff summary",
+        f"- read_only: {_format_scalar(handoff.get('read_only'))}",
+        f"- actor_result_presence: {_format_actor_presence(result_presence)}",
+        f"- expected_files: {', '.join(str(item) for item in handoff.get('expected_files', []))}",
+        "",
+        "## Review summary",
+        f"- claude_review_ready: {_format_scalar(review_readiness.get('claude_review_ready'))}",
+        f"- judge_ready: {_format_scalar(review_readiness.get('judge_ready'))}",
+        f"- actor_results_complete: {_format_scalar(review_readiness.get('actor_results_complete'))}",
+        "- artifact_content_executed: false",
+        "",
+        "## Gate summary",
+        f"- final_state: {_format_scalar(gate.get('final_state'))}",
+        f"- blocking_reasons: {_format_list_inline(gate.get('blocking_reasons'))}",
+        f"- warnings: {_format_list_inline(gate.get('warnings'))}",
+        f"- workflow_gate_summary: final_state={_format_scalar(gate_summary.get('final_state'))}; blocking_reasons={_format_list_inline(gate_summary.get('blocking_reasons'))}",
+        "",
+        "## Actor results",
+    ]
+    actors = workflow.get("actors") if isinstance(workflow.get("actors"), dict) else {}
+    for actor in ALLOWED_ACTORS:
+        item = actors.get(actor) if isinstance(actors.get(actor), dict) else {}
+        decision = item.get("decision") if isinstance(item.get("decision"), dict) else {}
+        lines.append(
+            f"- {actor}: result_present={_format_scalar(item.get('result_present'))}; "
+            f"result_file={_format_scalar(item.get('result_file'))}; "
+            f"decision={_format_scalar(decision.get('state'))}"
+        )
+        artifact = item.get("artifact")
+        if isinstance(artifact, dict):
+            lines.append(
+                f"  - artifact metadata: path={_format_scalar(artifact.get('path'))}; "
+                f"size_bytes={_format_scalar(artifact.get('size_bytes'))}; "
+                f"sha256={_format_scalar(artifact.get('sha256'))}"
+            )
+        else:
+            lines.append("  - artifact metadata: none")
+    lines.extend(
+        [
+            "",
+            "## Safety summary",
+            "- env_reads: false",
+            "- env_var_printing: false",
+            "- provider_calls: false",
+            "- runtime_calls: false",
+            "- adapter_calls: false",
+            "- actor_artifact_content_executed: false",
+            "- bundle_writes: false",
+            "- export_writes: --out and --out.sha256 only",
+            "",
+            "## Commands",
+        ]
+    )
+    for command in _export_review_commands(workflow, review):
+        lines.append(f"- {command}")
+    lines.extend(["", "## Source snapshots / metadata"])
+    for item in _export_review_source_metadata(bundle):
+        line = f"- {item['path']}: status={item['status']}; kind={item['kind']}"
+        if "size_bytes" in item:
+            line += f"; size_bytes={item['size_bytes']}; sha256={item['sha256']}"
+        lines.append(line)
+    lines.extend(
+        [
+            "",
+            "## Contract notes",
+            "- This artifact is generated from local static bundle payloads only.",
+            "- Actor artifact source content is not copied, reread, executed, or embedded.",
+            "- The export action does not read .env, print environment values, call providers, call adapters, or call runtimes.",
+            "- The export action must not write .ai/runs/* or mutate bundle/result/source artifact files.",
+            "",
+            "## Completion marker",
+            "RUN_BUNDLE_REVIEW_ARTIFACT_EXPORT_COMPLETE",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _format_actor_presence(result_presence: object) -> str:
+    if not isinstance(result_presence, dict):
+        return "none"
+    return ", ".join(f"{actor}={_format_scalar(result_presence.get(actor))}" for actor in ALLOWED_ACTORS)
+
+
+def _format_list_inline(value: object) -> str:
+    if isinstance(value, list) and value:
+        return ", ".join(str(item) for item in value)
+    return "none"
+
+
+def _export_review_commands(workflow: dict[str, object], review: dict[str, object]) -> list[str]:
+    commands: list[str] = []
+    workflow_commands = workflow.get("commands")
+    if isinstance(workflow_commands, dict):
+        for key in ("handoff", "review", "gate", "merge_guidance"):
+            value = workflow_commands.get(key)
+            if isinstance(value, str):
+                commands.append(value)
+    reviewer_commands = review.get("reviewer_commands")
+    if isinstance(reviewer_commands, list):
+        for value in reviewer_commands:
+            if isinstance(value, str):
+                commands.append(value)
+    return _dedupe_strings(commands)
+
+
+def _export_review_source_metadata(bundle: dict[str, object]) -> list[dict[str, object]]:
+    root = _expect_path(bundle, "root")
+    items: list[dict[str, object]] = []
+    for relative in RUN_BUNDLE_REQUIRED_FILES:
+        target = _safe_existing_bundle_file(root, relative)
+        stat = target.stat()
+        items.append(
+            {
+                "path": relative,
+                "status": "present",
+                "kind": "markdown" if relative.endswith(".md") else "json",
+                "size_bytes": stat.st_size,
+                "sha256": _sha256_file(target),
+            }
+        )
+    for actor in ALLOWED_ACTORS:
+        relative = f"{RUN_BUNDLE_RESULTS_DIR}/{actor}.json"
+        target = _safe_existing_bundle_file(root, relative)
+        if _exists(target, relative):
+            stat = target.stat()
+            items.append(
+                {
+                    "path": relative,
+                    "status": "present",
+                    "kind": "json",
+                    "size_bytes": stat.st_size,
+                    "sha256": _sha256_file(target),
+                }
+            )
+        else:
+            items.append({"path": relative, "status": "missing", "kind": "json"})
+    return items
+
+
+def _export_review_error_reason(error: str) -> str:
+    if "--out" in error or "output" in error or "review artifact" in error or "sha256" in error:
+        return "invalid_output"
+    if "outside project root" in error or "unsafe" in error or "symlink" in error:
+        return "unsafe_path"
+    if "Run bundle path is not a directory" in error:
+        return "missing_path"
+    if "Missing run bundle file" in error:
+        return "missing_required_file"
+    if "Invalid UTF-8" in error:
+        return "non_utf8"
+    if "Invalid JSON" in error:
+        return "malformed_json"
+    return "invalid_bundle"
+
+
 def _dedupe_strings(values: list[str]) -> list[str]:
     result: list[str] = []
     for value in values:
@@ -1905,6 +2214,70 @@ def _resolve_out_path(out: str | Path, project_root: Path) -> Path:
     if resolved != base and base not in resolved.parents:
         raise RunBundleError(f"Refusing to write run bundle outside project root: {out}")
     return resolved
+
+
+def _resolve_export_review_out_path(out: str | Path, project_root: Path) -> Path:
+    base = project_root.resolve()
+    runs_root = (project_root / ".ai" / "runs").resolve()
+    requested = Path(out)
+    relative_request = not requested.is_absolute()
+    if relative_request:
+        requested = project_root / requested
+    if _is_symlink(requested, str(out)):
+        raise RunBundleError(f"Refusing symlink review artifact output path: {out}")
+    try:
+        resolved = requested.resolve(strict=False)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to resolve review artifact output path: {out}") from exc
+    if relative_request and resolved != base and base not in resolved.parents:
+        raise RunBundleError(f"Refusing relative review artifact output outside project root: {out}")
+    if resolved == runs_root or runs_root in resolved.parents:
+        raise RunBundleError(f"Refusing to write review artifact inside .ai/runs: {out}")
+    if (resolved == base or base in resolved.parents) and _exists(resolved, str(out)):
+        raise RunBundleError(f"Refusing to overwrite existing project file with review artifact: {out}")
+    parent = resolved.parent
+    if not _exists(parent, str(parent)):
+        raise RunBundleError(f"Review artifact parent directory does not exist: {parent}")
+    if _is_symlink(parent, str(parent)) or not parent.is_dir():
+        raise RunBundleError(f"Review artifact parent is not a directory: {parent}")
+    if _exists(resolved, str(out)) and not _is_file(resolved, str(out)):
+        raise RunBundleError(f"Review artifact output path is not a file: {out}")
+    return resolved
+
+
+def _resolve_export_review_sha256_path(out_path: Path, project_root: Path) -> Path:
+    sha256_path = Path(f"{out_path}.sha256")
+    if _is_symlink(sha256_path, str(sha256_path)):
+        raise RunBundleError(f"Refusing symlink review artifact sha256 path: {sha256_path}")
+    try:
+        resolved = sha256_path.resolve(strict=False)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to resolve review artifact sha256 path: {sha256_path}") from exc
+    runs_root = (project_root / ".ai" / "runs").resolve()
+    if resolved == runs_root or runs_root in resolved.parents:
+        raise RunBundleError(f"Refusing to write review artifact sha256 inside .ai/runs: {sha256_path}")
+    base = project_root.resolve()
+    if (resolved == base or base in resolved.parents) and _exists(resolved, str(sha256_path)):
+        raise RunBundleError(f"Refusing to overwrite existing project file with review artifact sha256: {sha256_path}")
+    parent = resolved.parent
+    if not _exists(parent, str(parent)):
+        raise RunBundleError(f"Review artifact sha256 parent directory does not exist: {parent}")
+    if _is_symlink(parent, str(parent)) or not parent.is_dir():
+        raise RunBundleError(f"Review artifact sha256 parent is not a directory: {parent}")
+    if _exists(resolved, str(sha256_path)) and not _is_file(resolved, str(sha256_path)):
+        raise RunBundleError(f"Review artifact sha256 path is not a file: {sha256_path}")
+    return resolved
+
+
+def _write_export_text(path: Path, value: str) -> None:
+    tmp = path.with_name(f"{path.name}.tmp")
+    if _is_symlink(tmp, str(tmp)):
+        raise RunBundleError(f"Refusing to write temporary symlink: {tmp}")
+    try:
+        tmp.write_text(value, encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        raise RunBundleError(f"Unable to write review artifact file: {path}") from exc
 
 
 def _safe_target(out_root: Path, relative: str) -> Path:
