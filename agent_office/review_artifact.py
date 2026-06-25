@@ -30,6 +30,12 @@ REVIEW_ARTIFACT_SECTIONS = (
     "Report snapshots",
     "README snapshot",
 )
+LEGACY_REVIEW_ARTIFACT_SECTIONS = tuple(section for section in REVIEW_ARTIFACT_SECTIONS if section != "Review gate status")
+LEGACY_GATE_STATUS_MISSING = "legacy_gate_status_missing"
+LEGACY_REVIEW_GATE_CAVEAT = (
+    "Legacy artifact lacks Review gate status; cannot be treated as Claude PASS. "
+    "Run Claude artifact review follow-up before relying on this artifact."
+)
 GATE_MODES = ("claude_pass", "codex_interim", "codex_self_check", "unknown")
 CLAUDE_REVIEW_STATUSES = ("pass", "pending", "unavailable", "not_required", "unknown")
 CODEX_SELF_CHECK_STATUSES = ("pass", "fail", "not_run", "unknown")
@@ -592,6 +598,22 @@ def _review_gate_error_status() -> dict[str, object]:
         "warnings": [],
     }
 
+
+def _legacy_review_gate_status() -> dict[str, object]:
+    status = _review_gate_error_status()
+    status.update(
+        {
+            "follow_up_required": [CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP],
+            "gate_caveat": LEGACY_REVIEW_GATE_CAVEAT,
+            "gate_valid": True,
+            "warnings": [LEGACY_GATE_STATUS_MISSING],
+            "legacy_artifact": True,
+            "legacy_gate_status_missing": True,
+        }
+    )
+    return status
+
+
 def _section_audit(
     *,
     out_path: Path,
@@ -666,6 +688,10 @@ def _evidence_consistency_warnings(report_snapshots: list[dict[str, str]], smoke
     if any(claim not in smoke_context for claim in set(_BYTE_CLAIM_RE.findall(report_text))):
         warnings.append("possible_report_size_mismatch")
     return warnings
+
+
+def _artifact_has_section(text: str, section: str) -> bool:
+    return f"## {section}" in text.splitlines()
 
 
 def _artifact_section_counts(text: str, sections: tuple[str, ...]) -> dict[str, int]:
@@ -744,13 +770,23 @@ def self_check_review_artifact_payload(*, artifact: str | Path, sha256_path: str
     elif empty_section_markers != 0:
         failures.append("empty_section_markers_nonzero")
 
-    section_counts = _artifact_section_counts(text, REVIEW_ARTIFACT_SECTIONS)
-    review_gate = _extract_review_gate(text)
-    if not bool(review_gate.get("gate_valid", False)):
-        failures.append("review_gate_invalid")
-    if review_gate.get("gate_mode") == "codex_interim" and review_gate.get("claude_review_status") == "pending":
-        if CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP not in review_gate.get("follow_up_required", []):
-            failures.append("missing_claude_artifact_review_follow_up")
+    has_gate_status_section = _artifact_has_section(text, "Review gate status")
+    required_sections = REVIEW_ARTIFACT_SECTIONS if has_gate_status_section else LEGACY_REVIEW_ARTIFACT_SECTIONS
+    required_section_contract = "current" if has_gate_status_section else "legacy_pre_p16"
+    section_counts = _artifact_section_counts(text, required_sections)
+    legacy_artifact = bool(text) and not has_gate_status_section and section_counts["missing_section_count"] == 0
+    legacy_gate_status_missing = legacy_artifact
+
+    if legacy_artifact:
+        warnings.append(LEGACY_GATE_STATUS_MISSING)
+        review_gate = _legacy_review_gate_status()
+    else:
+        review_gate = _extract_review_gate(text)
+        if not bool(review_gate.get("gate_valid", False)):
+            failures.append("review_gate_invalid")
+        if review_gate.get("gate_mode") == "codex_interim" and review_gate.get("claude_review_status") == "pending":
+            if CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP not in review_gate.get("follow_up_required", []):
+                failures.append("missing_claude_artifact_review_follow_up")
     if section_counts["missing_section_count"]:
         failures.append("missing_required_sections")
     if section_counts["empty_section_count"]:
@@ -772,8 +808,14 @@ def self_check_review_artifact_payload(*, artifact: str | Path, sha256_path: str
         "expected_artifact_bytes": sidecar_bytes,
         "missing_file_markers": missing_file_markers,
         "empty_section_markers": empty_section_markers,
-        "required_sections": list(REVIEW_ARTIFACT_SECTIONS),
-        "section_audit": section_counts,
+        "required_sections": list(required_sections),
+        "section_audit": {
+            **section_counts,
+            "required_section_contract": required_section_contract,
+            "review_gate_status_section_present": has_gate_status_section,
+        },
+        "legacy_artifact": legacy_artifact,
+        "legacy_gate_status_missing": legacy_gate_status_missing,
         "review_gate": review_gate,
         "follow_up_required": review_gate.get("follow_up_required", []),
         "gate_caveat": review_gate.get("gate_caveat"),
@@ -790,6 +832,7 @@ def format_review_artifact_self_check(payload: dict[str, object]) -> str:
         f"Verification command: {payload['sha256_verify_command']}",
         f"valid: {str(payload['valid']).lower()}",
         f"failures: {len(payload.get('failures', []))}",
+        f"legacy_artifact: {str(payload.get('legacy_artifact', False)).lower()}",
         f"gate_mode: {payload.get('review_gate', {}).get('gate_mode')}",
         f"claude_review_status: {payload.get('review_gate', {}).get('claude_review_status')}",
         f"follow_up_required: {payload.get('follow_up_required', [])}",
