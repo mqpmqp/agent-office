@@ -369,6 +369,32 @@ cd /tmp && sha256sum -c agentoffice-p14-review.md.sha256
 
 JSON and text output include the exact directory-aware verification command as `sha256_verify_command` / `Verification command`.
 
+Review gate status can be recorded directly in the artifact:
+
+```bash
+python3 -m agent_office review-artifact export \
+  --base <base_commit> \
+  --review <review_commit> \
+  --branch <branch_name> \
+  --out /tmp/agentoffice-review.md \
+  --title "Review Artifact" \
+  --gate-mode codex_interim \
+  --claude-status pending \
+  --codex-self-check-status pass \
+  --json
+```
+
+Gate fields:
+
+- `gate_mode`: `claude_pass`, `codex_interim`, `codex_self_check`, or `unknown`.
+- `claude_review_status`: `pass`, `pending`, `unavailable`, `not_required`, or `unknown`.
+- `codex_self_check_status`: `pass`, `fail`, `not_run`, or `unknown`.
+- `codex_interim` means Codex self-check evidence is an interim gate only. It is not Claude review.
+- `claude_status=pending` keeps `claude_artifact_review` in `follow_up_required`.
+- `claude_pass` is only valid when `claude_review_status=pass`; self-check rejects mismatches to avoid a fake Claude PASS.
+
+Default gate values are conservative and backward-compatible: `gate_mode=unknown`, `claude_review_status=unknown`, and `codex_self_check_status=not_run`.
+
 JSON success output also includes stable self-audit fields for fallback review:
 
 - `artifact_sha256` and the P14-compatible `sha256`
@@ -395,6 +421,14 @@ Claude unavailable fallback:
 - Run the Codex self-check gate and `review-artifact self-check`.
 - Treat that as an interim gate only.
 - Still prefer Claude artifact review before merge when Claude is available.
+
+Post-merge / pending Claude workflow:
+
+- Generate a post-merge artifact with `--gate-mode codex_interim --claude-status pending --codex-self-check-status pass`.
+- Run `review-artifact self-check` and keep the JSON output with the merge report.
+- Mark the merge report as Claude pending; do not claim Claude executed validation if Claude only reads the artifact later.
+- When Claude is available, upload the same Markdown artifact and `.sha256` sidecar for artifact review.
+- A later Claude PASS can close the pending `claude_artifact_review` follow-up.
 
 PowerShell download and local check:
 

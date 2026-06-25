@@ -1115,6 +1115,9 @@ def cmd_review_artifact(args: argparse.Namespace) -> int:
             out=args.out,
             title=args.title,
             project_root=PROJECT_ROOT,
+            gate_mode=args.gate_mode,
+            claude_review_status=args.claude_status,
+            codex_self_check_status=args.codex_self_check_status,
         )
     except ReviewArtifactError as exc:
         if args.json:
@@ -1326,6 +1329,9 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--branch", required=True, help="Branch name recorded in the integrity guard.")
     export.add_argument("--out", required=True, help="Markdown artifact output path. The .sha256 sidecar is written next to it.")
     export.add_argument("--title", required=True, help="Artifact title.")
+    export.add_argument("--gate-mode", choices=["claude_pass", "codex_interim", "codex_self_check", "unknown"], default="unknown", help="Review gate mode recorded in the artifact. Default: unknown.")
+    export.add_argument("--claude-status", choices=["pass", "pending", "unavailable", "not_required", "unknown"], default="unknown", help="Claude artifact review status recorded in the review gate. Default: unknown.")
+    export.add_argument("--codex-self-check-status", choices=["pass", "fail", "not_run", "unknown"], default="not_run", help="Codex self-check status recorded in the review gate. Default: not_run.")
     export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     export.set_defaults(func=cmd_review_artifact)
     check = review_sub.add_parser("self-check", help="Verify an exported review artifact and sidecar.")
