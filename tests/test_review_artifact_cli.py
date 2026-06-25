@@ -102,6 +102,21 @@ class ReviewArtifactCliTests(unittest.TestCase):
         ):
             return run_cli(argv)
 
+    def _remove_section(self, artifact: str, section: str) -> str:
+        lines = artifact.splitlines()
+        header = f"## {section}"
+        start = lines.index(header)
+        end = start + 1
+        while end < len(lines) and not lines[end].startswith("## "):
+            end += 1
+        del lines[start:end]
+        return "\n".join(lines) + "\n"
+
+    def _write_artifact_and_sidecar(self, out: Path, artifact: str) -> None:
+        out.write_text(artifact, encoding="utf-8")
+        digest = hashlib.sha256(out.read_bytes()).hexdigest()
+        Path(f"{out}.sha256").write_text(f"{digest}  {out.name}\n", encoding="utf-8")
+
     def test_review_artifact_export_json_writes_markdown_and_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
             root = Path(tmpdir)
@@ -503,9 +518,7 @@ class ReviewArtifactCliTests(unittest.TestCase):
             artifact = out.read_text(encoding="utf-8")
             artifact = artifact.replace("MISSING_FILE_MARKERS: 0", "MISSING_FILE_MARKERS: 1", 1)
             artifact = artifact.replace("## Self-audit", "## Self-audit removed", 1)
-            out.write_text(artifact, encoding="utf-8")
-            digest = hashlib.sha256(out.read_bytes()).hexdigest()
-            Path(f"{out}.sha256").write_text(f"{digest}  artifact.md\n", encoding="utf-8")
+            self._write_artifact_and_sidecar(out, artifact)
 
             with patch.object(cli, "PROJECT_ROOT", root):
                 check_code, check_stdout, check_stderr = run_cli(
@@ -518,6 +531,65 @@ class ReviewArtifactCliTests(unittest.TestCase):
         self.assertFalse(payload["valid"])
         self.assertIn("missing_file_markers_nonzero", payload["failures"])
         self.assertIn("missing_required_sections", payload["failures"])
+        self.assertNotIn("Traceback", check_stdout + check_stderr)
+
+    def test_review_artifact_self_check_legacy_missing_gate_section_passes_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            out = Path(export_dir) / "artifact.md"
+            exit_code, _stdout, stderr = self._export(root, out, base, review)
+            self.assertEqual(exit_code, 0, stderr)
+            artifact = self._remove_section(out.read_text(encoding="utf-8"), "Review gate status")
+            self._write_artifact_and_sidecar(out, artifact)
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                check_code, check_stdout, check_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(out), "--sha256", f"{out}.sha256", "--json"]
+                )
+
+        self.assertEqual(check_code, 0, check_stderr)
+        payload = json.loads(check_stdout)
+        self.assertTrue(payload["valid"])
+        self.assertTrue(payload["legacy_artifact"])
+        self.assertTrue(payload["legacy_gate_status_missing"])
+        self.assertIn("legacy_gate_status_missing", payload["warnings"])
+        self.assertEqual(payload["section_audit"]["required_section_contract"], "legacy_pre_p16")
+        self.assertFalse(payload["section_audit"]["review_gate_status_section_present"])
+        self.assertEqual(payload["review_gate"]["gate_mode"], "unknown")
+        self.assertNotEqual(payload["review_gate"]["gate_mode"], "claude_pass")
+        self.assertEqual(payload["review_gate"]["claude_review_status"], "unknown")
+        self.assertTrue(payload["review_gate"]["gate_valid"])
+        self.assertIn("claude_artifact_review", payload["follow_up_required"])
+        self.assertIn("cannot be treated as Claude PASS", payload["gate_caveat"])
+        self.assertNotIn("Review gate status", payload["required_sections"])
+        self.assertNotIn("Traceback", check_stdout + check_stderr)
+
+    def test_review_artifact_self_check_missing_gate_and_core_section_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            out = Path(export_dir) / "artifact.md"
+            exit_code, _stdout, stderr = self._export(root, out, base, review)
+            self.assertEqual(exit_code, 0, stderr)
+            artifact = self._remove_section(out.read_text(encoding="utf-8"), "Review gate status")
+            artifact = self._remove_section(artifact, "Git state")
+            self._write_artifact_and_sidecar(out, artifact)
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                check_code, check_stdout, check_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(out), "--sha256", f"{out}.sha256", "--json"]
+                )
+
+        self.assertEqual(check_code, 2)
+        self.assertEqual(check_stderr, "")
+        payload = json.loads(check_stdout)
+        self.assertFalse(payload["valid"])
+        self.assertFalse(payload["legacy_artifact"])
+        self.assertFalse(payload["legacy_gate_status_missing"])
+        self.assertIn("review_gate_invalid", payload["failures"])
+        self.assertIn("missing_required_sections", payload["failures"])
+        self.assertNotIn("legacy_gate_status_missing", payload["warnings"])
         self.assertNotIn("Traceback", check_stdout + check_stderr)
 
     def test_review_artifact_does_not_mutate_repo_or_write_ai_runs(self) -> None:

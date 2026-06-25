@@ -416,6 +416,8 @@ python3 -m agent_office review-artifact self-check \
 
 Self-check verifies the sidecar from its own directory, the artifact hash, optional byte count claims in the sidecar, `MISSING_FILE_MARKERS: 0`, `EMPTY_SECTION_MARKERS: 0`, and all required sections. Exit code `0` means the artifact passed self-check. Exit code `2` means stable JSON with `valid=false`, `failures`, and no traceback.
 
+Self-check is version-aware for artifacts generated before the `## Review gate status` section existed. A legacy artifact can pass only when SHA256 verification succeeds, marker counts are zero, pre-P16 core sections are present, and no empty-section markers are present. Legacy pass output is explicit: `legacy_artifact=true`, `legacy_gate_status_missing=true`, `warnings` includes `legacy_gate_status_missing`, and `follow_up_required` includes `claude_artifact_review`. This is not a Claude PASS and must not be treated as `gate_mode=claude_pass`; it means the historical artifact is intact and still needs Claude artifact-review follow-up. P15 post-merge artifact continuity checks are expected to pass in this legacy mode with that caveat.
+
 Claude unavailable fallback:
 
 - Run the Codex self-check gate and `review-artifact self-check`.
