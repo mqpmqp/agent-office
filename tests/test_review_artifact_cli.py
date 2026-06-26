@@ -117,6 +117,39 @@ class ReviewArtifactCliTests(unittest.TestCase):
         digest = hashlib.sha256(out.read_bytes()).hexdigest()
         Path(f"{out}.sha256").write_text(f"{digest}  {out.name}\n", encoding="utf-8")
 
+    def _write_claude_pass_report(self, out: Path, marker: str = "P18_ARTIFACT_REVIEW_COMPLETE") -> None:
+        out.write_text(
+            f"# Claude artifact review fixture\n\nverdict: PASS\nmarker: {marker}\n\nClaude reviewed the uploaded artifact evidence. This does not claim direct VPS execution.\n",
+            encoding="utf-8",
+        )
+
+    def _close_pending(
+        self,
+        root: Path,
+        artifact: Path,
+        claude_review: Path,
+        out: Path,
+        *,
+        sha256: Path | None = None,
+        json_mode: bool = True,
+    ) -> tuple[int, str, str]:
+        argv = [
+            "review-artifact",
+            "close-pending",
+            "--artifact",
+            str(artifact),
+            "--sha256",
+            str(sha256 or Path(f"{artifact}.sha256")),
+            "--claude-review",
+            str(claude_review),
+            "--out",
+            str(out),
+        ]
+        if json_mode:
+            argv.append("--json")
+        with patch.object(cli, "PROJECT_ROOT", root):
+            return run_cli(argv)
+
     def test_review_artifact_export_json_writes_markdown_and_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
             root = Path(tmpdir)
@@ -591,6 +624,299 @@ class ReviewArtifactCliTests(unittest.TestCase):
         self.assertIn("missing_required_sections", payload["failures"])
         self.assertNotIn("legacy_gate_status_missing", payload["warnings"])
         self.assertNotIn("Traceback", check_stdout + check_stderr)
+
+
+    def test_review_artifact_close_pending_success_json_sidecar_and_self_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            interim = Path(export_dir) / "interim.md"
+            close_out = Path(export_dir) / "closure.md"
+            claude_report = Path(export_dir) / "claude-review.md"
+            exit_code, _stdout, stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            self._write_claude_pass_report(claude_report)
+
+            close_code, close_stdout, close_stderr = self._close_pending(root, interim, claude_report, close_out)
+            first_digest = hashlib.sha256(close_out.read_bytes()).hexdigest()
+            rerun_code, _rerun_stdout, rerun_stderr = self._close_pending(root, interim, claude_report, close_out)
+            second_digest = hashlib.sha256(close_out.read_bytes()).hexdigest()
+            self.assertEqual(rerun_code, 0, rerun_stderr)
+            self.assertEqual(first_digest, second_digest)
+            payload = json.loads(close_stdout)
+            artifact = close_out.read_text(encoding="utf-8")
+            sidecar = Path(f"{close_out}.sha256").read_text(encoding="utf-8")
+            digest = hashlib.sha256(close_out.read_bytes()).hexdigest()
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                self_code, self_stdout, self_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(close_out), "--sha256", f"{close_out}.sha256", "--json"]
+                )
+
+        self.assertEqual(close_code, 0, close_stderr)
+        self.assertTrue(payload["valid"])
+        self.assertTrue(payload["closure_created"])
+        self.assertEqual(payload["artifact_path"], str(close_out))
+        self.assertEqual(payload["sha256_path"], f"{close_out}.sha256")
+        self.assertEqual(payload["artifact_sha256"], first_digest)
+        self.assertEqual(sidecar, f"{digest}  closure.md\n")
+        self.assertEqual(payload["sha256_basename"], "closure.md.sha256")
+        self.assertEqual(payload["detected_review_marker"], "P18_ARTIFACT_REVIEW_COMPLETE")
+        self.assertEqual(payload["detected_review_verdict"], "pass")
+        self.assertEqual(payload["review_gate"]["gate_mode"], "claude_pass")
+        self.assertEqual(payload["review_gate"]["claude_review_status"], "pass")
+        self.assertTrue(payload["review_gate"]["pending_closed"])
+        self.assertEqual(payload["review_gate"]["follow_up_required"], [])
+        self.assertIn("# AgentOffice Claude Pending Review Closure", artifact)
+        self.assertIn("## Closed review gate status", artifact)
+        self.assertEqual(self_code, 0, self_stderr)
+        self_payload = json.loads(self_stdout)
+        self.assertTrue(self_payload["valid"])
+        self.assertTrue(self_payload["section_audit"]["closure_artifact"])
+        self.assertEqual(self_payload["review_gate"]["gate_mode"], "claude_pass")
+        self.assertTrue(self_payload["review_gate"]["pending_closed"])
+        self.assertEqual(self_payload["follow_up_required"], [])
+        self.assertNotIn("Traceback", close_stdout + close_stderr + self_stdout + self_stderr)
+
+    def test_review_artifact_close_pending_text_includes_verify_command_and_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            interim = Path(export_dir) / "interim.md"
+            close_out = Path(export_dir) / "closure.md"
+            claude_report = Path(export_dir) / "claude-review.md"
+            exit_code, _stdout, stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            self._write_claude_pass_report(claude_report)
+
+            close_code, close_stdout, close_stderr = self._close_pending(root, interim, claude_report, close_out, json_mode=False)
+
+        self.assertEqual(close_code, 0, close_stderr)
+        self.assertIn(f"Closure artifact: {close_out}", close_stdout)
+        self.assertIn(f"SHA256 sidecar: {close_out}.sha256", close_stdout)
+        self.assertIn(f"Verification command: cd {export_dir} && sha256sum -c closure.md.sha256", close_stdout)
+        self.assertIn("Gate transition: codex_interim to claude_pass", close_stdout)
+        self.assertIn("Claude caveat:", close_stdout)
+
+    def test_review_artifact_close_pending_rejects_ambiguous_claude_reports(self) -> None:
+        cases = [
+            ("conditional", "verdict: conditional pass\nmarker: P18_ARTIFACT_REVIEW_COMPLETE\n", "claude_review_conditional_pass"),
+            ("fail", "verdict: FAIL\nmarker: P18_ARTIFACT_REVIEW_COMPLETE\n", "claude_review_fail"),
+            ("missing-marker", "verdict: PASS\n", "claude_review_marker_missing"),
+        ]
+        for name, report_text, expected_failure in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+                root = Path(tmpdir)
+                base, review = self._repo(root)
+                interim = Path(export_dir) / "interim.md"
+                close_out = Path(export_dir) / f"closure-{name}.md"
+                claude_report = Path(export_dir) / f"claude-{name}.md"
+                exit_code, _stdout, stderr = self._export(
+                    root,
+                    interim,
+                    base,
+                    review,
+                    gate_mode="codex_interim",
+                    claude_status="pending",
+                    codex_self_check_status="pass",
+                )
+                self.assertEqual(exit_code, 0, stderr)
+                claude_report.write_text(report_text, encoding="utf-8")
+
+                close_code, close_stdout, close_stderr = self._close_pending(root, interim, claude_report, close_out)
+
+            self.assertEqual(close_code, 2)
+            self.assertEqual(close_stderr, "")
+            payload = json.loads(close_stdout)
+            self.assertFalse(payload["valid"])
+            self.assertIn(expected_failure, payload["failures"])
+            self.assertNotIn("Traceback", close_stdout + close_stderr)
+
+    def test_review_artifact_close_pending_rejects_bad_interim_sha_and_no_pending_follow_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            interim = Path(export_dir) / "interim.md"
+            close_out = Path(export_dir) / "closure.md"
+            claude_report = Path(export_dir) / "claude-review.md"
+            exit_code, _stdout, stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            self._write_claude_pass_report(claude_report)
+            bad_sha = Path(export_dir) / "bad.sha256"
+            bad_sha.write_text(f"{'0' * 64}  interim.md\n", encoding="utf-8")
+
+            bad_code, bad_stdout, bad_stderr = self._close_pending(root, interim, claude_report, close_out, sha256=bad_sha)
+
+        self.assertEqual(bad_code, 2)
+        self.assertEqual(bad_stderr, "")
+        bad_payload = json.loads(bad_stdout)
+        self.assertIn("artifact_self_check_failed", bad_payload["failures"])
+        self.assertNotIn("Traceback", bad_stdout + bad_stderr)
+
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            passed = Path(export_dir) / "passed.md"
+            close_out = Path(export_dir) / "closure.md"
+            claude_report = Path(export_dir) / "claude-review.md"
+            exit_code, _stdout, stderr = self._export(
+                root,
+                passed,
+                base,
+                review,
+                gate_mode="claude_pass",
+                claude_status="pass",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            self._write_claude_pass_report(claude_report)
+
+            no_pending_code, no_pending_stdout, no_pending_stderr = self._close_pending(root, passed, claude_report, close_out)
+
+        self.assertEqual(no_pending_code, 2)
+        self.assertEqual(no_pending_stderr, "")
+        no_pending_payload = json.loads(no_pending_stdout)
+        self.assertIn("artifact_has_no_pending_claude_follow_up", no_pending_payload["failures"])
+        self.assertNotIn("Traceback", no_pending_stdout + no_pending_stderr)
+
+
+    def test_review_artifact_close_pending_rejects_missing_inputs_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            missing_artifact = Path(export_dir) / "missing.md"
+            missing_sha = Path(export_dir) / "missing.md.sha256"
+            missing_sha.write_text(f"{'0' * 64}  missing.md\n", encoding="utf-8")
+            claude_report = Path(export_dir) / "claude-review.md"
+            self._write_claude_pass_report(claude_report)
+            close_out = Path(export_dir) / "closure.md"
+
+            code, stdout, stderr = self._close_pending(root, missing_artifact, claude_report, close_out, sha256=missing_sha)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertIn("artifact_self_check_failed", payload["failures"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            interim = Path(export_dir) / "interim.md"
+            close_out = Path(export_dir) / "closure.md"
+            missing_report = Path(export_dir) / "missing-claude-review.md"
+            exit_code, _stdout, export_stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, export_stderr)
+
+            code, stdout, stderr = self._close_pending(root, interim, missing_report, close_out)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertIn("claude_review_report_missing", payload["failures"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_review_artifact_close_pending_output_path_errors_are_stable_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            interim = Path(export_dir) / "interim.md"
+            claude_report = Path(export_dir) / "claude-review.md"
+            exit_code, _stdout, stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            self._write_claude_pass_report(claude_report)
+            existing_dir = Path(export_dir) / "dir-out"
+            existing_dir.mkdir()
+            symlink_target = Path(export_dir) / "target.md"
+            symlink_target.write_text("do not overwrite", encoding="utf-8")
+            symlink_out: Path | None = Path(export_dir) / "link.md"
+            try:
+                symlink_out.symlink_to(symlink_target)
+            except (NotImplementedError, OSError):
+                symlink_out = None
+            cases = [
+                (root / ".ai" / "runs" / "closure.md", "unsafe_path"),
+                (existing_dir, "invalid_output"),
+                (Path(export_dir) / "missing" / "closure.md", "invalid_output"),
+            ]
+            if symlink_out is not None:
+                cases.append((symlink_out, "unsafe_path"))
+            for out, expected_failure in cases:
+                with self.subTest(out=out):
+                    code, stdout, stderr = self._close_pending(root, interim, claude_report, out)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(stderr, "")
+                    payload = json.loads(stdout)
+                    self.assertIn(expected_failure, payload["failures"])
+                    self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_review_artifact_close_pending_does_not_mutate_repo_or_write_ai_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            before = git(root, "status", "--short", "--untracked-files=no")
+            interim = Path(export_dir) / "interim.md"
+            close_out = Path(export_dir) / "closure.md"
+            claude_report = Path(export_dir) / "claude-review.md"
+            exit_code, _stdout, stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            self._write_claude_pass_report(claude_report)
+
+            close_code, close_stdout, close_stderr = self._close_pending(root, interim, claude_report, close_out)
+            after = git(root, "status", "--short", "--untracked-files=no")
+
+        self.assertEqual(close_code, 0, close_stderr)
+        self.assertEqual(before, after)
+        self.assertFalse((root / ".ai" / "runs").exists())
+        payload = json.loads(close_stdout)
+        self.assertTrue(payload["valid"])
 
     def test_review_artifact_does_not_mutate_repo_or_write_ai_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:

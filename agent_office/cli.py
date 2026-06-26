@@ -49,7 +49,10 @@ from .profiles import (
 )
 from .review_artifact import (
     ReviewArtifactError,
+    close_pending_review_artifact_error_payload,
+    close_pending_review_artifact_payload,
     export_review_artifact_payload,
+    format_review_artifact_close_pending,
     format_review_artifact_export,
     format_review_artifact_self_check,
     review_artifact_error_payload,
@@ -1105,8 +1108,36 @@ def cmd_review_artifact(args: argparse.Namespace) -> int:
         payload = self_check_review_artifact_payload(artifact=args.artifact, sha256_path=args.sha256, project_root=PROJECT_ROOT)
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_review_artifact_self_check(payload))
         return 0 if payload["valid"] else 2
+    if args.review_artifact_action == "close-pending":
+        try:
+            payload = close_pending_review_artifact_payload(
+                artifact=args.artifact,
+                sha256_path=args.sha256,
+                claude_review=args.claude_review,
+                out=args.out,
+                project_root=PROJECT_ROOT,
+            )
+        except ReviewArtifactError as exc:
+            if args.json:
+                print(
+                    json.dumps(
+                        close_pending_review_artifact_error_payload(
+                            artifact=args.artifact,
+                            sha256_path=args.sha256,
+                            claude_review=args.claude_review,
+                            out=args.out,
+                            error=str(exc),
+                        ),
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
+                return 2
+            raise AgentOfficeError(str(exc)) from exc
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_review_artifact_close_pending(payload))
+        return 0
     if args.review_artifact_action != "export":
-        raise AgentOfficeError("review-artifact requires the export or self-check action.")
+        raise AgentOfficeError("review-artifact requires the export, self-check, or close-pending action.")
     try:
         payload = export_review_artifact_payload(
             base=args.base,
@@ -1334,6 +1365,13 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--codex-self-check-status", choices=["pass", "fail", "not_run", "unknown"], default="not_run", help="Codex self-check status recorded in the review gate. Default: not_run.")
     export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     export.set_defaults(func=cmd_review_artifact)
+    close = review_sub.add_parser("close-pending", help="Close a Codex interim pending Claude review artifact with a Claude PASS report.")
+    close.add_argument("--artifact", required=True, help="Codex interim review artifact path to close.")
+    close.add_argument("--sha256", required=True, help="SHA256 sidecar for the interim artifact.")
+    close.add_argument("--claude-review", required=True, help="Claude artifact review report containing PASS evidence and a completion marker.")
+    close.add_argument("--out", required=True, help="Closure Markdown artifact output path. The .sha256 sidecar is written next to it.")
+    close.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    close.set_defaults(func=cmd_review_artifact)
     check = review_sub.add_parser("self-check", help="Verify an exported review artifact and sidecar.")
     check.add_argument("--artifact", required=True, help="Markdown artifact path to verify.")
     check.add_argument("--sha256", required=True, help="SHA256 sidecar path to verify from its own directory.")
