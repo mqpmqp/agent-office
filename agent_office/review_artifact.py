@@ -42,6 +42,24 @@ CODEX_SELF_CHECK_STATUSES = ("pass", "fail", "not_run", "unknown")
 CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP = "claude_artifact_review"
 CODEX_INTERIM_GATE_CAVEAT = "Codex interim gate only; this is not a Claude review. Claude artifact review remains pending."
 UNKNOWN_GATE_CAVEAT = "Review gate status was not asserted; do not treat this artifact as Claude review evidence."
+CLOSURE_TITLE = "# AgentOffice Claude Pending Review Closure"
+CLOSURE_ARTIFACT_SECTIONS = (
+    "Integrity guard",
+    "Closure summary",
+    "Prior interim gate",
+    "Claude review evidence",
+    "Closed review gate status",
+    "Interim artifact self-check summary",
+    "Claude review report snapshot",
+    "Caveats",
+    "Artifact end",
+)
+CLOSURE_GATE_CAVEAT = "Claude reviewed artifact evidence, not direct VPS execution unless the report says otherwise."
+REVIEW_COMPLETE_MARKER_RE = re.compile(r"\b[A-Z0-9][A-Z0-9_]*(?:ARTIFACT_REVIEW_COMPLETE|EVIDENCE_CLOSURE_REVIEW_COMPLETE)\b")
+CONDITIONAL_PASS_RE = re.compile(r"\bconditional\s+pass\b", re.IGNORECASE)
+FAIL_RE = re.compile(r"\b(?:fail|failed|failure)\b", re.IGNORECASE)
+BLOCKER_UNRESOLVED_RE = re.compile(r"\b(?:blockers?\s+unresolved|unresolved\s+blockers?)\b", re.IGNORECASE)
+PASS_RE = re.compile(r"\bpass\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -409,6 +427,138 @@ def review_artifact_error_payload(
     }
 
 
+def close_pending_review_artifact_payload(
+    *,
+    artifact: str | Path,
+    sha256_path: str | Path,
+    claude_review: str | Path,
+    out: str | Path,
+    project_root: Path,
+) -> dict[str, object]:
+    root = project_root.resolve()
+    out_path = _resolve_artifact_out_path(out, root)
+    out_sha256_path = _resolve_artifact_sha256_path(out_path, root)
+    interim_self_check = self_check_review_artifact_payload(artifact=artifact, sha256_path=sha256_path, project_root=root)
+    interim_failures = _interim_artifact_closure_failures(interim_self_check)
+    report_evidence = _claude_review_report_evidence(claude_review)
+    failures = [*interim_failures, *report_evidence["failures"]]
+    if failures:
+        raise ReviewArtifactError("closure failures: " + ",".join(str(item) for item in failures))
+
+    interim_hash = str(interim_self_check.get("artifact_sha256") or "")
+    report_hash = str(report_evidence["sha256"])
+    prior_gate = interim_self_check.get("review_gate", {}) if isinstance(interim_self_check.get("review_gate"), dict) else {}
+    review_gate = _closed_review_gate_status(prior_gate, out_path, out_sha256_path)
+    verify = _verification_metadata(out_path, out_sha256_path)
+    artifact_text = _closure_artifact_markdown(
+        out_path=out_path,
+        sha256_path=out_sha256_path,
+        verify=verify,
+        interim_artifact=Path(artifact).resolve(strict=False),
+        interim_sha256_path=Path(sha256_path).resolve(strict=False),
+        interim_hash=interim_hash,
+        interim_self_check=interim_self_check,
+        claude_review_report=Path(claude_review).resolve(strict=False),
+        claude_review_hash=report_hash,
+        claude_review_text=str(report_evidence["text"]),
+        detected_markers=list(report_evidence["markers"]),
+        detected_verdict=str(report_evidence["verdict"]),
+        review_gate=review_gate,
+    )
+    section_counts = _artifact_section_counts(artifact_text, CLOSURE_ARTIFACT_SECTIONS)
+    if section_counts["missing_section_count"] or section_counts["empty_section_count"]:
+        raise ReviewArtifactError("closure failures: closure_section_contract_failed")
+    _write_text(out_path, artifact_text)
+    artifact_sha256 = _sha256_file(out_path)
+    _write_text(out_sha256_path, f"{artifact_sha256}  {out_path.name}\n")
+    artifact_bytes = _stat_size(out_path)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "review_artifact_schema_version": REVIEW_ARTIFACT_SCHEMA_VERSION,
+        "kind": "review_artifact_close_pending",
+        "valid": True,
+        "closure_created": True,
+        "artifact_path": str(out_path),
+        "sha256_path": str(out_sha256_path),
+        "artifact_sha256": artifact_sha256,
+        "artifact_bytes": artifact_bytes,
+        "byte_count": artifact_bytes,
+        "artifact_dir": verify["artifact_dir"],
+        "artifact_basename": verify["artifact_basename"],
+        "sha256_basename": verify["sha256_basename"],
+        "sha256_verify_command": verify["sha256_verify_command"],
+        "interim_artifact": str(Path(artifact).resolve(strict=False)),
+        "interim_sha256_path": str(Path(sha256_path).resolve(strict=False)),
+        "interim_sha256": interim_hash,
+        "claude_review_report": str(Path(claude_review).resolve(strict=False)),
+        "claude_review_sha256": report_hash,
+        "detected_review_marker": report_evidence["markers"][0],
+        "detected_review_markers": report_evidence["markers"],
+        "detected_review_verdict": report_evidence["verdict"],
+        "review_gate": review_gate,
+        "warnings": [],
+        "failures": [],
+        "blocking_reasons": [],
+    }
+
+
+def close_pending_review_artifact_error_payload(
+    *,
+    artifact: str | Path | None,
+    sha256_path: str | Path | None,
+    claude_review: str | Path | None,
+    out: str | Path | None,
+    error: str,
+) -> dict[str, object]:
+    failures = _close_pending_error_failures(error)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "review_artifact_schema_version": REVIEW_ARTIFACT_SCHEMA_VERSION,
+        "kind": "review_artifact_close_pending",
+        "valid": False,
+        "closure_created": False,
+        "artifact_path": str(out) if out is not None else None,
+        "sha256_path": f"{out}.sha256" if out else None,
+        "artifact_sha256": None,
+        "artifact_bytes": 0,
+        "byte_count": 0,
+        "artifact_dir": None,
+        "artifact_basename": Path(out).name if out else None,
+        "sha256_basename": f"{Path(out).name}.sha256" if out else None,
+        "sha256_verify_command": None,
+        "interim_artifact": str(artifact) if artifact is not None else None,
+        "interim_sha256_path": str(sha256_path) if sha256_path is not None else None,
+        "interim_sha256": None,
+        "claude_review_report": str(claude_review) if claude_review is not None else None,
+        "claude_review_sha256": None,
+        "detected_review_marker": None,
+        "detected_review_markers": [],
+        "detected_review_verdict": None,
+        "review_gate": _review_gate_error_status(),
+        "warnings": [error],
+        "failures": failures,
+        "blocking_reasons": failures,
+    }
+
+
+def format_review_artifact_close_pending(payload: dict[str, object]) -> str:
+    return "\n".join(
+        [
+            "Review artifact pending Claude review closed",
+            f"Closure artifact: {payload['artifact_path']}",
+            f"SHA256 sidecar: {payload['sha256_path']}",
+            f"Verification command: {payload['sha256_verify_command']}",
+            "Gate transition: codex_interim to claude_pass",
+            f"detected_review_marker: {payload['detected_review_marker']}",
+            f"detected_review_verdict: {payload['detected_review_verdict']}",
+            f"gate_mode: {payload.get('review_gate', {}).get('gate_mode')}",
+            f"claude_review_status: {payload.get('review_gate', {}).get('claude_review_status')}",
+            f"pending_closed: {str(payload.get('review_gate', {}).get('pending_closed')).lower()}",
+            f"Claude caveat: {payload.get('review_gate', {}).get('gate_caveat')}",
+        ]
+    )
+
+
 def format_review_artifact_export(payload: dict[str, object]) -> str:
     return "\n".join(
         [
@@ -590,9 +740,11 @@ def _review_gate_error_status() -> dict[str, object]:
         "claude_review_status": "unknown",
         "codex_self_check_status": "unknown",
         "interim_merge": False,
+        "pending_closed": False,
         "follow_up_required": [],
         "pending_review_artifact": None,
         "pending_review_sha256": None,
+        "closure_source": None,
         "gate_caveat": UNKNOWN_GATE_CAVEAT,
         "gate_valid": False,
         "warnings": [],
@@ -612,6 +764,240 @@ def _legacy_review_gate_status() -> dict[str, object]:
         }
     )
     return status
+
+
+
+
+def _closed_review_gate_status(prior_gate: dict[str, object], out_path: Path, sha256_path: Path) -> dict[str, object]:
+    codex_status = str(prior_gate.get("codex_self_check_status") or "pass")
+    if codex_status not in CODEX_SELF_CHECK_STATUSES:
+        codex_status = "unknown"
+    return {
+        "gate_mode": "claude_pass",
+        "claude_review_status": "pass",
+        "codex_self_check_status": codex_status,
+        "interim_merge": bool(prior_gate.get("interim_merge", prior_gate.get("gate_mode") == "codex_interim")),
+        "pending_closed": True,
+        "follow_up_required": [],
+        "pending_review_artifact": None,
+        "pending_review_sha256": None,
+        "closure_source": CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP,
+        "closure_artifact": str(out_path),
+        "closure_sha256": str(sha256_path),
+        "gate_caveat": CLOSURE_GATE_CAVEAT,
+        "gate_valid": True,
+        "warnings": [],
+    }
+
+
+def _interim_artifact_closure_failures(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    if not bool(payload.get("valid")):
+        failures.append("artifact_self_check_failed")
+    if payload.get("missing_file_markers") != 0:
+        failures.append("missing_file_markers_nonzero")
+    if payload.get("empty_section_markers") != 0:
+        failures.append("empty_section_markers_nonzero")
+    review_gate = payload.get("review_gate", {}) if isinstance(payload.get("review_gate"), dict) else {}
+    follow_up = review_gate.get("follow_up_required", [])
+    if not isinstance(follow_up, list):
+        follow_up = []
+    gate_mode = review_gate.get("gate_mode")
+    claude_status = review_gate.get("claude_review_status")
+    caveat = str(payload.get("gate_caveat") or review_gate.get("gate_caveat") or "").lower()
+    caveat_counts_as_pending = bool(payload.get("legacy_artifact")) or gate_mode in {"codex_interim", "unknown"}
+    has_follow_up = CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP in follow_up or (caveat_counts_as_pending and "claude artifact review" in caveat)
+    if not has_follow_up:
+        failures.append("artifact_has_no_pending_claude_follow_up")
+    if bool(payload.get("legacy_artifact")):
+        return _dedupe(failures)
+    if gate_mode != "codex_interim":
+        failures.append("artifact_gate_not_codex_interim_or_legacy")
+    if claude_status not in {"pending", "unknown", "unavailable"}:
+        failures.append("artifact_claude_status_not_pending")
+    return _dedupe(failures)
+
+
+def _claude_review_report_evidence(path: str | Path) -> dict[str, object]:
+    report_path = Path(path).resolve(strict=False)
+    failures: list[str] = []
+    text = ""
+    if _is_symlink(report_path):
+        failures.append("claude_review_report_is_symlink")
+    try:
+        if not report_path.is_file():
+            failures.append("claude_review_report_missing")
+        else:
+            text = report_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        failures.append("claude_review_report_read_error")
+    markers = REVIEW_COMPLETE_MARKER_RE.findall(text)
+    if not markers:
+        failures.append("claude_review_marker_missing")
+    if CONDITIONAL_PASS_RE.search(text):
+        failures.append("claude_review_conditional_pass")
+    if BLOCKER_UNRESOLVED_RE.search(text):
+        failures.append("claude_review_blocker_unresolved")
+    if FAIL_RE.search(text):
+        failures.append("claude_review_fail")
+    verdict = "pass" if PASS_RE.search(text) else None
+    if verdict != "pass":
+        failures.append("claude_review_pass_missing")
+    sha256 = _sha256_file(report_path) if report_path.is_file() and not report_path.is_symlink() else None
+    return {
+        "path": str(report_path),
+        "sha256": sha256,
+        "text": text,
+        "markers": _dedupe(markers),
+        "verdict": verdict,
+        "failures": _dedupe(failures),
+    }
+
+
+def _closure_artifact_markdown(
+    *,
+    out_path: Path,
+    sha256_path: Path,
+    verify: dict[str, str],
+    interim_artifact: Path,
+    interim_sha256_path: Path,
+    interim_hash: str,
+    interim_self_check: dict[str, object],
+    claude_review_report: Path,
+    claude_review_hash: str,
+    claude_review_text: str,
+    detected_markers: list[str],
+    detected_verdict: str,
+    review_gate: dict[str, object],
+) -> str:
+    prior_gate = interim_self_check.get("review_gate", {})
+    lines = [
+        CLOSURE_TITLE,
+        "",
+        "## Integrity guard",
+        f"- artifact_file: {out_path}",
+        f"- sha256_sidecar: {sha256_path}",
+        f"- sha256_verify_command: {verify['sha256_verify_command']}",
+        "- generated_from: python3 -m agent_office review-artifact close-pending",
+        "- artifact_kind: claude_pending_review_closure",
+        "- deterministic_timestamp: omitted",
+        "- MISSING_FILE_MARKERS: 0",
+        "- EMPTY_SECTION_MARKERS: 0",
+        "",
+        "## Closure summary",
+        "- closure_created: true",
+        "- pending_closed: true",
+        "- closure_source: claude_artifact_review",
+        "- gate_transition: codex_interim -> claude_pass",
+        "- writes: --out and --out.sha256 only",
+        "",
+        "## Prior interim gate",
+        f"- interim_artifact: {interim_artifact}",
+        f"- interim_artifact_sha256: {interim_hash}",
+        f"- interim_artifact_sidecar: {interim_sha256_path}",
+        f"- prior_gate_mode: {prior_gate.get('gate_mode')}",
+        f"- prior_claude_review_status: {prior_gate.get('claude_review_status')}",
+        f"- prior_follow_up_required: {prior_gate.get('follow_up_required')}",
+        f"- legacy_artifact: {str(interim_self_check.get('legacy_artifact', False)).lower()}",
+        "",
+        "## Claude review evidence",
+        f"- claude_review_report: {claude_review_report}",
+        f"- claude_review_report_sha256: {claude_review_hash}",
+        f"- detected_review_marker: {detected_markers[0] if detected_markers else 'MISSING'}",
+        f"- detected_review_markers: {detected_markers}",
+        f"- detected_review_verdict: {detected_verdict}",
+        "",
+        "## Closed review gate status",
+        "- gate_mode: claude_pass",
+        "- claude_review_status: pass",
+        f"- codex_self_check_status: {review_gate['codex_self_check_status']}",
+        f"- interim_merge: {str(review_gate['interim_merge']).lower()}",
+        "- pending_closed: true",
+        "- follow_up_required: []",
+        "- closure_source: claude_artifact_review",
+        f"- gate_caveat: {review_gate['gate_caveat']}",
+        "### review_gate JSON",
+        _fence(json.dumps(review_gate, indent=2, ensure_ascii=False), "json"),
+        "",
+        "## Interim artifact self-check summary",
+        _fence(json.dumps(interim_self_check, indent=2, ensure_ascii=False), "json"),
+        "",
+        "## Claude review report snapshot",
+        _fence(claude_review_text, "markdown"),
+        "",
+        "## Caveats",
+        f"- {CLOSURE_GATE_CAVEAT}",
+        "- Claude PASS evidence closes the pending artifact-review follow-up; it does not prove Claude independently executed VPS commands unless the review report says so.",
+        "",
+        "## Artifact end",
+        "P18_CLAUDE_PENDING_REVIEW_CLOSURE_ARTIFACT_COMPLETE",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _is_closure_artifact(text: str) -> bool:
+    return CLOSURE_TITLE in text and _artifact_has_section(text, "Closed review gate status")
+
+
+def _closure_self_check_failures(text: str, review_gate: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    if review_gate.get("gate_mode") != "claude_pass":
+        failures.append("closure_gate_mode_not_claude_pass")
+    if review_gate.get("claude_review_status") != "pass":
+        failures.append("closure_claude_review_status_not_pass")
+    if review_gate.get("pending_closed") is not True:
+        failures.append("closure_pending_not_closed")
+    if review_gate.get("follow_up_required"):
+        failures.append("closure_follow_up_required_not_empty")
+    if review_gate.get("closure_source") != CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP:
+        failures.append("closure_source_not_claude_artifact_review")
+    marker_match = re.search(r"^- detected_review_marker:\s*(.+)$", text, flags=re.MULTILINE)
+    verdict_match = re.search(r"^- detected_review_verdict:\s*(.+)$", text, flags=re.MULTILINE)
+    if not marker_match or not REVIEW_COMPLETE_MARKER_RE.fullmatch(marker_match.group(1).strip()):
+        failures.append("closure_review_marker_missing")
+    if not verdict_match or verdict_match.group(1).strip().lower() != "pass":
+        failures.append("closure_review_verdict_missing")
+    evidence_section = _section_text(text, "Claude review evidence")
+    report_section = _section_text(text, "Claude review report snapshot")
+    if not PASS_RE.search(evidence_section + "\n" + report_section):
+        failures.append("closure_claude_pass_evidence_missing")
+    if CONDITIONAL_PASS_RE.search(report_section) or FAIL_RE.search(report_section) or BLOCKER_UNRESOLVED_RE.search(report_section):
+        failures.append("closure_claude_pass_evidence_ambiguous")
+    return _dedupe(failures)
+
+
+def _section_text(text: str, section: str) -> str:
+    lines = text.splitlines()
+    header = f"## {section}"
+    try:
+        start = lines.index(header) + 1
+    except ValueError:
+        return ""
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if lines[index].startswith("## "):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _close_pending_error_failures(error: str) -> list[str]:
+    prefix = "closure failures: "
+    if error.startswith(prefix):
+        return [item for item in error[len(prefix) :].split(",") if item]
+    return [_error_reason(error)]
 
 
 def _section_audit(
@@ -770,14 +1156,24 @@ def self_check_review_artifact_payload(*, artifact: str | Path, sha256_path: str
     elif empty_section_markers != 0:
         failures.append("empty_section_markers_nonzero")
 
+    is_closure_artifact = _is_closure_artifact(text)
     has_gate_status_section = _artifact_has_section(text, "Review gate status")
-    required_sections = REVIEW_ARTIFACT_SECTIONS if has_gate_status_section else LEGACY_REVIEW_ARTIFACT_SECTIONS
-    required_section_contract = "current" if has_gate_status_section else "legacy_pre_p16"
+    if is_closure_artifact:
+        required_sections = CLOSURE_ARTIFACT_SECTIONS
+        required_section_contract = "closure"
+    else:
+        required_sections = REVIEW_ARTIFACT_SECTIONS if has_gate_status_section else LEGACY_REVIEW_ARTIFACT_SECTIONS
+        required_section_contract = "current" if has_gate_status_section else "legacy_pre_p16"
     section_counts = _artifact_section_counts(text, required_sections)
-    legacy_artifact = bool(text) and not has_gate_status_section and section_counts["missing_section_count"] == 0
+    legacy_artifact = bool(text) and not is_closure_artifact and not has_gate_status_section and section_counts["missing_section_count"] == 0
     legacy_gate_status_missing = legacy_artifact
 
-    if legacy_artifact:
+    if is_closure_artifact:
+        review_gate = _extract_review_gate(text)
+        if not bool(review_gate.get("gate_valid", False)):
+            failures.append("review_gate_invalid")
+        failures.extend(_closure_self_check_failures(text, review_gate))
+    elif legacy_artifact:
         warnings.append(LEGACY_GATE_STATUS_MISSING)
         review_gate = _legacy_review_gate_status()
     else:
@@ -813,6 +1209,7 @@ def self_check_review_artifact_payload(*, artifact: str | Path, sha256_path: str
             **section_counts,
             "required_section_contract": required_section_contract,
             "review_gate_status_section_present": has_gate_status_section,
+            "closure_artifact": is_closure_artifact,
         },
         "legacy_artifact": legacy_artifact,
         "legacy_gate_status_missing": legacy_gate_status_missing,
@@ -833,8 +1230,10 @@ def format_review_artifact_self_check(payload: dict[str, object]) -> str:
         f"valid: {str(payload['valid']).lower()}",
         f"failures: {len(payload.get('failures', []))}",
         f"legacy_artifact: {str(payload.get('legacy_artifact', False)).lower()}",
+        f"closure_artifact: {str(payload.get('section_audit', {}).get('closure_artifact', False)).lower()}",
         f"gate_mode: {payload.get('review_gate', {}).get('gate_mode')}",
         f"claude_review_status: {payload.get('review_gate', {}).get('claude_review_status')}",
+        f"pending_closed: {str(payload.get('review_gate', {}).get('pending_closed', False)).lower()}",
         f"follow_up_required: {payload.get('follow_up_required', [])}",
         f"gate_caveat: {payload.get('gate_caveat')}",
     ]
@@ -867,6 +1266,7 @@ def _extract_review_gate(text: str) -> dict[str, object]:
     if not isinstance(follow_up, list):
         status["follow_up_required"] = []
     status["interim_merge"] = bool(status.get("interim_merge"))
+    status["pending_closed"] = bool(status.get("pending_closed"))
     status["gate_valid"] = bool(status.get("gate_valid"))
     if status["gate_mode"] == "claude_pass" and status["claude_review_status"] != "pass":
         status["gate_valid"] = False
