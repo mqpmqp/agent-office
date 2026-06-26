@@ -430,15 +430,31 @@ Post-merge / pending Claude workflow:
 - Run `review-artifact self-check` and keep the JSON output with the merge report.
 - Mark the merge report as Claude pending; do not claim Claude executed validation if Claude only reads the artifact later.
 - When Claude is available, upload the same Markdown artifact and `.sha256` sidecar for artifact review.
-- A later Claude PASS can close the pending `claude_artifact_review` follow-up.
+- Save Claude's full review report for humans, but close the pending gate with a short Claude PASS attestation.
+- A later Claude PASS attestation can close the pending `claude_artifact_review` follow-up.
 
 Close a pending Claude artifact review after Claude recovers:
 
 ```bash
+cat >/tmp/claude-pass-attestation.md <<'EOF'
+# AgentOffice Claude Review Attestation
+
+verdict: PASS
+reviewer: claude
+attestation_type: real
+artifact_reviewed: agentoffice-review.md
+artifact_sha256: <artifact_sha256>
+review_marker: P19_REAL_ARTIFACT_REVIEW_COMPLETE
+notes: artifact-based Claude review; Claude did not run VPS commands unless stated in the source report
+
+P19_REAL_ARTIFACT_REVIEW_COMPLETE
+EOF
+
 python3 -m agent_office review-artifact close-pending \
   --artifact /tmp/agentoffice-review.md \
   --sha256 /tmp/agentoffice-review.md.sha256 \
-  --claude-review /tmp/claude-artifact-review-report.md \
+  --claude-attestation /tmp/claude-pass-attestation.md \
+  --source-review-report /tmp/claude-artifact-review-report.md \
   --out /tmp/agentoffice-claude-review-closure.md \
   --json
 
@@ -449,30 +465,41 @@ python3 -m agent_office review-artifact self-check \
   --json
 ```
 
-`close-pending` is local and static: it reads the prior artifact, the prior sidecar, and a saved Claude review report; it writes only `<out>` and `<out>.sha256`; it does not call providers, adapters, runtimes, or `.ai/runs`. The closure artifact is deterministic and does not include a wall-clock timestamp.
+`close-pending` is local and static: it reads the prior artifact, the prior sidecar, a short Claude attestation, and optionally a saved full Claude review report; it writes only `<out>` and `<out>.sha256`; it does not call providers, adapters, runtimes, or `.ai/runs`. The closure artifact is deterministic and does not include a wall-clock timestamp.
 
-Claude review report requirements are intentionally small but conservative. The report must include a PASS verdict plus a completion marker such as `P18_ARTIFACT_REVIEW_COMPLETE`, `P17_FINAL_CLOSURE_ARTIFACT_REVIEW_COMPLETE`, or another `*_ARTIFACT_REVIEW_COMPLETE` / `*_EVIDENCE_CLOSURE_REVIEW_COMPLETE` marker. Reports that contain `conditional pass`, `fail`, or unresolved blockers are rejected with exit code `2`, stable JSON, and no traceback.
+Verbose Claude review reports should not be passed directly as machine verdict input. Use `--source-review-report` to bind the full report path/hash and short snapshot for audit, then pass the short contract file with `--claude-attestation`. The deprecated `--claude-review` flag is kept only as an alias for the short attestation path.
+
+Claude attestation requirements are intentionally small and conservative. The attestation must include explicit key/value lines for `verdict: PASS`, `reviewer: claude`, `attestation_type: real`, and `review_marker: <MARKER>`, plus the same `*_ARTIFACT_REVIEW_COMPLETE` / `*_EVIDENCE_CLOSURE_REVIEW_COMPLETE` marker as a standalone line. Attestations with conditional pass, fail, unresolved blockers, a missing marker, an unknown reviewer, or an unknown attestation type are rejected with exit code `2`, stable JSON, and no traceback.
+
+Attestation types:
+
+- `real`: production closure evidence from an actual Claude artifact review. Self-check requires `fixture_only=false`.
+- `fixture`: smoke-test-only closure evidence. It requires `--allow-fixture-attestation`, records `fixture_only=true`, emits `fixture_only_closure`, and must not be used as real production Claude closure.
 
 Gate status meanings:
 
 - `codex_interim`: Codex self-check evidence allowed progress only as an interim gate; Claude artifact review remains pending.
 - `claude_pending`: operator shorthand for a `codex_interim` artifact whose `follow_up_required` still includes `claude_artifact_review`.
-- `claude_pass`: Claude artifact review PASS evidence has closed the pending follow-up. Self-check requires `claude_review_status=pass`, `pending_closed=true`, and `follow_up_required=[]`.
-- Legacy artifact with Claude follow-up: a pre-P16 artifact without `## Review gate status` can pass continuity checks only as legacy; it is not Claude PASS until `close-pending` binds a real Claude PASS report into a closure artifact.
+- `claude_pass`: Claude artifact review PASS attestation has closed the pending follow-up. Self-check requires `claude_review_status=pass`, `pending_closed=true`, and `follow_up_required=[]`.
+- Legacy artifact with Claude follow-up: a pre-P16 artifact without `## Review gate status` can pass continuity checks only as legacy; it is not Claude PASS until `close-pending` binds a real Claude PASS attestation into a closure artifact.
 
 PowerShell artifact handoff flow:
 
 ```powershell
-scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-review.md $env:USERPROFILE\Desktop\
-scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-review.md.sha256 $env:USERPROFILE\Desktop\
-# Upload both files to Claude for artifact review. Save Claude's report as claude-artifact-review-report.md.
-scp -o BatchMode=yes $env:USERPROFILE\Desktop\claude-artifact-review-report.md agentoffice-vps:/tmp/
-ssh -o BatchMode=yes agentoffice-vps "cd /opt/agent-office && python3 -m agent_office review-artifact close-pending --artifact /tmp/agentoffice-review.md --sha256 /tmp/agentoffice-review.md.sha256 --claude-review /tmp/claude-artifact-review-report.md --out /tmp/agentoffice-claude-review-closure.md --json"
-scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-claude-review-closure.md $env:USERPROFILE\Desktop\
-scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-claude-review-closure.md.sha256 $env:USERPROFILE\Desktop\
+$dst = "$env:USERPROFILE\Desktop\agentoffice-review"
+New-Item -ItemType Directory -Force -Path $dst
+scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-review.md $dst\
+scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-review.md.sha256 $dst\
+# Upload both files to Claude for artifact review. Save Claude's full report as claude-artifact-review-report.md.
+# Create claude-pass-attestation.md with the short contract above after Claude returns PASS.
+scp -o BatchMode=yes $dst\claude-artifact-review-report.md agentoffice-vps:/tmp/
+scp -o BatchMode=yes $dst\claude-pass-attestation.md agentoffice-vps:/tmp/
+ssh -o BatchMode=yes agentoffice-vps "cd /opt/agent-office && python3 -m agent_office review-artifact close-pending --artifact /tmp/agentoffice-review.md --sha256 /tmp/agentoffice-review.md.sha256 --claude-attestation /tmp/claude-pass-attestation.md --source-review-report /tmp/claude-artifact-review-report.md --out /tmp/agentoffice-claude-review-closure.md --json"
+scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-claude-review-closure.md $dst\
+scp -o BatchMode=yes agentoffice-vps:/tmp/agentoffice-claude-review-closure.md.sha256 $dst\
 ```
 
-Claude caveat: the closure records Claude's artifact review evidence. It does not prove Claude personally ran VPS validation unless the Claude report explicitly says so.
+Claude caveat: the closure records Claude's artifact review attestation. It does not prove Claude personally ran VPS validation unless the Claude source report explicitly says so.
 
 PowerShell download and local check:
 

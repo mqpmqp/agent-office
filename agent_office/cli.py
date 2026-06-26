@@ -1110,12 +1110,17 @@ def cmd_review_artifact(args: argparse.Namespace) -> int:
         return 0 if payload["valid"] else 2
     if args.review_artifact_action == "close-pending":
         try:
+            claude_attestation = args.claude_attestation or args.claude_review
+            if not claude_attestation:
+                raise ReviewArtifactError("missing Claude attestation: pass --claude-attestation")
             payload = close_pending_review_artifact_payload(
                 artifact=args.artifact,
                 sha256_path=args.sha256,
-                claude_review=args.claude_review,
+                claude_attestation=claude_attestation,
                 out=args.out,
                 project_root=PROJECT_ROOT,
+                allow_fixture_attestation=args.allow_fixture_attestation,
+                source_review_report=args.source_review_report,
             )
         except ReviewArtifactError as exc:
             if args.json:
@@ -1124,9 +1129,11 @@ def cmd_review_artifact(args: argparse.Namespace) -> int:
                         close_pending_review_artifact_error_payload(
                             artifact=args.artifact,
                             sha256_path=args.sha256,
-                            claude_review=args.claude_review,
+                            claude_attestation=args.claude_attestation or args.claude_review,
                             out=args.out,
                             error=str(exc),
+                            source_review_report=args.source_review_report,
+                            allow_fixture_attestation=args.allow_fixture_attestation,
                         ),
                         indent=2,
                         ensure_ascii=False,
@@ -1365,10 +1372,13 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--codex-self-check-status", choices=["pass", "fail", "not_run", "unknown"], default="not_run", help="Codex self-check status recorded in the review gate. Default: not_run.")
     export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     export.set_defaults(func=cmd_review_artifact)
-    close = review_sub.add_parser("close-pending", help="Close a Codex interim pending Claude review artifact with a Claude PASS report.")
+    close = review_sub.add_parser("close-pending", help="Close a Codex interim pending Claude review artifact with a Claude PASS attestation.")
     close.add_argument("--artifact", required=True, help="Codex interim review artifact path to close.")
     close.add_argument("--sha256", required=True, help="SHA256 sidecar for the interim artifact.")
-    close.add_argument("--claude-review", required=True, help="Claude artifact review report containing PASS evidence and a completion marker.")
+    close.add_argument("--claude-attestation", help="Short Claude PASS attestation used for machine validation.")
+    close.add_argument("--claude-review", help="Deprecated alias for --claude-attestation; do not pass verbose review reports here.")
+    close.add_argument("--allow-fixture-attestation", action="store_true", help="Allow attestation_type=fixture for smoke tests only.")
+    close.add_argument("--source-review-report", help="Optional full Claude review report kept as snapshot/hash evidence only.")
     close.add_argument("--out", required=True, help="Closure Markdown artifact output path. The .sha256 sidecar is written next to it.")
     close.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     close.set_defaults(func=cmd_review_artifact)

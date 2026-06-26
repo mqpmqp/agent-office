@@ -117,9 +117,9 @@ class ReviewArtifactCliTests(unittest.TestCase):
         digest = hashlib.sha256(out.read_bytes()).hexdigest()
         Path(f"{out}.sha256").write_text(f"{digest}  {out.name}\n", encoding="utf-8")
 
-    def _write_claude_pass_report(self, out: Path, marker: str = "P18_ARTIFACT_REVIEW_COMPLETE") -> None:
+    def _write_claude_pass_report(self, out: Path, marker: str = "P18_ARTIFACT_REVIEW_COMPLETE", attestation_type: str = "real") -> None:
         out.write_text(
-            f"# Claude artifact review fixture\n\nverdict: PASS\nmarker: {marker}\n\nClaude reviewed the uploaded artifact evidence. This does not claim direct VPS execution.\n",
+            f"# AgentOffice Claude Review Attestation\n\nverdict: PASS\nreviewer: claude\nattestation_type: {attestation_type}\nartifact_reviewed: artifact.md\nartifact_sha256: {'a' * 64}\nreview_marker: {marker}\nnotes: artifact-based review; Claude did not execute VPS commands\n\n{marker}\n",
             encoding="utf-8",
         )
 
@@ -132,6 +132,9 @@ class ReviewArtifactCliTests(unittest.TestCase):
         *,
         sha256: Path | None = None,
         json_mode: bool = True,
+        allow_fixture: bool = False,
+        source_review_report: Path | None = None,
+        use_attestation_arg: bool = False,
     ) -> tuple[int, str, str]:
         argv = [
             "review-artifact",
@@ -140,11 +143,15 @@ class ReviewArtifactCliTests(unittest.TestCase):
             str(artifact),
             "--sha256",
             str(sha256 or Path(f"{artifact}.sha256")),
-            "--claude-review",
+            "--claude-attestation" if use_attestation_arg else "--claude-review",
             str(claude_review),
             "--out",
             str(out),
         ]
+        if allow_fixture:
+            argv.append("--allow-fixture-attestation")
+        if source_review_report is not None:
+            argv.extend(["--source-review-report", str(source_review_report)])
         if json_mode:
             argv.append("--json")
         with patch.object(cli, "PROJECT_ROOT", root):
@@ -288,8 +295,9 @@ class ReviewArtifactCliTests(unittest.TestCase):
             existing_dir = root / "exports"
             existing_dir.mkdir()
             cases = [
-                (existing_dir, "invalid_output"),
-                (root / "missing" / "artifact.md", "invalid_output"),
+                (existing_dir, "unsafe_path"),
+                (root / "artifact.md", "unsafe_path"),
+                (root / "missing" / "artifact.md", "unsafe_path"),
                 (root / ".ai" / "runs" / "artifact.md", "unsafe_path"),
             ]
             for out, reason in cases:
@@ -716,9 +724,9 @@ class ReviewArtifactCliTests(unittest.TestCase):
 
     def test_review_artifact_close_pending_rejects_ambiguous_claude_reports(self) -> None:
         cases = [
-            ("conditional", "verdict: conditional pass\nmarker: P18_ARTIFACT_REVIEW_COMPLETE\n", "claude_review_conditional_pass"),
-            ("fail", "verdict: FAIL\nmarker: P18_ARTIFACT_REVIEW_COMPLETE\n", "claude_review_fail"),
-            ("missing-marker", "verdict: PASS\n", "claude_review_marker_missing"),
+            ("conditional", "verdict: conditional pass\nreviewer: claude\nattestation_type: real\nreview_marker: P18_ARTIFACT_REVIEW_COMPLETE\nP18_ARTIFACT_REVIEW_COMPLETE\n", "attestation_verdict_conditional_pass"),
+            ("fail", "verdict: FAIL\nreviewer: claude\nattestation_type: real\nreview_marker: P18_ARTIFACT_REVIEW_COMPLETE\nP18_ARTIFACT_REVIEW_COMPLETE\n", "attestation_verdict_fail"),
+            ("missing-marker", "verdict: PASS\nreviewer: claude\nattestation_type: real\n", "attestation_review_marker_missing"),
         ]
         for name, report_text, expected_failure in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
@@ -747,6 +755,146 @@ class ReviewArtifactCliTests(unittest.TestCase):
             self.assertFalse(payload["valid"])
             self.assertIn(expected_failure, payload["failures"])
             self.assertNotIn("Traceback", close_stdout + close_stderr)
+
+
+    def test_review_artifact_close_pending_real_attestation_with_source_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            interim = Path(export_dir) / "interim.md"
+            close_out = Path(export_dir) / "closure.md"
+            attestation = Path(export_dir) / "claude-attestation.md"
+            source_report = Path(export_dir) / "full-review.md"
+            source_report.write_text("# Full Claude review\n\nHistorical fail and conditional pass words are audit prose only.\n", encoding="utf-8")
+            source_report_sha256 = hashlib.sha256(source_report.read_bytes()).hexdigest()
+            exit_code, _stdout, stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            self._write_claude_pass_report(attestation, marker="P19_REAL_ARTIFACT_REVIEW_COMPLETE")
+
+            code, stdout, stderr = self._close_pending(
+                root,
+                interim,
+                attestation,
+                close_out,
+                source_review_report=source_report,
+                use_attestation_arg=True,
+            )
+            with patch.object(cli, "PROJECT_ROOT", root):
+                check_code, check_stdout, check_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(close_out), "--sha256", f"{close_out}.sha256", "--json"]
+                )
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["attestation_type"], "real")
+        self.assertFalse(payload["fixture_only"])
+        self.assertEqual(payload["reviewer"], "claude")
+        self.assertEqual(payload["detected_review_marker"], "P19_REAL_ARTIFACT_REVIEW_COMPLETE")
+        self.assertEqual(payload["source_review_report"], str(source_report.resolve(strict=False)))
+        self.assertEqual(payload["source_review_report_sha256"], source_report_sha256)
+        self.assertEqual(payload["review_gate"]["closure_source"], "claude_attestation")
+        self.assertEqual(payload["review_gate"]["attestation_type"], "real")
+        self.assertFalse(payload["review_gate"]["fixture_only"])
+        self.assertEqual(check_code, 0, check_stderr)
+        check_payload = json.loads(check_stdout)
+        self.assertTrue(check_payload["valid"])
+        self.assertEqual(check_payload["review_gate"]["gate_mode"], "claude_pass")
+        self.assertFalse(check_payload["review_gate"]["fixture_only"])
+        self.assertNotIn("Traceback", stdout + stderr + check_stdout + check_stderr)
+
+    def test_review_artifact_close_pending_fixture_attestation_requires_allow_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            interim = Path(export_dir) / "interim.md"
+            close_out = Path(export_dir) / "closure.md"
+            attestation = Path(export_dir) / "fixture-attestation.md"
+            exit_code, _stdout, stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            self._write_claude_pass_report(attestation, marker="P19_FIXTURE_ARTIFACT_REVIEW_COMPLETE", attestation_type="fixture")
+
+            reject_code, reject_stdout, reject_stderr = self._close_pending(root, interim, attestation, close_out, use_attestation_arg=True)
+            accept_code, accept_stdout, accept_stderr = self._close_pending(
+                root,
+                interim,
+                attestation,
+                close_out,
+                allow_fixture=True,
+                use_attestation_arg=True,
+            )
+            with patch.object(cli, "PROJECT_ROOT", root):
+                check_code, check_stdout, check_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(close_out), "--sha256", f"{close_out}.sha256", "--json"]
+                )
+
+        self.assertEqual(reject_code, 2)
+        self.assertEqual(reject_stderr, "")
+        reject_payload = json.loads(reject_stdout)
+        self.assertIn("fixture_attestation_requires_allow_flag", reject_payload["failures"])
+        self.assertEqual(accept_code, 0, accept_stderr)
+        accept_payload = json.loads(accept_stdout)
+        self.assertEqual(accept_payload["attestation_type"], "fixture")
+        self.assertTrue(accept_payload["fixture_only"])
+        self.assertTrue(accept_payload["fixture_attestation_allowed"])
+        self.assertIn("fixture_only_closure", accept_payload["warnings"])
+        self.assertEqual(check_code, 0, check_stderr)
+        check_payload = json.loads(check_stdout)
+        self.assertTrue(check_payload["valid"])
+        self.assertIn("fixture_only_closure", check_payload["warnings"])
+        self.assertTrue(check_payload["review_gate"]["fixture_only"])
+        self.assertNotIn("Traceback", reject_stdout + reject_stderr + accept_stdout + accept_stderr + check_stdout + check_stderr)
+
+    def test_review_artifact_close_pending_rejects_bad_attestation_contracts(self) -> None:
+        cases = [
+            ("missing-type", "verdict: PASS\nreviewer: claude\nreview_marker: P19_ARTIFACT_REVIEW_COMPLETE\nP19_ARTIFACT_REVIEW_COMPLETE\n", "attestation_type_missing"),
+            ("unknown-type", "verdict: PASS\nreviewer: claude\nattestation_type: staged\nreview_marker: P19_ARTIFACT_REVIEW_COMPLETE\nP19_ARTIFACT_REVIEW_COMPLETE\n", "attestation_type_unknown"),
+            ("bad-reviewer", "verdict: PASS\nreviewer: human\nattestation_type: real\nreview_marker: P19_ARTIFACT_REVIEW_COMPLETE\nP19_ARTIFACT_REVIEW_COMPLETE\n", "attestation_reviewer_not_claude"),
+            ("verbose-report", "# Full review\n\nThis report says PASS but also discusses old blocker and fail wording without attestation fields.\n", "attestation_type_missing"),
+        ]
+        for name, attestation_text, expected_failure in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+                root = Path(tmpdir)
+                base, review = self._repo(root)
+                interim = Path(export_dir) / "interim.md"
+                close_out = Path(export_dir) / f"closure-{name}.md"
+                attestation = Path(export_dir) / f"attestation-{name}.md"
+                exit_code, _stdout, stderr = self._export(
+                    root,
+                    interim,
+                    base,
+                    review,
+                    gate_mode="codex_interim",
+                    claude_status="pending",
+                    codex_self_check_status="pass",
+                )
+                self.assertEqual(exit_code, 0, stderr)
+                attestation.write_text(attestation_text, encoding="utf-8")
+
+                code, stdout, stderr = self._close_pending(root, interim, attestation, close_out, use_attestation_arg=True)
+
+            self.assertEqual(code, 2)
+            self.assertEqual(stderr, "")
+            payload = json.loads(stdout)
+            self.assertFalse(payload["valid"])
+            self.assertIn(expected_failure, payload["failures"])
+            self.assertNotIn("Traceback", stdout + stderr)
 
     def test_review_artifact_close_pending_rejects_bad_interim_sha_and_no_pending_follow_up(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
@@ -844,7 +992,7 @@ class ReviewArtifactCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(stderr, "")
         payload = json.loads(stdout)
-        self.assertIn("claude_review_report_missing", payload["failures"])
+        self.assertIn("claude_attestation_missing", payload["failures"])
         self.assertNotIn("Traceback", stdout + stderr)
 
     def test_review_artifact_close_pending_output_path_errors_are_stable_json_without_traceback(self) -> None:
@@ -874,6 +1022,7 @@ class ReviewArtifactCliTests(unittest.TestCase):
             except (NotImplementedError, OSError):
                 symlink_out = None
             cases = [
+                (root / "closure.md", "unsafe_path"),
                 (root / ".ai" / "runs" / "closure.md", "unsafe_path"),
                 (existing_dir, "invalid_output"),
                 (Path(export_dir) / "missing" / "closure.md", "invalid_output"),
