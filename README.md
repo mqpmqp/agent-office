@@ -469,12 +469,14 @@ python3 -m agent_office review-artifact self-check \
 
 Verbose Claude review reports should not be passed directly as machine verdict input. Use `--source-review-report` to bind the full report path/hash and short snapshot for audit, then pass the short contract file with `--claude-attestation`. The deprecated `--claude-review` flag is kept only as an alias for the short attestation path.
 
-Claude attestation requirements are intentionally small and conservative. The attestation must include explicit key/value lines for `verdict: PASS`, `reviewer: claude`, `attestation_type: real`, and `review_marker: <MARKER>`, plus the same `*_ARTIFACT_REVIEW_COMPLETE` / `*_EVIDENCE_CLOSURE_REVIEW_COMPLETE` marker as a standalone line. Attestations with conditional pass, fail, unresolved blockers, a missing marker, an unknown reviewer, or an unknown attestation type are rejected with exit code `2`, stable JSON, and no traceback.
+Claude attestation requirements are intentionally small and conservative. The attestation must include explicit key/value lines for `verdict: PASS`, `reviewer: claude`, `attestation_type: real`, `artifact_sha256: <artifact_sha256>`, and `review_marker: <MARKER>`, plus the same `*_ARTIFACT_REVIEW_COMPLETE` / `*_EVIDENCE_CLOSURE_REVIEW_COMPLETE` marker as a standalone line. The attested artifact hash must match the interim artifact hash. Attestations with conditional pass, fail, unresolved blockers, a missing or mismatched standalone marker, an unknown reviewer, an unknown attestation type, or an artifact hash mismatch are rejected with exit code `2`, stable JSON, and no traceback.
 
 Attestation types:
 
-- `real`: production closure evidence from an actual Claude artifact review. Self-check requires `fixture_only=false`.
-- `fixture`: smoke-test-only closure evidence. It requires `--allow-fixture-attestation`, records `fixture_only=true`, emits `fixture_only_closure`, and must not be used as real production Claude closure.
+- `real`: production closure evidence from an actual Claude artifact review. Self-check requires `real_closure=true` and `fixture_only=false`.
+- `fixture`: smoke-test-only closure evidence. It requires `--allow-fixture-attestation`, records `real_closure=false` and `fixture_only=true`, emits `fixture_only_closure`, and must not be used as real production Claude closure.
+
+Closure artifacts currently keep the `P18_CLAUDE_PENDING_REVIEW_CLOSURE_ARTIFACT_COMPLETE` artifact-end marker for P18 self-check compatibility. P19 evidence-completion packets use their own `P19_REVIEW_FIX_EVIDENCE_COMPLETE` footer marker.
 
 Gate status meanings:
 

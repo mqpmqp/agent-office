@@ -444,13 +444,17 @@ def close_pending_review_artifact_payload(
     out_sha256_path = _resolve_artifact_sha256_path(out_path, root)
     interim_self_check = self_check_review_artifact_payload(artifact=artifact, sha256_path=sha256_path, project_root=root)
     interim_failures = _interim_artifact_closure_failures(interim_self_check)
-    attestation = _claude_attestation_evidence(claude_attestation, allow_fixture_attestation=allow_fixture_attestation)
+    interim_hash = str(interim_self_check.get("artifact_sha256") or "")
+    attestation = _claude_attestation_evidence(
+        claude_attestation,
+        allow_fixture_attestation=allow_fixture_attestation,
+        expected_artifact_sha256=interim_hash,
+    )
     source_report = _source_review_report_evidence(source_review_report)
     failures = [*interim_failures, *attestation["failures"], *source_report["failures"]]
     if failures:
         raise ReviewArtifactError("closure failures: " + ",".join(str(item) for item in failures))
 
-    interim_hash = str(interim_self_check.get("artifact_sha256") or "")
     prior_gate = interim_self_check.get("review_gate", {}) if isinstance(interim_self_check.get("review_gate"), dict) else {}
     review_gate = _closed_review_gate_status(
         prior_gate,
@@ -505,6 +509,7 @@ def close_pending_review_artifact_payload(
         "source_review_report": source_report["path"],
         "source_review_report_sha256": source_report["sha256"],
         "attestation_type": attestation["attestation_type"],
+        "real_closure": attestation["attestation_type"] == "real",
         "fixture_only": attestation["attestation_type"] == "fixture",
         "fixture_attestation_allowed": allow_fixture_attestation,
         "reviewer": attestation["reviewer"],
@@ -554,6 +559,7 @@ def close_pending_review_artifact_error_payload(
         "source_review_report": str(source_review_report) if source_review_report is not None else None,
         "source_review_report_sha256": None,
         "attestation_type": None,
+        "real_closure": False,
         "fixture_only": False,
         "fixture_attestation_allowed": allow_fixture_attestation,
         "reviewer": None,
@@ -576,6 +582,7 @@ def format_review_artifact_close_pending(payload: dict[str, object]) -> str:
             f"Verification command: {payload['sha256_verify_command']}",
             "Gate transition: codex_interim to claude_pass",
             f"attestation_type: {payload.get('attestation_type')}",
+            f"real_closure: {str(payload.get('real_closure')).lower()}",
             f"fixture_only: {str(payload.get('fixture_only')).lower()}",
             f"fixture_attestation_allowed: {str(payload.get('fixture_attestation_allowed')).lower()}",
             f"reviewer: {payload.get('reviewer')}",
@@ -776,6 +783,7 @@ def _review_gate_error_status() -> dict[str, object]:
         "pending_review_sha256": None,
         "closure_source": None,
         "attestation_type": None,
+        "real_closure": False,
         "fixture_only": False,
         "fixture_attestation_allowed": False,
         "reviewer": None,
@@ -820,6 +828,7 @@ def _closed_review_gate_status(
     if codex_status not in CODEX_SELF_CHECK_STATUSES:
         codex_status = "unknown"
     fixture_only = attestation.get("attestation_type") == "fixture"
+    real_closure = attestation.get("attestation_type") == "real"
     warnings = ["fixture_only_closure"] if fixture_only else []
     return {
         "gate_mode": "claude_pass",
@@ -836,6 +845,7 @@ def _closed_review_gate_status(
         "attestation_path": attestation.get("path"),
         "attestation_sha256": attestation.get("sha256"),
         "attestation_type": attestation.get("attestation_type"),
+        "real_closure": real_closure,
         "fixture_only": fixture_only,
         "fixture_attestation_allowed": allow_fixture_attestation,
         "reviewer": attestation.get("reviewer"),
@@ -876,7 +886,12 @@ def _interim_artifact_closure_failures(payload: dict[str, object]) -> list[str]:
     return _dedupe(failures)
 
 
-def _claude_attestation_evidence(path: str | Path, *, allow_fixture_attestation: bool) -> dict[str, object]:
+def _claude_attestation_evidence(
+    path: str | Path,
+    *,
+    allow_fixture_attestation: bool,
+    expected_artifact_sha256: str | None = None,
+) -> dict[str, object]:
     attestation_path = Path(path).resolve(strict=False)
     failures: list[str] = []
     text = ""
@@ -893,9 +908,11 @@ def _claude_attestation_evidence(path: str | Path, *, allow_fixture_attestation:
     verdict = fields.get("verdict")
     reviewer = fields.get("reviewer")
     attestation_type = fields.get("attestation_type")
+    artifact_sha256 = fields.get("artifact_sha256")
     field_marker = fields.get("review_marker") or fields.get("marker")
     markers = _dedupe(REVIEW_COMPLETE_MARKER_RE.findall(text))
-    review_marker = field_marker or (markers[0] if markers else None)
+    standalone_markers = _dedupe([line.strip() for line in text.splitlines() if REVIEW_COMPLETE_MARKER_RE.fullmatch(line.strip())])
+    review_marker = field_marker or (standalone_markers[0] if standalone_markers else None)
 
     if not fields:
         failures.append("claude_attestation_malformed")
@@ -914,9 +931,15 @@ def _claude_attestation_evidence(path: str | Path, *, allow_fixture_attestation:
             failures.append("attestation_verdict_fail")
         else:
             failures.append("attestation_verdict_not_pass")
-    if not review_marker or not REVIEW_COMPLETE_MARKER_RE.fullmatch(review_marker):
+    if not artifact_sha256:
+        failures.append("attestation_artifact_sha256_missing")
+    elif not re.fullmatch(r"[0-9a-fA-F]{64}", artifact_sha256):
+        failures.append("attestation_artifact_sha256_invalid")
+    elif expected_artifact_sha256 and artifact_sha256.lower() != expected_artifact_sha256.lower():
+        failures.append("attestation_artifact_sha256_mismatch")
+    if not review_marker or not REVIEW_COMPLETE_MARKER_RE.fullmatch(review_marker) or not standalone_markers:
         failures.append("attestation_review_marker_missing")
-    if field_marker and markers and field_marker not in markers:
+    if field_marker and standalone_markers and field_marker not in standalone_markers:
         failures.append("attestation_review_marker_mismatch")
     sha256 = _sha256_file(attestation_path) if attestation_path.is_file() and not attestation_path.is_symlink() else None
     return {
@@ -925,9 +948,10 @@ def _claude_attestation_evidence(path: str | Path, *, allow_fixture_attestation:
         "text": text,
         "fields": fields,
         "attestation_type": attestation_type,
+        "artifact_sha256": artifact_sha256,
         "reviewer": reviewer,
         "review_marker": review_marker,
-        "markers": markers,
+        "markers": standalone_markers,
         "verdict": verdict.lower() if verdict == "PASS" else verdict,
         "failures": _dedupe(failures),
     }
@@ -970,6 +994,8 @@ def _parse_attestation_fields(text: str) -> dict[str, str]:
         fields["reviewer"] = fields["reviewer"].strip().lower()
     if "attestation_type" in fields:
         fields["attestation_type"] = fields["attestation_type"].strip().lower()
+    if "artifact_sha256" in fields:
+        fields["artifact_sha256"] = fields["artifact_sha256"].strip().lower()
     return fields
 
 
@@ -988,6 +1014,7 @@ def _closure_artifact_markdown(
 ) -> str:
     prior_gate = interim_self_check.get("review_gate", {})
     fixture_only = attestation.get("attestation_type") == "fixture"
+    real_closure = attestation.get("attestation_type") == "real"
     source_lines = [
         f"- source_review_report: {source_report.get('path')}",
         f"- source_review_report_sha256: {source_report.get('sha256')}",
@@ -1014,6 +1041,7 @@ def _closure_artifact_markdown(
         "- pending_closed: true",
         "- closure_source: claude_attestation",
         "- gate_transition: codex_interim -> claude_pass",
+        f"- real_closure: {str(real_closure).lower()}",
         f"- fixture_only: {str(fixture_only).lower()}",
         f"- fixture_attestation_allowed: {str(review_gate['fixture_attestation_allowed']).lower()}",
         "- writes: --out and --out.sha256 only",
@@ -1031,7 +1059,9 @@ def _closure_artifact_markdown(
         f"- claude_attestation: {attestation['path']}",
         f"- claude_attestation_sha256: {attestation['sha256']}",
         f"- attestation_type: {attestation['attestation_type']}",
+        f"- real_closure: {str(real_closure).lower()}",
         f"- fixture_only: {str(fixture_only).lower()}",
+        f"- attested_artifact_sha256: {attestation['artifact_sha256']}",
         f"- reviewer: {attestation['reviewer']}",
         f"- verdict: {attestation['verdict']}",
         f"- detected_review_marker: {attestation['review_marker']}",
@@ -1047,6 +1077,7 @@ def _closure_artifact_markdown(
         "- follow_up_required: []",
         "- closure_source: claude_attestation",
         f"- attestation_type: {attestation['attestation_type']}",
+        f"- real_closure: {str(real_closure).lower()}",
         f"- fixture_only: {str(fixture_only).lower()}",
         f"- gate_caveat: {review_gate['gate_caveat']}",
         "### review_gate JSON",
@@ -1105,15 +1136,20 @@ def _closure_self_check_failures(text: str, review_gate: dict[str, object]) -> l
     if not verdict_match or verdict_match.group(1).strip().lower() != "pass":
         failures.append("closure_review_verdict_missing")
     attestation_type = review_gate.get("attestation_type")
+    real_closure = bool(review_gate.get("real_closure"))
     fixture_only = bool(review_gate.get("fixture_only"))
     if attestation_type == "fixture":
         if not fixture_only:
             failures.append("closure_fixture_attestation_not_flagged")
+        if real_closure:
+            failures.append("closure_fixture_marked_real")
         if "not valid for real production closure" not in text:
             failures.append("closure_fixture_caveat_missing")
     elif attestation_type == "real":
         if fixture_only:
             failures.append("closure_real_attestation_marked_fixture")
+        if not real_closure:
+            failures.append("closure_real_attestation_not_marked_real")
     elif attestation_type is not None:
         failures.append("closure_attestation_type_unknown")
     evidence_section = _section_text(text, "Claude review evidence")
