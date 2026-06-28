@@ -545,6 +545,95 @@ class ReviewArtifactCliTests(unittest.TestCase):
         self.assertEqual(payload["section_audit"]["missing_section_count"], 0)
         self.assertNotIn("Traceback", check_stdout + check_stderr)
 
+    def test_review_artifact_verify_help_is_available(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+            cli.main(["review-artifact", "verify", "--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("verify", stdout.getvalue())
+        self.assertIn("--artifact", stdout.getvalue())
+        self.assertIn("--sha256", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_review_artifact_verify_matches_self_check_for_closure_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            interim = Path(export_dir) / "interim.md"
+            close_out = Path(export_dir) / "closure.md"
+            claude_report = Path(export_dir) / "claude-review.md"
+            exit_code, _stdout, stderr = self._export(
+                root,
+                interim,
+                base,
+                review,
+                gate_mode="codex_interim",
+                claude_status="pending",
+                codex_self_check_status="pass",
+            )
+            self.assertEqual(exit_code, 0, stderr)
+            interim_sha = hashlib.sha256(interim.read_bytes()).hexdigest()
+            self._write_claude_pass_report(claude_report, artifact_sha256=interim_sha)
+            close_code, _close_stdout, close_stderr = self._close_pending(root, interim, claude_report, close_out)
+            self.assertEqual(close_code, 0, close_stderr)
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                self_code, self_stdout, self_stderr = run_cli(
+                    ["review-artifact", "self-check", "--artifact", str(close_out), "--sha256", f"{close_out}.sha256", "--json"]
+                )
+                verify_code, verify_stdout, verify_stderr = run_cli(
+                    ["review-artifact", "verify", "--artifact", str(close_out), "--sha256", f"{close_out}.sha256", "--json"]
+                )
+
+        self.assertEqual(self_code, 0, self_stderr)
+        self_payload = json.loads(self_stdout)
+        self.assertEqual(verify_code, 0, verify_stderr)
+        verify_payload = json.loads(verify_stdout)
+        self.assertEqual(verify_payload, self_payload)
+        self.assertEqual(verify_payload["kind"], "review_artifact_self_check")
+        self.assertTrue(verify_payload["valid"])
+        self.assertTrue(verify_payload["section_audit"]["closure_artifact"])
+        self.assertEqual(verify_payload["review_gate"]["gate_mode"], "claude_pass")
+        self.assertEqual(verify_payload["review_gate"]["claude_review_status"], "pass")
+        self.assertTrue(verify_payload["review_gate"]["real_closure"])
+        self.assertFalse(verify_payload["review_gate"]["fixture_only"])
+        self.assertTrue(verify_payload["review_gate"]["pending_closed"])
+        self.assertEqual(verify_payload["follow_up_required"], [])
+        self.assertNotIn("Traceback", self_stdout + self_stderr + verify_stdout + verify_stderr)
+
+    def test_review_artifact_verify_invalid_inputs_are_stable_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            base, review = self._repo(root)
+            out = Path(export_dir) / "artifact.md"
+            exit_code, _stdout, stderr = self._export(root, out, base, review)
+            self.assertEqual(exit_code, 0, stderr)
+            Path(f"{out}.sha256").write_text(f"{'0' * 64}  artifact.md\n", encoding="utf-8")
+            missing = Path(export_dir) / "missing.md"
+            missing_sha = Path(export_dir) / "missing.md.sha256"
+            missing_sha.write_text(f"{'0' * 64}  missing.md\n", encoding="utf-8")
+
+            cases = [
+                (out, Path(f"{out}.sha256"), "sha256_mismatch"),
+                (missing, missing_sha, "artifact_read_error"),
+            ]
+            with patch.object(cli, "PROJECT_ROOT", root):
+                results = [
+                    run_cli(["review-artifact", "verify", "--artifact", str(artifact), "--sha256", str(sha256), "--json"])
+                    for artifact, sha256, _expected in cases
+                ]
+
+        for (code, stdout, stderr), (_artifact, _sha256, expected_failure) in zip(results, cases):
+            self.assertEqual(code, 2)
+            self.assertEqual(stderr, "")
+            payload = json.loads(stdout)
+            self.assertFalse(payload["valid"])
+            self.assertTrue(any(failure.startswith(expected_failure) for failure in payload["failures"]))
+            self.assertNotIn("Traceback", stdout + stderr)
+
     def test_review_artifact_self_check_sha_mismatch_is_stable_json_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
             root = Path(tmpdir)
