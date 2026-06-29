@@ -60,6 +60,8 @@ CONDITIONAL_PASS_RE = re.compile(r"\bconditional\s+pass\b", re.IGNORECASE)
 FAIL_RE = re.compile(r"\b(?:fail|failed|failure)\b", re.IGNORECASE)
 BLOCKER_UNRESOLVED_RE = re.compile(r"\b(?:blockers?\s+unresolved|unresolved\s+blockers?)\b", re.IGNORECASE)
 PASS_RE = re.compile(r"\bpass\b", re.IGNORECASE)
+ATTESTATION_TYPES = ("real", "fixture")
+ALLOWED_ATTESTATION_REVIEWERS = ("claude",)
 
 
 @dataclass(frozen=True)
@@ -431,24 +433,37 @@ def close_pending_review_artifact_payload(
     *,
     artifact: str | Path,
     sha256_path: str | Path,
-    claude_review: str | Path,
+    claude_attestation: str | Path,
     out: str | Path,
     project_root: Path,
+    allow_fixture_attestation: bool = False,
+    source_review_report: str | Path | None = None,
 ) -> dict[str, object]:
     root = project_root.resolve()
     out_path = _resolve_artifact_out_path(out, root)
     out_sha256_path = _resolve_artifact_sha256_path(out_path, root)
     interim_self_check = self_check_review_artifact_payload(artifact=artifact, sha256_path=sha256_path, project_root=root)
     interim_failures = _interim_artifact_closure_failures(interim_self_check)
-    report_evidence = _claude_review_report_evidence(claude_review)
-    failures = [*interim_failures, *report_evidence["failures"]]
+    interim_hash = str(interim_self_check.get("artifact_sha256") or "")
+    attestation = _claude_attestation_evidence(
+        claude_attestation,
+        allow_fixture_attestation=allow_fixture_attestation,
+        expected_artifact_sha256=interim_hash,
+    )
+    source_report = _source_review_report_evidence(source_review_report)
+    failures = [*interim_failures, *attestation["failures"], *source_report["failures"]]
     if failures:
         raise ReviewArtifactError("closure failures: " + ",".join(str(item) for item in failures))
 
-    interim_hash = str(interim_self_check.get("artifact_sha256") or "")
-    report_hash = str(report_evidence["sha256"])
     prior_gate = interim_self_check.get("review_gate", {}) if isinstance(interim_self_check.get("review_gate"), dict) else {}
-    review_gate = _closed_review_gate_status(prior_gate, out_path, out_sha256_path)
+    review_gate = _closed_review_gate_status(
+        prior_gate,
+        out_path,
+        out_sha256_path,
+        attestation=attestation,
+        source_report=source_report,
+        allow_fixture_attestation=allow_fixture_attestation,
+    )
     verify = _verification_metadata(out_path, out_sha256_path)
     artifact_text = _closure_artifact_markdown(
         out_path=out_path,
@@ -458,11 +473,8 @@ def close_pending_review_artifact_payload(
         interim_sha256_path=Path(sha256_path).resolve(strict=False),
         interim_hash=interim_hash,
         interim_self_check=interim_self_check,
-        claude_review_report=Path(claude_review).resolve(strict=False),
-        claude_review_hash=report_hash,
-        claude_review_text=str(report_evidence["text"]),
-        detected_markers=list(report_evidence["markers"]),
-        detected_verdict=str(report_evidence["verdict"]),
+        attestation=attestation,
+        source_report=source_report,
         review_gate=review_gate,
     )
     section_counts = _artifact_section_counts(artifact_text, CLOSURE_ARTIFACT_SECTIONS)
@@ -490,13 +502,22 @@ def close_pending_review_artifact_payload(
         "interim_artifact": str(Path(artifact).resolve(strict=False)),
         "interim_sha256_path": str(Path(sha256_path).resolve(strict=False)),
         "interim_sha256": interim_hash,
-        "claude_review_report": str(Path(claude_review).resolve(strict=False)),
-        "claude_review_sha256": report_hash,
-        "detected_review_marker": report_evidence["markers"][0],
-        "detected_review_markers": report_evidence["markers"],
-        "detected_review_verdict": report_evidence["verdict"],
+        "claude_attestation": attestation["path"],
+        "claude_attestation_sha256": attestation["sha256"],
+        "claude_review_report": attestation["path"],
+        "claude_review_sha256": attestation["sha256"],
+        "source_review_report": source_report["path"],
+        "source_review_report_sha256": source_report["sha256"],
+        "attestation_type": attestation["attestation_type"],
+        "real_closure": attestation["attestation_type"] == "real",
+        "fixture_only": attestation["attestation_type"] == "fixture",
+        "fixture_attestation_allowed": allow_fixture_attestation,
+        "reviewer": attestation["reviewer"],
+        "detected_review_marker": attestation["review_marker"],
+        "detected_review_markers": attestation["markers"],
+        "detected_review_verdict": attestation["verdict"],
         "review_gate": review_gate,
-        "warnings": [],
+        "warnings": ["fixture_only_closure"] if attestation["attestation_type"] == "fixture" else [],
         "failures": [],
         "blocking_reasons": [],
     }
@@ -506,9 +527,11 @@ def close_pending_review_artifact_error_payload(
     *,
     artifact: str | Path | None,
     sha256_path: str | Path | None,
-    claude_review: str | Path | None,
+    claude_attestation: str | Path | None,
     out: str | Path | None,
     error: str,
+    source_review_report: str | Path | None = None,
+    allow_fixture_attestation: bool = False,
 ) -> dict[str, object]:
     failures = _close_pending_error_failures(error)
     return {
@@ -529,8 +552,17 @@ def close_pending_review_artifact_error_payload(
         "interim_artifact": str(artifact) if artifact is not None else None,
         "interim_sha256_path": str(sha256_path) if sha256_path is not None else None,
         "interim_sha256": None,
-        "claude_review_report": str(claude_review) if claude_review is not None else None,
+        "claude_attestation": str(claude_attestation) if claude_attestation is not None else None,
+        "claude_attestation_sha256": None,
+        "claude_review_report": str(claude_attestation) if claude_attestation is not None else None,
         "claude_review_sha256": None,
+        "source_review_report": str(source_review_report) if source_review_report is not None else None,
+        "source_review_report_sha256": None,
+        "attestation_type": None,
+        "real_closure": False,
+        "fixture_only": False,
+        "fixture_attestation_allowed": allow_fixture_attestation,
+        "reviewer": None,
         "detected_review_marker": None,
         "detected_review_markers": [],
         "detected_review_verdict": None,
@@ -549,6 +581,11 @@ def format_review_artifact_close_pending(payload: dict[str, object]) -> str:
             f"SHA256 sidecar: {payload['sha256_path']}",
             f"Verification command: {payload['sha256_verify_command']}",
             "Gate transition: codex_interim to claude_pass",
+            f"attestation_type: {payload.get('attestation_type')}",
+            f"real_closure: {str(payload.get('real_closure')).lower()}",
+            f"fixture_only: {str(payload.get('fixture_only')).lower()}",
+            f"fixture_attestation_allowed: {str(payload.get('fixture_attestation_allowed')).lower()}",
+            f"reviewer: {payload.get('reviewer')}",
             f"detected_review_marker: {payload['detected_review_marker']}",
             f"detected_review_verdict: {payload['detected_review_verdict']}",
             f"gate_mode: {payload.get('review_gate', {}).get('gate_mode')}",
@@ -745,6 +782,16 @@ def _review_gate_error_status() -> dict[str, object]:
         "pending_review_artifact": None,
         "pending_review_sha256": None,
         "closure_source": None,
+        "attestation_type": None,
+        "real_closure": False,
+        "fixture_only": False,
+        "fixture_attestation_allowed": False,
+        "reviewer": None,
+        "review_marker": None,
+        "attestation_path": None,
+        "attestation_sha256": None,
+        "source_review_report": None,
+        "source_review_report_sha256": None,
         "gate_caveat": UNKNOWN_GATE_CAVEAT,
         "gate_valid": False,
         "warnings": [],
@@ -768,10 +815,21 @@ def _legacy_review_gate_status() -> dict[str, object]:
 
 
 
-def _closed_review_gate_status(prior_gate: dict[str, object], out_path: Path, sha256_path: Path) -> dict[str, object]:
+def _closed_review_gate_status(
+    prior_gate: dict[str, object],
+    out_path: Path,
+    sha256_path: Path,
+    *,
+    attestation: dict[str, object],
+    source_report: dict[str, object],
+    allow_fixture_attestation: bool,
+) -> dict[str, object]:
     codex_status = str(prior_gate.get("codex_self_check_status") or "pass")
     if codex_status not in CODEX_SELF_CHECK_STATUSES:
         codex_status = "unknown"
+    fixture_only = attestation.get("attestation_type") == "fixture"
+    real_closure = attestation.get("attestation_type") == "real"
+    warnings = ["fixture_only_closure"] if fixture_only else []
     return {
         "gate_mode": "claude_pass",
         "claude_review_status": "pass",
@@ -781,12 +839,22 @@ def _closed_review_gate_status(prior_gate: dict[str, object], out_path: Path, sh
         "follow_up_required": [],
         "pending_review_artifact": None,
         "pending_review_sha256": None,
-        "closure_source": CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP,
+        "closure_source": "claude_attestation",
         "closure_artifact": str(out_path),
         "closure_sha256": str(sha256_path),
+        "attestation_path": attestation.get("path"),
+        "attestation_sha256": attestation.get("sha256"),
+        "attestation_type": attestation.get("attestation_type"),
+        "real_closure": real_closure,
+        "fixture_only": fixture_only,
+        "fixture_attestation_allowed": allow_fixture_attestation,
+        "reviewer": attestation.get("reviewer"),
+        "review_marker": attestation.get("review_marker"),
+        "source_review_report": source_report.get("path"),
+        "source_review_report_sha256": source_report.get("sha256"),
         "gate_caveat": CLOSURE_GATE_CAVEAT,
         "gate_valid": True,
-        "warnings": [],
+        "warnings": warnings,
     }
 
 
@@ -818,40 +886,117 @@ def _interim_artifact_closure_failures(payload: dict[str, object]) -> list[str]:
     return _dedupe(failures)
 
 
-def _claude_review_report_evidence(path: str | Path) -> dict[str, object]:
+def _claude_attestation_evidence(
+    path: str | Path,
+    *,
+    allow_fixture_attestation: bool,
+    expected_artifact_sha256: str | None = None,
+) -> dict[str, object]:
+    attestation_path = Path(path).resolve(strict=False)
+    failures: list[str] = []
+    text = ""
+    if _is_symlink(attestation_path):
+        failures.append("claude_attestation_is_symlink")
+    try:
+        if not attestation_path.is_file():
+            failures.append("claude_attestation_missing")
+        else:
+            text = attestation_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        failures.append("claude_attestation_read_error")
+    fields = _parse_attestation_fields(text)
+    verdict = fields.get("verdict")
+    reviewer = fields.get("reviewer")
+    attestation_type = fields.get("attestation_type")
+    artifact_sha256 = fields.get("artifact_sha256")
+    field_marker = fields.get("review_marker") or fields.get("marker")
+    markers = _dedupe(REVIEW_COMPLETE_MARKER_RE.findall(text))
+    standalone_markers = _dedupe([line.strip() for line in text.splitlines() if REVIEW_COMPLETE_MARKER_RE.fullmatch(line.strip())])
+    review_marker = field_marker or (standalone_markers[0] if standalone_markers else None)
+
+    if not fields:
+        failures.append("claude_attestation_malformed")
+    if attestation_type is None:
+        failures.append("attestation_type_missing")
+    elif attestation_type not in ATTESTATION_TYPES:
+        failures.append("attestation_type_unknown")
+    elif attestation_type == "fixture" and not allow_fixture_attestation:
+        failures.append("fixture_attestation_requires_allow_flag")
+    if reviewer not in ALLOWED_ATTESTATION_REVIEWERS:
+        failures.append("attestation_reviewer_not_claude")
+    if verdict != "PASS":
+        if verdict and "conditional" in verdict.lower() and "pass" in verdict.lower():
+            failures.append("attestation_verdict_conditional_pass")
+        elif verdict and "fail" in verdict.lower():
+            failures.append("attestation_verdict_fail")
+        else:
+            failures.append("attestation_verdict_not_pass")
+    if not artifact_sha256:
+        failures.append("attestation_artifact_sha256_missing")
+    elif not re.fullmatch(r"[0-9a-fA-F]{64}", artifact_sha256):
+        failures.append("attestation_artifact_sha256_invalid")
+    elif expected_artifact_sha256 and artifact_sha256.lower() != expected_artifact_sha256.lower():
+        failures.append("attestation_artifact_sha256_mismatch")
+    if not review_marker or not REVIEW_COMPLETE_MARKER_RE.fullmatch(review_marker) or not standalone_markers:
+        failures.append("attestation_review_marker_missing")
+    if field_marker and standalone_markers and field_marker not in standalone_markers:
+        failures.append("attestation_review_marker_mismatch")
+    sha256 = _sha256_file(attestation_path) if attestation_path.is_file() and not attestation_path.is_symlink() else None
+    return {
+        "path": str(attestation_path),
+        "sha256": sha256,
+        "text": text,
+        "fields": fields,
+        "attestation_type": attestation_type,
+        "artifact_sha256": artifact_sha256,
+        "reviewer": reviewer,
+        "review_marker": review_marker,
+        "markers": standalone_markers,
+        "verdict": verdict.lower() if verdict == "PASS" else verdict,
+        "failures": _dedupe(failures),
+    }
+
+
+def _source_review_report_evidence(path: str | Path | None) -> dict[str, object]:
+    if path is None:
+        return {"path": None, "sha256": None, "text": "", "failures": []}
     report_path = Path(path).resolve(strict=False)
     failures: list[str] = []
     text = ""
     if _is_symlink(report_path):
-        failures.append("claude_review_report_is_symlink")
+        failures.append("source_review_report_is_symlink")
     try:
         if not report_path.is_file():
-            failures.append("claude_review_report_missing")
+            failures.append("source_review_report_missing")
         else:
             text = report_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        failures.append("claude_review_report_read_error")
-    markers = REVIEW_COMPLETE_MARKER_RE.findall(text)
-    if not markers:
-        failures.append("claude_review_marker_missing")
-    if CONDITIONAL_PASS_RE.search(text):
-        failures.append("claude_review_conditional_pass")
-    if BLOCKER_UNRESOLVED_RE.search(text):
-        failures.append("claude_review_blocker_unresolved")
-    if FAIL_RE.search(text):
-        failures.append("claude_review_fail")
-    verdict = "pass" if PASS_RE.search(text) else None
-    if verdict != "pass":
-        failures.append("claude_review_pass_missing")
+        failures.append("source_review_report_read_error")
     sha256 = _sha256_file(report_path) if report_path.is_file() and not report_path.is_symlink() else None
-    return {
-        "path": str(report_path),
-        "sha256": sha256,
-        "text": text,
-        "markers": _dedupe(markers),
-        "verdict": verdict,
-        "failures": _dedupe(failures),
-    }
+    return {"path": str(report_path), "sha256": sha256, "text": text, "failures": _dedupe(failures)}
+
+
+def _parse_attestation_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().lower().replace("-", "_")
+        value = value.strip()
+        if not key or not value:
+            continue
+        fields[key] = value
+    if "verdict" in fields:
+        fields["verdict"] = fields["verdict"].strip()
+    if "reviewer" in fields:
+        fields["reviewer"] = fields["reviewer"].strip().lower()
+    if "attestation_type" in fields:
+        fields["attestation_type"] = fields["attestation_type"].strip().lower()
+    if "artifact_sha256" in fields:
+        fields["artifact_sha256"] = fields["artifact_sha256"].strip().lower()
+    return fields
 
 
 def _closure_artifact_markdown(
@@ -863,14 +1008,21 @@ def _closure_artifact_markdown(
     interim_sha256_path: Path,
     interim_hash: str,
     interim_self_check: dict[str, object],
-    claude_review_report: Path,
-    claude_review_hash: str,
-    claude_review_text: str,
-    detected_markers: list[str],
-    detected_verdict: str,
+    attestation: dict[str, object],
+    source_report: dict[str, object],
     review_gate: dict[str, object],
 ) -> str:
     prior_gate = interim_self_check.get("review_gate", {})
+    fixture_only = attestation.get("attestation_type") == "fixture"
+    real_closure = attestation.get("attestation_type") == "real"
+    source_lines = [
+        f"- source_review_report: {source_report.get('path')}",
+        f"- source_review_report_sha256: {source_report.get('sha256')}",
+    ]
+    if source_report.get("text"):
+        source_lines.extend(["### source_review_report snapshot", _fence(str(source_report.get("text")), "markdown")])
+    else:
+        source_lines.append("- source_review_report_snapshot: not_provided")
     lines = [
         CLOSURE_TITLE,
         "",
@@ -887,8 +1039,11 @@ def _closure_artifact_markdown(
         "## Closure summary",
         "- closure_created: true",
         "- pending_closed: true",
-        "- closure_source: claude_artifact_review",
+        "- closure_source: claude_attestation",
         "- gate_transition: codex_interim -> claude_pass",
+        f"- real_closure: {str(real_closure).lower()}",
+        f"- fixture_only: {str(fixture_only).lower()}",
+        f"- fixture_attestation_allowed: {str(review_gate['fixture_attestation_allowed']).lower()}",
         "- writes: --out and --out.sha256 only",
         "",
         "## Prior interim gate",
@@ -901,11 +1056,17 @@ def _closure_artifact_markdown(
         f"- legacy_artifact: {str(interim_self_check.get('legacy_artifact', False)).lower()}",
         "",
         "## Claude review evidence",
-        f"- claude_review_report: {claude_review_report}",
-        f"- claude_review_report_sha256: {claude_review_hash}",
-        f"- detected_review_marker: {detected_markers[0] if detected_markers else 'MISSING'}",
-        f"- detected_review_markers: {detected_markers}",
-        f"- detected_review_verdict: {detected_verdict}",
+        f"- claude_attestation: {attestation['path']}",
+        f"- claude_attestation_sha256: {attestation['sha256']}",
+        f"- attestation_type: {attestation['attestation_type']}",
+        f"- real_closure: {str(real_closure).lower()}",
+        f"- fixture_only: {str(fixture_only).lower()}",
+        f"- attested_artifact_sha256: {attestation['artifact_sha256']}",
+        f"- reviewer: {attestation['reviewer']}",
+        f"- verdict: {attestation['verdict']}",
+        f"- detected_review_marker: {attestation['review_marker']}",
+        f"- detected_review_markers: {attestation['markers']}",
+        *source_lines,
         "",
         "## Closed review gate status",
         "- gate_mode: claude_pass",
@@ -914,7 +1075,10 @@ def _closure_artifact_markdown(
         f"- interim_merge: {str(review_gate['interim_merge']).lower()}",
         "- pending_closed: true",
         "- follow_up_required: []",
-        "- closure_source: claude_artifact_review",
+        "- closure_source: claude_attestation",
+        f"- attestation_type: {attestation['attestation_type']}",
+        f"- real_closure: {str(real_closure).lower()}",
+        f"- fixture_only: {str(fixture_only).lower()}",
         f"- gate_caveat: {review_gate['gate_caveat']}",
         "### review_gate JSON",
         _fence(json.dumps(review_gate, indent=2, ensure_ascii=False), "json"),
@@ -923,16 +1087,29 @@ def _closure_artifact_markdown(
         _fence(json.dumps(interim_self_check, indent=2, ensure_ascii=False), "json"),
         "",
         "## Claude review report snapshot",
-        _fence(claude_review_text, "markdown"),
+        "This section contains the short Claude PASS attestation used for machine validation, not a verbose full review report. Optional full report evidence is recorded above when --source-review-report is provided.",
+        _fence(str(attestation["text"]), "markdown"),
         "",
         "## Caveats",
         f"- {CLOSURE_GATE_CAVEAT}",
-        "- Claude PASS evidence closes the pending artifact-review follow-up; it does not prove Claude independently executed VPS commands unless the review report says so.",
-        "",
-        "## Artifact end",
-        "P18_CLAUDE_PENDING_REVIEW_CLOSURE_ARTIFACT_COMPLETE",
-        "",
+        "- Claude PASS evidence closes the pending artifact-review follow-up; it does not prove Claude independently executed VPS commands unless the attestation or source report says so.",
     ]
+    if fixture_only:
+        lines.extend(
+            [
+                "- fixture_only: true",
+                "- not valid for real production closure",
+                "- generated only to test CLI workflow",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Artifact end",
+            "P18_CLAUDE_PENDING_REVIEW_CLOSURE_ARTIFACT_COMPLETE",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -950,20 +1127,35 @@ def _closure_self_check_failures(text: str, review_gate: dict[str, object]) -> l
         failures.append("closure_pending_not_closed")
     if review_gate.get("follow_up_required"):
         failures.append("closure_follow_up_required_not_empty")
-    if review_gate.get("closure_source") != CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP:
-        failures.append("closure_source_not_claude_artifact_review")
+    if review_gate.get("closure_source") not in {CLAUDE_ARTIFACT_REVIEW_FOLLOW_UP, "claude_attestation"}:
+        failures.append("closure_source_not_claude_attestation")
     marker_match = re.search(r"^- detected_review_marker:\s*(.+)$", text, flags=re.MULTILINE)
-    verdict_match = re.search(r"^- detected_review_verdict:\s*(.+)$", text, flags=re.MULTILINE)
+    verdict_match = re.search(r"^- verdict:\s*(.+)$", text, flags=re.MULTILINE) or re.search(r"^- detected_review_verdict:\s*(.+)$", text, flags=re.MULTILINE)
     if not marker_match or not REVIEW_COMPLETE_MARKER_RE.fullmatch(marker_match.group(1).strip()):
         failures.append("closure_review_marker_missing")
     if not verdict_match or verdict_match.group(1).strip().lower() != "pass":
         failures.append("closure_review_verdict_missing")
+    attestation_type = review_gate.get("attestation_type")
+    real_closure = bool(review_gate.get("real_closure"))
+    fixture_only = bool(review_gate.get("fixture_only"))
+    if attestation_type == "fixture":
+        if not fixture_only:
+            failures.append("closure_fixture_attestation_not_flagged")
+        if real_closure:
+            failures.append("closure_fixture_marked_real")
+        if "not valid for real production closure" not in text:
+            failures.append("closure_fixture_caveat_missing")
+    elif attestation_type == "real":
+        if fixture_only:
+            failures.append("closure_real_attestation_marked_fixture")
+        if not real_closure:
+            failures.append("closure_real_attestation_not_marked_real")
+    elif attestation_type is not None:
+        failures.append("closure_attestation_type_unknown")
     evidence_section = _section_text(text, "Claude review evidence")
     report_section = _section_text(text, "Claude review report snapshot")
     if not PASS_RE.search(evidence_section + "\n" + report_section):
         failures.append("closure_claude_pass_evidence_missing")
-    if CONDITIONAL_PASS_RE.search(report_section) or FAIL_RE.search(report_section) or BLOCKER_UNRESOLVED_RE.search(report_section):
-        failures.append("closure_claude_pass_evidence_ambiguous")
     return _dedupe(failures)
 
 
@@ -1170,6 +1362,8 @@ def self_check_review_artifact_payload(*, artifact: str | Path, sha256_path: str
 
     if is_closure_artifact:
         review_gate = _extract_review_gate(text)
+        if bool(review_gate.get("fixture_only")):
+            warnings.append("fixture_only_closure")
         if not bool(review_gate.get("gate_valid", False)):
             failures.append("review_gate_invalid")
         failures.extend(_closure_self_check_failures(text, review_gate))
@@ -1539,6 +1733,8 @@ def _resolve_artifact_out_path(out: str | Path, project_root: Path) -> Path:
     runs_root = (project_root / ".ai" / "runs").resolve()
     if resolved == runs_root or runs_root in resolved.parents:
         raise ReviewArtifactError(f"Refusing to write review artifact inside .ai/runs: {out}")
+    if resolved == base or base in resolved.parents:
+        raise ReviewArtifactError(f"Refusing to write review artifact inside project root: {out}")
     parent = resolved.parent
     if not _exists(parent):
         raise ReviewArtifactError(f"Review artifact parent directory does not exist: {parent}")
@@ -1563,8 +1759,8 @@ def _resolve_artifact_sha256_path(out_path: Path, project_root: Path) -> Path:
     if resolved == runs_root or runs_root in resolved.parents:
         raise ReviewArtifactError(f"Refusing to write review artifact sha256 inside .ai/runs: {sha256_path}")
     base = project_root.resolve()
-    if (resolved == base or base in resolved.parents) and _exists(resolved):
-        raise ReviewArtifactError(f"Refusing to overwrite existing project file with review artifact sha256: {sha256_path}")
+    if resolved == base or base in resolved.parents:
+        raise ReviewArtifactError(f"Refusing to write review artifact sha256 inside project root: {sha256_path}")
     parent = resolved.parent
     if not _exists(parent):
         raise ReviewArtifactError(f"Review artifact sha256 parent directory does not exist: {parent}")
@@ -1640,7 +1836,7 @@ def _error_reason(error: str) -> str:
         return "invalid_commit"
     if "symlink" in lowered:
         return "unsafe_path"
-    if "outside project" in lowered or ".ai/runs" in lowered:
+    if "outside project" in lowered or ".ai/runs" in lowered or "inside project root" in lowered:
         return "unsafe_path"
     if "parent directory" in lowered or "not a file" in lowered or "overwrite existing project file" in lowered:
         return "invalid_output"
