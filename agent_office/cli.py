@@ -23,6 +23,20 @@ from .doctor import (
     format_doctor,
     format_profile_plan_audit,
 )
+from .artifact_registry import (
+    export_evidence_payload,
+    format_export_evidence,
+    format_lifecycle_status,
+    format_lifecycle_verify,
+    format_registry_inspect,
+    format_registry_list,
+    format_registry_status,
+    lifecycle_status_payload,
+    lifecycle_verify_payload,
+    registry_inspect_payload,
+    registry_list_payload,
+    registry_status_payload,
+)
 from .objectives import (
     ObjectiveSpecError,
     objective_detail_payload,
@@ -1104,6 +1118,34 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
 
 
 def cmd_review_artifact(args: argparse.Namespace) -> int:
+    if args.review_artifact_action == "registry":
+        action = args.registry_action
+        roots = list(getattr(args, "root", []) or [])
+        if action == "list":
+            payload = registry_list_payload(project_root=PROJECT_ROOT, roots=roots)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_registry_list(payload))
+            return 0
+        if action == "inspect":
+            payload = registry_inspect_payload(path=args.path, project_root=PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_registry_inspect(payload))
+            return 0
+        if action == "status":
+            payload = registry_status_payload(project_root=PROJECT_ROOT, roots=roots)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_registry_status(payload))
+            return 0
+        raise AgentOfficeError("review-artifact registry requires list, inspect, or status.")
+    if args.review_artifact_action == "lifecycle":
+        action = args.lifecycle_action
+        roots = list(getattr(args, "root", []) or [])
+        if action == "status":
+            payload = lifecycle_status_payload(project_root=PROJECT_ROOT, roots=roots)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_lifecycle_status(payload))
+            return 0
+        if action == "verify":
+            payload = lifecycle_verify_payload(project_root=PROJECT_ROOT, roots=roots)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_lifecycle_verify(payload))
+            return 0
+        raise AgentOfficeError("review-artifact lifecycle requires status or verify.")
     if args.review_artifact_action in {"self-check", "verify"}:
         payload = self_check_review_artifact_payload(artifact=args.artifact, sha256_path=args.sha256, project_root=PROJECT_ROOT)
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_review_artifact_self_check(payload))
@@ -1170,6 +1212,18 @@ def cmd_review_artifact(args: argparse.Namespace) -> int:
         raise AgentOfficeError(str(exc)) from exc
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_review_artifact_export(payload))
     return 0
+
+
+def cmd_export_evidence(args: argparse.Namespace) -> int:
+    try:
+        payload = export_evidence_payload(out=args.out, project_root=PROJECT_ROOT, roots=list(args.root or []))
+    except ValueError as exc:
+        if args.json:
+            print(json.dumps({"valid": False, "command": "export-evidence", "warnings": [], "errors": [str(exc)]}, indent=2, ensure_ascii=False))
+            return 2
+        raise AgentOfficeError(str(exc)) from exc
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_export_evidence(payload))
+    return 0 if payload["valid"] else 1
 
 
 def cmd_run_demo(args: argparse.Namespace) -> int:
@@ -1268,6 +1322,10 @@ def _add_review_artifact_check_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--artifact", required=True, help="Markdown artifact path to verify.")
     parser.add_argument("--sha256", required=True, help="SHA256 sidecar path to verify from its own directory.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+
+def _add_repeatable_root_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--root", action="append", default=[], help="Repeatable artifact scan root. When set, default locations are not scanned.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1395,6 +1453,28 @@ def build_parser() -> argparse.ArgumentParser:
     _add_review_artifact_check_args(verify)
     verify.set_defaults(func=cmd_review_artifact)
 
+    registry = review_sub.add_parser("registry", help="List, inspect, and summarize local review artifacts without providers.")
+    registry_sub = registry.add_subparsers(dest="registry_action", required=True)
+    registry_list = registry_sub.add_parser("list", help="List local review, closure, report, sha256, and run-bundle artifacts.")
+    _add_repeatable_root_arg(registry_list)
+    registry_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    registry_list.set_defaults(func=cmd_review_artifact)
+    registry_inspect = registry_sub.add_parser("inspect", help="Inspect one artifact path without traceback on malformed inputs.")
+    registry_inspect.add_argument("--path", required=True, help="Artifact path to inspect.")
+    registry_inspect.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    registry_inspect.set_defaults(func=cmd_review_artifact)
+    registry_status = registry_sub.add_parser("status", help="Summarize local artifact registry state.")
+    _add_repeatable_root_arg(registry_status)
+    registry_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    registry_status.set_defaults(func=cmd_review_artifact)
+    lifecycle = review_sub.add_parser("lifecycle", help="Summarize and verify artifact lifecycle state without closing pending artifacts.")
+    lifecycle_sub = lifecycle.add_subparsers(dest="lifecycle_action", required=True)
+    for lifecycle_name in ("status", "verify"):
+        lifecycle_parser = lifecycle_sub.add_parser(lifecycle_name, help=f"Artifact lifecycle {lifecycle_name}.")
+        _add_repeatable_root_arg(lifecycle_parser)
+        lifecycle_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        lifecycle_parser.set_defaults(func=cmd_review_artifact)
+
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
     view = p.add_mutually_exclusive_group()
@@ -1402,6 +1482,12 @@ def build_parser() -> argparse.ArgumentParser:
     view.add_argument("--profiles", action="store_true", help="Print static profile plan audit only.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("export-evidence", help="Create a deterministic local evidence package for external review.")
+    p.add_argument("--out", required=True, help="Output directory for manifest.json and README.md.")
+    _add_repeatable_root_arg(p)
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_export_evidence)
     return parser
 
 
