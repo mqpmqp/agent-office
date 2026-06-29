@@ -918,3 +918,56 @@ When Claude returns `REQUEST_CHANGES`, use the required changes and risk flags a
 - Real provider calls are intentionally limited to Gemini `context`, Codex `implement`, Grok `redteam`, and Claude `final` adapters when explicitly enabled.
 - No real keys are read or printed.
 - The orchestrator owns task state, queue discipline, logs, and artifact management.
+
+## Artifact Registry, Lifecycle, and Evidence Export
+
+AgentOffice includes a static local artifact registry for release-review evidence. It does not call providers, adapters, runtimes, models, or the network; it does not read `.env`, print environment variables, follow symlinks, or read `.git` contents. Single-file content reads are capped at 1 MiB; oversized files are recorded with warnings instead of failing the scan.
+
+Registry commands:
+
+```bash
+python3 -m agent_office review-artifact registry --help
+python3 -m agent_office review-artifact registry list --json
+python3 -m agent_office review-artifact registry list --root /tmp/some-fixtures --json
+python3 -m agent_office review-artifact registry inspect --path /tmp/agentoffice-review.md --json
+python3 -m agent_office review-artifact registry status --json
+```
+
+Default registry scan locations:
+
+- `/tmp/agentoffice-*.md`
+- `/tmp/agentoffice-*.json`
+- `/tmp/agentoffice-*.sha256`
+- `/opt/agent-office/*REPORT.md`
+- `.ai/runs/*`
+
+Passing one or more `--root` values makes the scan repeatable and limited to those roots. Missing, empty, malformed, non-UTF8, bad JSON, bad SHA, or SHA-mismatched artifacts are reported as warnings/errors in JSON without traceback.
+
+Lifecycle commands:
+
+```bash
+python3 -m agent_office review-artifact lifecycle --help
+python3 -m agent_office review-artifact lifecycle status --json
+python3 -m agent_office review-artifact lifecycle status --root /tmp/some-fixtures --json
+python3 -m agent_office review-artifact lifecycle verify --json
+python3 -m agent_office review-artifact lifecycle verify --root /tmp/some-fixtures --json
+```
+
+`lifecycle status` summarizes known artifacts from the registry. `lifecycle verify` reuses the existing `review-artifact verify`/self-check contract where possible and validates static run bundles with the existing run-bundle validation helper. It does not execute `close-pending`, does not close pending artifacts, and exits successfully after completing the scan; unverifiable or invalid artifacts are listed in the JSON `invalid` or `skipped` arrays.
+
+Evidence package command:
+
+```bash
+python3 -m agent_office export-evidence --help
+rm -rf /tmp/agentoffice-p23-evidence
+python3 -m agent_office export-evidence --out /tmp/agentoffice-p23-evidence --json
+test -s /tmp/agentoffice-p23-evidence/manifest.json
+test -s /tmp/agentoffice-p23-evidence/README.md
+```
+
+`export-evidence` creates a reviewer-readable package with:
+
+- `manifest.json`: command map, validation commands, safety boundaries, repo branch/commit metadata, registry summary, lifecycle summary, and one example artifact validation result.
+- `README.md`: system overview, current CLI command map, validation list, safety boundaries, known limitations, registry/lifecycle summaries, example validation summary, and reviewer instructions.
+
+Existing output directories are allowed. The command deterministically overwrites its own `manifest.json` and `README.md` files and leaves unrelated files in the output directory untouched. The package is intended for `/tmp` output unless a reviewer explicitly asks for a repository path.
