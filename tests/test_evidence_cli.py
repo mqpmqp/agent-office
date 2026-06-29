@@ -272,6 +272,264 @@ class EvidenceCliTests(unittest.TestCase):
         self.assertIn("reviewer instructions", first_readme.lower())
         self.assertNotIn("Traceback", first_stdout + first_stderr + second_stdout + second_stderr)
 
+class GoalWorkflowCliTests(unittest.TestCase):
+    maxDiff = None
+
+    def _write_review(self, path: Path, *, verdict: str = "PASS", marker: bool = True, blockers: str = "none", majors: str = "none") -> None:
+        marker_text = "\nP24_ARTIFACT_CODE_REVIEW_COMPLETE\n" if marker else ""
+        path.write_text(
+            (
+                "# Claude Artifact Code Review\n\n"
+                f"verdict: {verdict}\n\n"
+                f"blockers: {blockers}\n"
+                f"major findings: {majors}\n"
+                "minor findings only:\n"
+                "- documentation wording\n"
+                f"{marker_text}"
+            ),
+            encoding="utf-8",
+        )
+
+    def _merge_repo(self, root: Path) -> None:
+        git(root, "init")
+        git(root, "checkout", "-b", "phase6/mainline")
+        (root / "README.md").write_text("# Temp AgentOffice\n", encoding="utf-8")
+        (root / "feature.txt").write_text("base\n", encoding="utf-8")
+        git(root, "add", "README.md", "feature.txt")
+        git(root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base")
+        git(root, "checkout", "-b", "phase26/source")
+        (root / "feature.txt").write_text("source\n", encoding="utf-8")
+        git(root, "add", "feature.txt")
+        git(root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "source")
+        git(root, "checkout", "phase6/mainline")
+
+    def test_review_gate_help_works(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+            cli.main(["review-artifact", "review-gate", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("inspect", stdout.getvalue())
+        self.assertIn("status", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_review_gate_inspect_pass_review_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            review = Path(tmpdir) / "review.md"
+            self._write_review(review)
+            code, stdout, stderr = run_cli(["review-artifact", "review-gate", "inspect", "--path", str(review), "--json"])
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        for key in ("valid", "command", "path", "verdict", "marker", "marker_present", "blocker_count", "major_count", "minor_count", "merge_ready", "warnings", "errors"):
+            self.assertIn(key, payload)
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "pass")
+        self.assertTrue(payload["marker_present"])
+        self.assertEqual(payload["blocker_count"], 0)
+        self.assertEqual(payload["major_count"], 0)
+        self.assertEqual(payload["minor_count"], 1)
+        self.assertTrue(payload["merge_ready"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_review_gate_inspect_fail_review_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            review = Path(tmpdir) / "review.md"
+            self._write_review(review, verdict="FAIL")
+            code, stdout, stderr = run_cli(["review-artifact", "review-gate", "inspect", "--path", str(review), "--json"])
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "fail")
+        self.assertFalse(payload["merge_ready"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_review_gate_missing_marker_is_not_merge_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            review = Path(tmpdir) / "review.md"
+            self._write_review(review, marker=False)
+            code, stdout, stderr = run_cli(["review-artifact", "review-gate", "status", "--path", str(review), "--json"])
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["valid"])
+        self.assertFalse(payload["marker_present"])
+        self.assertFalse(payload["merge_ready"])
+        self.assertIn("completion_marker_missing", payload["warnings"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_review_gate_blockers_or_majors_are_not_merge_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            review = Path(tmpdir) / "review.md"
+            review.write_text(
+                "# Claude Artifact Code Review\n\n"
+                "verdict: CONDITIONAL PASS\n\n"
+                "blockers:\n"
+                "- unsafe merge\n"
+                "major findings:\n"
+                "- missing validation\n"
+                "minor findings: none\n\n"
+                "P24_ARTIFACT_CODE_REVIEW_COMPLETE\n",
+                encoding="utf-8",
+            )
+            code, stdout, stderr = run_cli(["review-artifact", "review-gate", "status", "--path", str(review), "--json"])
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["verdict"], "conditional_pass")
+        self.assertEqual(payload["blocker_count"], 1)
+        self.assertEqual(payload["major_count"], 1)
+        self.assertFalse(payload["merge_ready"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_review_gate_missing_non_utf8_and_malformed_files_do_not_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            missing = root / "missing.md"
+            non_utf8 = root / "non-utf8.md"
+            non_utf8.write_bytes(b"\xff\xfe")
+            malformed = root / "malformed.md"
+            malformed.write_text("# unrelated markdown\n", encoding="utf-8")
+            results = [
+                run_cli(["review-artifact", "review-gate", "inspect", "--path", str(path), "--json"])
+                for path in (missing, non_utf8, malformed)
+            ]
+
+        for code, stdout, stderr in results:
+            self.assertEqual(code, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertFalse(payload["merge_ready"])
+            self.assertIn("errors", payload)
+            self.assertNotIn("Traceback", stdout + stderr)
+        self.assertIn("missing_path", json.loads(results[0][1])["errors"])
+        self.assertIn("non_utf8_content", json.loads(results[1][1])["warnings"])
+        self.assertIn("verdict_unknown", json.loads(results[2][1])["warnings"])
+
+    def test_merge_readiness_help_works(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+            cli.main(["merge-readiness", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("--source", stdout.getvalue())
+        self.assertIn("--target", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_merge_readiness_with_pass_review_returns_stable_keys_and_does_not_modify_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._merge_repo(root)
+            review = root / "review.md"
+            self._write_review(review)
+            before_head = git(root, "rev-parse", "HEAD")
+            before_branch = git(root, "branch", "--show-current")
+            before_status = git(root, "status", "--short", "--untracked-files=no")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["merge-readiness", "--source", "phase26/source", "--target", "phase6/mainline", "--review", str(review), "--json"])
+            after_head = git(root, "rev-parse", "HEAD")
+            after_branch = git(root, "branch", "--show-current")
+            after_status = git(root, "status", "--short", "--untracked-files=no")
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        for key in ("valid", "command", "source", "target", "source_head", "target_head", "diff_files", "review", "merge_ready", "warnings", "errors"):
+            self.assertIn(key, payload)
+        self.assertTrue(payload["valid"])
+        self.assertTrue(payload["merge_ready"])
+        self.assertEqual(payload["diff_files"], ["feature.txt"])
+        self.assertEqual(before_head, after_head)
+        self.assertEqual(before_branch, after_branch)
+        self.assertEqual(before_status, after_status)
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_merge_readiness_missing_or_fail_review_is_non_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._merge_repo(root)
+            fail_review = root / "fail-review.md"
+            self._write_review(fail_review, verdict="FAIL")
+            missing_review = root / "missing-review.md"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                missing_result = run_cli(["merge-readiness", "--source", "phase26/source", "--target", "phase6/mainline", "--review", str(missing_review), "--json"])
+                fail_result = run_cli(["merge-readiness", "--source", "phase26/source", "--target", "phase6/mainline", "--review", str(fail_review), "--json"])
+
+        for code, stdout, stderr in (missing_result, fail_result):
+            self.assertEqual(code, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertFalse(payload["valid"])
+            self.assertFalse(payload["merge_ready"])
+            self.assertIn("review_gate_not_merge_ready", payload["errors"])
+            self.assertNotIn("Traceback", stdout + stderr)
+        self.assertIn("missing_path", json.loads(missing_result[1])["review"]["errors"])
+        self.assertEqual(json.loads(fail_result[1])["review"]["verdict"], "fail")
+
+    def test_merge_readiness_bad_branch_has_no_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._merge_repo(root)
+            review = root / "review.md"
+            self._write_review(review)
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["merge-readiness", "--source", "no-such-branch", "--target", "phase6/mainline", "--review", str(review), "--json"])
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIsNone(payload["source_head"])
+        self.assertFalse(payload["merge_ready"])
+        self.assertTrue(any("source_commit_not_found" in error for error in payload["errors"]))
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_goal_packet_help_works(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+            cli.main(["goal-packet", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("export", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_goal_packet_export_writes_markdown_and_json_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._merge_repo(root)
+            (root / ".env").write_text("SECRET_VALUE_SHOULD_NOT_APPEAR=1\n", encoding="utf-8")
+            out = root / "goal-packet.md"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["goal-packet", "export", "--name", "P27", "--baseline", "phase6/mainline", "--out", str(out), "--json"])
+            markdown = out.read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        for key in ("valid", "command", "out", "objective", "baseline", "branch", "head", "warnings", "errors"):
+            self.assertIn(key, payload)
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["objective"], "P27")
+        self.assertIn("## Safety Boundaries", markdown)
+        self.assertIn("## Validation Checklist", markdown)
+        self.assertIn("## Done Definition", markdown)
+        self.assertIn("## Report Requirements", markdown)
+        self.assertNotIn("SECRET_VALUE_SHOULD_NOT_APPEAR", markdown + stdout + stderr)
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_goal_packet_symlink_output_path_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._merge_repo(root)
+            target = root / "target.md"
+            target.write_text("existing\n", encoding="utf-8")
+            link = root / "link.md"
+            link.symlink_to(target)
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["goal-packet", "export", "--name", "P27", "--baseline", "phase6/mainline", "--out", str(link), "--json"])
+
+        self.assertEqual(code, 2)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIn("output_path_symlink_refused", payload["errors"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

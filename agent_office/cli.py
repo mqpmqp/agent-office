@@ -37,6 +37,14 @@ from .artifact_registry import (
     registry_list_payload,
     registry_status_payload,
 )
+from .goal_workflows import (
+    format_goal_packet_export,
+    format_merge_readiness,
+    format_review_gate_status,
+    goal_packet_export_payload,
+    merge_readiness_payload,
+    review_gate_payload,
+)
 from .objectives import (
     ObjectiveSpecError,
     objective_detail_payload,
@@ -1118,6 +1126,13 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
 
 
 def cmd_review_artifact(args: argparse.Namespace) -> int:
+    if args.review_artifact_action == "review-gate":
+        action = args.review_gate_action
+        if action in {"inspect", "status"}:
+            payload = review_gate_payload(path=args.path, action=action)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_review_gate_status(payload))
+            return 0
+        raise AgentOfficeError("review-artifact review-gate requires inspect or status.")
     if args.review_artifact_action == "registry":
         action = args.registry_action
         roots = list(getattr(args, "root", []) or [])
@@ -1224,6 +1239,27 @@ def cmd_export_evidence(args: argparse.Namespace) -> int:
         raise AgentOfficeError(str(exc)) from exc
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_export_evidence(payload))
     return 0 if payload["valid"] else 1
+
+
+def cmd_merge_readiness(args: argparse.Namespace) -> int:
+    payload = merge_readiness_payload(
+        source=args.source,
+        target=args.target,
+        review=args.review,
+        project_root=PROJECT_ROOT,
+        ignore_dirty=args.ignore_dirty,
+        validation_artifacts=list(args.validation_artifact or []),
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_merge_readiness(payload))
+    return 0
+
+
+def cmd_goal_packet(args: argparse.Namespace) -> int:
+    if args.goal_packet_action != "export":
+        raise AgentOfficeError("goal-packet requires the export action.")
+    payload = goal_packet_export_payload(name=args.name, baseline=args.baseline, out=args.out, project_root=PROJECT_ROOT)
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_goal_packet_export(payload))
+    return 0 if payload["valid"] else 2
 
 
 def cmd_run_demo(args: argparse.Namespace) -> int:
@@ -1453,6 +1489,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_review_artifact_check_args(verify)
     verify.set_defaults(func=cmd_review_artifact)
 
+    review_gate = review_sub.add_parser("review-gate", help="Inspect Claude review gate results without executing providers or merging.")
+    review_gate_sub = review_gate.add_subparsers(dest="review_gate_action", required=True)
+    for review_gate_name in ("inspect", "status"):
+        review_gate_parser = review_gate_sub.add_parser(review_gate_name, help=f"Review gate {review_gate_name}.")
+        review_gate_parser.add_argument("--path", required=True, help="Claude review markdown or text artifact path.")
+        review_gate_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        review_gate_parser.set_defaults(func=cmd_review_artifact)
+
     registry = review_sub.add_parser("registry", help="List, inspect, and summarize local review artifacts without providers.")
     registry_sub = registry.add_subparsers(dest="registry_action", required=True)
     registry_list = registry_sub.add_parser("list", help="List local review, closure, report, sha256, and run-bundle artifacts.")
@@ -1488,6 +1532,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repeatable_root_arg(p)
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_export_evidence)
+
+    p = sub.add_parser("merge-readiness", help="Compute static merge readiness without merging, pushing, or modifying git.")
+    p.add_argument("--source", required=True, help="Source branch or revision to inspect.")
+    p.add_argument("--target", required=True, help="Target branch or revision to inspect.")
+    p.add_argument("--review", required=True, help="Claude review gate markdown or text artifact path.")
+    p.add_argument("--validation-artifact", action="append", default=[], help="Optional known validation artifact that must exist as a file.")
+    p.add_argument("--ignore-dirty", action="store_true", help="Skip the tracked-worktree cleanliness check.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_merge_readiness)
+
+    p = sub.add_parser("goal-packet", help="Generate static Codex Goal-mode packets without executing them.")
+    goal_sub = p.add_subparsers(dest="goal_packet_action", required=True)
+    export = goal_sub.add_parser("export", help="Export a reusable Goal-mode markdown packet.")
+    export.add_argument("--name", required=True, help="Objective or batch name, for example P27.")
+    export.add_argument("--baseline", required=True, help="Baseline branch or revision to record.")
+    export.add_argument("--out", required=True, help="Explicit markdown output path.")
+    export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    export.set_defaults(func=cmd_goal_packet)
     return parser
 
 

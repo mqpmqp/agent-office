@@ -971,3 +971,41 @@ test -s /tmp/agentoffice-p23-evidence/README.md
 - `README.md`: system overview, current CLI command map, validation list, safety boundaries, known limitations, registry/lifecycle summaries, example validation summary, and reviewer instructions.
 
 Existing output directories are allowed. The command deterministically overwrites its own `manifest.json` and `README.md` files and leaves unrelated files in the output directory untouched. The package is intended for `/tmp` output unless a reviewer explicitly asks for a repository path.
+
+## Review Gate, Merge Readiness, and Goal Packets
+
+AgentOffice includes static local helpers for productizing review-gate and Goal-mode workflows. These commands do not call providers, execute merges, push branches, read `.env`, or print environment variables.
+
+Review-gate commands parse Claude review markdown/text artifacts and return stable JSON without traceback on missing, malformed, non-UTF8, huge, or irrelevant files:
+
+```bash
+python3 -m agent_office review-artifact review-gate --help
+python3 -m agent_office review-artifact review-gate inspect --path /tmp/claude-review.md --json
+python3 -m agent_office review-artifact review-gate status --path /tmp/claude-review.md --json
+```
+
+`merge_ready` is true only when a completion marker is present, the verdict is `pass` or `conditional_pass`, and blocker/major finding counts are zero.
+
+Merge-readiness computes a static readiness summary without modifying git:
+
+```bash
+python3 -m agent_office merge-readiness --help
+python3 -m agent_office merge-readiness \
+  --source phase23/p21-p23-evidence-release-batch \
+  --target phase6/mainline \
+  --review /tmp/claude-review.md \
+  --json
+```
+
+It checks that source/target commits resolve, the source has a delta from the target, the review gate is merge-ready, and the tracked worktree is clean unless `--ignore-dirty` is passed.
+
+Goal packet export writes a reusable Codex Goal-mode markdown packet to the explicit `--out` path only:
+
+```bash
+python3 -m agent_office goal-packet --help
+python3 -m agent_office goal-packet export \
+  --name P27 \
+  --baseline phase6/mainline \
+  --out /tmp/agentoffice-p27-goal-packet.md \
+  --json
+```
