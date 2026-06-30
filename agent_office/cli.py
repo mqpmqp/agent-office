@@ -37,6 +37,14 @@ from .artifact_registry import (
     registry_list_payload,
     registry_status_payload,
 )
+from .orchestration import (
+    format_orchestrate_inspect,
+    format_orchestrate_run,
+    format_orchestrate_validate,
+    orchestrate_inspect_payload,
+    orchestrate_run_payload,
+    orchestrate_validate_payload,
+)
 from .objectives import (
     ObjectiveSpecError,
     objective_detail_payload,
@@ -1226,6 +1234,23 @@ def cmd_export_evidence(args: argparse.Namespace) -> int:
     return 0 if payload["valid"] else 1
 
 
+def cmd_orchestrate(args: argparse.Namespace) -> int:
+    action = args.orchestrate_action
+    if action == "run":
+        payload = orchestrate_run_payload(task=args.task, mode=args.mode, out=args.out)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_orchestrate_run(payload))
+        return 0 if payload["valid"] else 2
+    if action == "inspect":
+        payload = orchestrate_inspect_payload(path=args.path)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_orchestrate_inspect(payload))
+        return 0 if payload["valid"] else 2
+    if action == "validate":
+        payload = orchestrate_validate_payload(path=args.path)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_orchestrate_validate(payload))
+        return 0 if payload["valid"] else 2
+    raise AgentOfficeError("orchestrate requires run, inspect, or validate.")
+
+
 def cmd_run_demo(args: argparse.Namespace) -> int:
     demo_mode = resolve_mode(args, "run-demo")
     validate_task_id(args.task_id)
@@ -1409,6 +1434,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.add_argument("--validate", action="store_true", help="Validate the static packet contract without executing it.")
     p.set_defaults(func=cmd_packet)
+
+    p = sub.add_parser("orchestrate", help="Create and inspect static auditable multi-agent orchestration artifacts.")
+    orch_sub = p.add_subparsers(dest="orchestrate_action", required=True)
+    run = orch_sub.add_parser("run", help="Generate a static orchestration artifact directory without provider calls.")
+    run.add_argument("--task", required=True, help="High-level user task to orchestrate.")
+    run.add_argument("--mode", choices=["static"], default="static", help="Orchestration mode. Current implementation supports static only.")
+    run.add_argument("--out", required=True, help="Output directory for orchestration artifacts.")
+    run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    run.set_defaults(func=cmd_orchestrate)
+    inspect = orch_sub.add_parser("inspect", help="Summarize an orchestration artifact directory.")
+    inspect.add_argument("--path", required=True, help="Orchestration artifact directory.")
+    inspect.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    inspect.set_defaults(func=cmd_orchestrate)
+    validate = orch_sub.add_parser("validate", help="Validate an orchestration artifact directory.")
+    validate.add_argument("--path", required=True, help="Orchestration artifact directory.")
+    validate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    validate.set_defaults(func=cmd_orchestrate)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
