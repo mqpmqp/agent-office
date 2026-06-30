@@ -21,6 +21,21 @@ The agents do not freely chat. Every task is coordinated through files under:
   claude-decision.md
 ```
 
+## Auditable Multi-Agent Orchestration
+
+AgentOffice is evolving from a static workflow/gate tool into an auditable multi-agent orchestration system.
+
+The first orchestration core accepts one high-level task and creates a white-box multi-agent execution graph. Unlike black-box orchestration systems, AgentOffice keeps artifacts, task graphs, role packets, validation state, and safety boundaries inspectable.
+
+Current orchestration mode is static only. It does not call external providers, runtimes, adapters, or model APIs.
+
+```bash
+python3 -m agent_office orchestrate run --task "Review this change safely" --mode static --out /tmp/ao-orch --json
+python3 -m agent_office orchestrate inspect --path /tmp/ao-orch --json
+python3 -m agent_office orchestrate validate --path /tmp/ao-orch --json
+```
+
+
 ## Claude Token Rule
 
 Mock Claude reads only `final-for-claude.md`. P5-05 adds a staged real Claude final judge dry-run that can also review bounded staged artifacts under `.ai/context/`, `.ai/codex/`, and `.ai/grok/`.
@@ -81,6 +96,9 @@ agent-office profiles --name lowest-cost --plan --audit
 agent-office profiles --name lowest-cost --plan --audit --json
 agent-office objectives --phase P6-10
 agent-office objectives --phase P6-10 --json
+agent-office orchestrate run --task "Review this change safely" --mode static --out /tmp/ao-orch --json
+agent-office orchestrate inspect --path /tmp/ao-orch --json
+agent-office orchestrate validate --path /tmp/ao-orch --json
 agent-office profiles --plan --audit
 agent-office profiles --plan --audit --json
 agent-office doctor --profiles
