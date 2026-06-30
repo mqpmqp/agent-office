@@ -71,7 +71,11 @@ def orchestrate_run_payload(*, task: str, mode: str, out: str | Path) -> dict[st
     if errors:
         return _run_error_payload(command, out_path, task, mode, warnings, errors)
 
-    out_path.mkdir(parents=True, exist_ok=True)
+    try:
+        out_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        errors.append(f"output_directory_create_failed: {exc}")
+        return _run_error_payload(command, out_path, task, mode, warnings, errors)
     understanding = task_understanding(task)
     decomposition = decompose_task(task, understanding["task_type"])
     assignments = role_assignments(understanding["task_type"])

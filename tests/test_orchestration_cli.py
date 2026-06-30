@@ -126,6 +126,32 @@ class OrchestrationCliTests(unittest.TestCase):
             self.assertTrue(payload["errors"])
             self.assertNotIn("Traceback", stdout + stderr)
 
+
+    def test_orchestrate_run_reports_output_directory_errors_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent = root / "not-a-directory"
+            parent.write_text("x", encoding="utf-8")
+            code, stdout, stderr = run_cli(
+                [
+                    "orchestrate",
+                    "run",
+                    "--task",
+                    "Review output failure",
+                    "--mode",
+                    "static",
+                    "--out",
+                    str(parent / "child"),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(code, 2)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIn("output_directory_create_failed", "\n".join(payload["errors"]))
+        self.assertNotIn("Traceback", stdout + stderr)
+
     def test_static_mode_safety_and_forbidden_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(cli, "run_adapter", side_effect=AssertionError("provider called")):
             root = Path(tmpdir)
