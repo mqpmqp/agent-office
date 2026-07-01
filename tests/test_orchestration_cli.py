@@ -133,6 +133,35 @@ class OrchestrationCliTests(unittest.TestCase):
         self.assertIn(" M agent_office/orchestration.py", phase_report)
         self.assertNotIn("Commit:" + " pending", phase_report)
 
+    def test_orchestrate_run_unavailable_source_state_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch("agent_office.orchestration._git_output", return_value=""):
+            out = Path(tmpdir) / "ao-orch"
+            code, stdout, stderr = run_cli(
+                ["orchestrate", "run", "--task", "Review unavailable source state", "--mode", "static", "--out", str(out), "--json"]
+            )
+            payload = json.loads(stdout)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            phase_report = (out / "phase_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["source_state"], "unavailable")
+        self.assertEqual(payload["source_commit"], "unavailable")
+        self.assertEqual(payload["baseline_commit"], "unavailable")
+        self.assertEqual(manifest["source_state"]["state"], "unavailable")
+        self.assertFalse(manifest["source_state"]["available"])
+        self.assertEqual(manifest["source_state"]["source_branch"], "unavailable")
+        self.assertEqual(manifest["source_state"]["source_commit"], "unavailable")
+        self.assertEqual(manifest["source_state"]["baseline_commit"], "unavailable")
+        self.assertFalse(manifest["source_state"]["tracked_dirty"])
+        self.assertEqual(manifest["source_state"]["pending_change_state"], "unavailable")
+        self.assertEqual(manifest["source_state"]["pending_changes"], [])
+        self.assertNotIn(manifest["source_state"]["state"], {"clean", "dirty"})
+        self.assertIn("source_state: unavailable", phase_report)
+        self.assertIn("source_commit: unavailable", phase_report)
+        self.assertIn("baseline_commit: unavailable", phase_report)
+        self.assertNotIn("Traceback", stdout + stderr)
+
     def test_orchestrate_run_is_byte_reproducible_for_same_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
