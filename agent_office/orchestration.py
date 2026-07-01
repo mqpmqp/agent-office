@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 import shlex
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -81,14 +80,12 @@ def orchestrate_run_payload(*, task: str, mode: str, out: str | Path) -> dict[st
     assignments = role_assignments(understanding["task_type"])
     graph = task_graph(task, assignments, understanding["task_type"])
     orchestration_id = _orchestration_id(task)
-    created_at = _utc_now()
     created_files = list(REQUIRED_FILES)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "orchestration_id": orchestration_id,
         "mode": "static",
         "task": task,
-        "created_at": created_at,
         "external_call_made": False,
         "provider_calls": [],
         "task_understanding": understanding,
@@ -635,10 +632,6 @@ def _orchestration_id(task: str) -> str:
 
 def _graph_id(task: str) -> str:
     return f"graph-{hashlib.sha256(('graph:' + task).encode('utf-8')).hexdigest()[:12]}"
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _command_text(base: str, parts: list[str]) -> str:

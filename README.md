@@ -28,6 +28,7 @@ AgentOffice is evolving from a static workflow/gate tool into an auditable multi
 The first orchestration core accepts one high-level task and creates a white-box multi-agent execution graph. Unlike black-box orchestration systems, AgentOffice keeps artifacts, task graphs, role packets, validation state, and safety boundaries inspectable.
 
 Current orchestration mode is static only. It does not call external providers, runtimes, adapters, or model APIs.
+Generated orchestration artifacts are deterministic for identical inputs and do not embed wall-clock timestamps.
 
 ```bash
 python3 -m agent_office orchestrate run --task "Review this change safely" --mode static --out /tmp/ao-orch --json
