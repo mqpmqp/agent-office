@@ -3,7 +3,7 @@
 Marker: P28_ORCHESTRATION_REPRODUCIBILITY_POLISH_COMPLETE
 Branch: phase28/orchestration-reproducibility-polish
 Base: phase6/mainline @ 041b1686adcc38ab97c71053b098508ecf81e9b6
-Commit: pending at report generation; final branch HEAD is authoritative after commit/push.
+Commit: ac122c094a510ffc352759533f062dfdd4eb0d5e
 
 ## Scope
 Removed the wall-clock timestamp from static orchestration manifests so identical orchestration inputs generate byte-identical artifacts across fresh output directories.

@@ -40,6 +40,7 @@ class OrchestrationCliTests(unittest.TestCase):
                 ]
             )
             manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            phase_report = (out / "phase_report.md").read_text(encoding="utf-8")
             files_present = {filename: (out / filename).is_file() for filename in REQUIRED_FILES}
             role_packets_present = {role: (out / f"{role}_packet.md").is_file() for role in PACKET_ROLES}
 
@@ -51,11 +52,24 @@ class OrchestrationCliTests(unittest.TestCase):
         self.assertEqual(payload["provider_calls"], [])
         self.assertEqual(list(manifest)[:6], ["schema_version", "orchestration_id", "mode", "task", "external_call_made", "provider_calls"])
         self.assertNotIn("created_at", manifest)
+        self.assertNotIn("Commit:" + " pending", phase_report)
         self.assertFalse(manifest["external_call_made"])
         self.assertEqual(manifest["provider_calls"], [])
         self.assertIn("task_understanding", manifest)
         self.assertIn("decomposition", manifest)
         self.assertIn("task_graph", manifest)
+        self.assertIn("source_state", manifest)
+        self.assertIn("generated_artifacts", manifest)
+        self.assertIn("validation_commands", manifest)
+        self.assertEqual(manifest["generated_artifacts"]["phase_report_path"], "phase_report.md")
+        self.assertIn("source_commit", manifest["source_state"])
+        self.assertIn("baseline_commit", manifest["source_state"])
+        self.assertIn(manifest["source_state"]["state"], {"clean", "dirty", "unavailable"})
+        self.assertEqual(payload["phase_report_path"], str(out / "phase_report.md"))
+        self.assertIn("source_commit", payload)
+        self.assertIn("baseline_commit", payload)
+        self.assertIn("validation_commands", payload)
+        self.assertIn("Review phase_report.md", payload["review_gate_hint"])
         self.assertTrue(manifest["task_graph"]["nodes"])
         self.assertTrue(manifest["task_graph"]["edges"])
         self.assertTrue(manifest["task_graph"]["execution_order"])
@@ -63,7 +77,61 @@ class OrchestrationCliTests(unittest.TestCase):
             self.assertTrue(files_present[filename], filename)
         for role in PACKET_ROLES:
             self.assertTrue(role_packets_present[role], role)
+        self.assertIn("## Source State", phase_report)
+        self.assertIn("- source_commit:", phase_report)
+        self.assertIn("- baseline_commit:", phase_report)
+        self.assertIn("## Validation", phase_report)
+        self.assertIn("## Next Action", phase_report)
+        self.assertIn("## Known Follow-ups", phase_report)
+        self.assertIn("phase_report_path: phase_report.md", phase_report)
         self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_orchestrate_run_text_output_includes_reviewable_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "ao-orch"
+            code, stdout, stderr = run_cli(
+                ["orchestrate", "run", "--task", "Review text output", "--mode", "static", "--out", str(out)]
+            )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("source_state:", stdout)
+        self.assertIn("source_commit:", stdout)
+        self.assertIn("baseline_commit:", stdout)
+        self.assertIn("phase_report_path:", stdout)
+        self.assertIn("review_gate_hint:", stdout)
+        self.assertNotIn("Commit:" + " pending", stdout)
+
+    def test_orchestrate_run_dirty_source_state_is_explicit_not_placeholder(self) -> None:
+        dirty_state = {
+            "available": True,
+            "source_branch": "feature/example",
+            "source_commit": "abc123",
+            "state": "dirty",
+            "baseline_ref": "origin/phase6/mainline",
+            "baseline_commit": "def456",
+            "tracked_dirty": True,
+            "pending_change_state": "tracked_changes_pending",
+            "pending_change_count": 1,
+            "pending_changes": [" M agent_office/orchestration.py"],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, patch("agent_office.orchestration._git_source_state", return_value=dirty_state):
+            out = Path(tmpdir) / "ao-orch"
+            code, stdout, stderr = run_cli(
+                ["orchestrate", "run", "--task", "Review dirty state", "--mode", "static", "--out", str(out), "--json"]
+            )
+            payload = json.loads(stdout)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            phase_report = (out / "phase_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["source_state"], "dirty")
+        self.assertEqual(payload["source_commit"], "abc123")
+        self.assertEqual(payload["baseline_commit"], "def456")
+        self.assertTrue(manifest["source_state"]["tracked_dirty"])
+        self.assertEqual(manifest["source_state"]["pending_change_state"], "tracked_changes_pending")
+        self.assertIn("pending_change_state: tracked_changes_pending", phase_report)
+        self.assertIn(" M agent_office/orchestration.py", phase_report)
+        self.assertNotIn("Commit:" + " pending", phase_report)
 
     def test_orchestrate_run_is_byte_reproducible_for_same_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -90,7 +158,10 @@ class OrchestrationCliTests(unittest.TestCase):
             target = root / "target"
             target.mkdir()
             link = root / "link"
-            link.symlink_to(target, target_is_directory=True)
+            try:
+                link.symlink_to(target, target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink creation not supported: {exc}")
             code, stdout, stderr = run_cli(["orchestrate", "run", "--task", "Review symlink safety", "--mode", "static", "--out", str(link), "--json"])
 
         self.assertEqual(code, 2)

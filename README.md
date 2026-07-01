@@ -29,6 +29,7 @@ The first orchestration core accepts one high-level task and creates a white-box
 
 Current orchestration mode is static only. It does not call external providers, runtimes, adapters, or model APIs.
 Generated orchestration artifacts are deterministic for identical inputs and do not embed wall-clock timestamps.
+Generated phase reports record `source_commit`, `baseline_commit`, and explicit clean/dirty source state. They do not use a placeholder commit value; tracked uncommitted changes are reported as `pending_change_state=tracked_changes_pending`.
 
 ```bash
 python3 -m agent_office orchestrate run --task "Review this change safely" --mode static --out /tmp/ao-orch --json

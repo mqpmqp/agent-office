@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,15 @@ REQUIRED_FILES = (
     "verifier_packet.md",
     "synthesizer_packet.md",
     "judge_packet.md",
+    "phase_report.md",
     "README.md",
 )
+VALIDATION_COMMANDS = (
+    "python3 -m agent_office orchestrate inspect --path <artifact-dir> --json",
+    "python3 -m agent_office orchestrate validate --path <artifact-dir> --json",
+    "attach project-specific validation output before synthesis or judge approval",
+)
+REVIEW_GATE_HINT = "Review phase_report.md, manifest.json, task_graph.json, and validation output before approval or merge."
 FORBIDDEN_ACTIONS = [
     "do not read .env",
     "do not print env vars",
@@ -80,6 +88,7 @@ def orchestrate_run_payload(*, task: str, mode: str, out: str | Path) -> dict[st
     assignments = role_assignments(understanding["task_type"])
     graph = task_graph(task, assignments, understanding["task_type"])
     orchestration_id = _orchestration_id(task)
+    source_state = _git_source_state()
     created_files = list(REQUIRED_FILES)
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -95,6 +104,15 @@ def orchestrate_run_payload(*, task: str, mode: str, out: str | Path) -> dict[st
         "created_files": created_files,
         "next_actions": next_actions(understanding["task_type"]),
         "safety": dict(SAFETY),
+        "source_state": source_state,
+        "generated_artifacts": {
+            "artifact_root": ".",
+            "manifest_path": "manifest.json",
+            "phase_report_path": "phase_report.md",
+        },
+        "validation_commands": list(VALIDATION_COMMANDS),
+        "review_gate_hint": REVIEW_GATE_HINT,
+        "known_followups": [],
     }
     write_errors = _write_orchestration_files(out_path, manifest)
     errors.extend(write_errors)
@@ -103,11 +121,18 @@ def orchestrate_run_payload(*, task: str, mode: str, out: str | Path) -> dict[st
         "command": command,
         "path": str(out_path),
         "manifest_path": str(out_path / "manifest.json"),
+        "phase_report_path": str(out_path / "phase_report.md"),
         "orchestration_id": orchestration_id,
         "mode": "static",
         "task_type": understanding["task_type"],
         "external_call_made": False,
         "provider_calls": [],
+        "source_state": source_state["state"],
+        "source_commit": source_state["source_commit"],
+        "baseline_commit": source_state["baseline_commit"],
+        "validation_commands": _validation_commands_for_path(out_path),
+        "review_gate_hint": REVIEW_GATE_HINT,
+        "known_followups": [],
         "created_files": created_files if not errors else [],
         "warnings": warnings,
         "errors": errors,
@@ -122,6 +147,8 @@ def orchestrate_inspect_payload(*, path: str | Path) -> dict[str, Any]:
         task_graph_value = manifest.get("task_graph") if isinstance(manifest.get("task_graph"), dict) else {}
         understanding = manifest.get("task_understanding") if isinstance(manifest.get("task_understanding"), dict) else {}
         role_assignments_value = manifest.get("role_assignments") if isinstance(manifest.get("role_assignments"), list) else []
+        source_state = manifest.get("source_state") if isinstance(manifest.get("source_state"), dict) else {}
+        generated_artifacts = manifest.get("generated_artifacts") if isinstance(manifest.get("generated_artifacts"), dict) else {}
         summary = {
             "orchestration_id": manifest.get("orchestration_id"),
             "mode": manifest.get("mode"),
@@ -134,6 +161,12 @@ def orchestrate_inspect_payload(*, path: str | Path) -> dict[str, Any]:
             "graph_node_count": len(task_graph_value.get("nodes", [])),
             "graph_edge_count": len(task_graph_value.get("edges", [])),
             "next_actions": manifest.get("next_actions", []),
+            "source_state": source_state.get("state"),
+            "source_commit": source_state.get("source_commit"),
+            "baseline_commit": source_state.get("baseline_commit"),
+            "phase_report_path": generated_artifacts.get("phase_report_path"),
+            "validation_commands": manifest.get("validation_commands", []),
+            "review_gate_hint": manifest.get("review_gate_hint"),
         }
     return {
         "valid": bool(manifest and not errors),
@@ -296,6 +329,11 @@ def format_orchestrate_run(payload: dict[str, Any]) -> str:
             f"task_type: {payload.get('task_type')}",
             f"external_call_made: {str(payload.get('external_call_made')).lower()}",
             f"provider_calls: {payload.get('provider_calls')}",
+            f"source_state: {payload.get('source_state')}",
+            f"source_commit: {payload.get('source_commit')}",
+            f"baseline_commit: {payload.get('baseline_commit')}",
+            f"phase_report_path: {payload.get('phase_report_path')}",
+            f"review_gate_hint: {payload.get('review_gate_hint')}",
             f"created_files: {len(payload.get('created_files', []))}",
             f"valid: {str(payload.get('valid')).lower()}",
             f"errors: {len(payload.get('errors', []))}",
@@ -314,6 +352,11 @@ def format_orchestrate_inspect(payload: dict[str, Any]) -> str:
             f"role_count: {payload.get('role_count')}",
             f"graph_node_count: {payload.get('graph_node_count')}",
             f"external_call_made: {str(payload.get('external_call_made')).lower()}",
+            f"source_state: {payload.get('source_state')}",
+            f"source_commit: {payload.get('source_commit')}",
+            f"baseline_commit: {payload.get('baseline_commit')}",
+            f"phase_report_path: {payload.get('phase_report_path')}",
+            f"review_gate_hint: {payload.get('review_gate_hint')}",
             f"valid: {str(payload.get('valid')).lower()}",
             f"errors: {len(payload.get('errors', []))}",
         ]
@@ -339,6 +382,7 @@ def _write_orchestration_files(out: Path, manifest: dict[str, Any]) -> list[str]
         "task_understanding.md": _task_understanding_markdown(manifest),
         "decomposition.md": _decomposition_markdown(manifest),
         "task_graph.json": json.dumps(manifest["task_graph"], indent=2, ensure_ascii=False) + "\n",
+        "phase_report.md": _phase_report_markdown(manifest),
         "README.md": _readme_markdown(manifest),
     }
     for assignment in manifest["role_assignments"]:
@@ -396,6 +440,10 @@ def _readme_markdown(manifest: dict[str, Any]) -> str:
             f"- task_type: {manifest['task_understanding']['task_type']}",
             f"- external_call_made: {str(manifest['external_call_made']).lower()}",
             f"- provider_calls: {manifest['provider_calls']}",
+            f"- source_state: {manifest['source_state']['state']}",
+            f"- source_commit: {manifest['source_state']['source_commit']}",
+            f"- baseline_commit: {manifest['source_state']['baseline_commit']}",
+            f"- phase_report_path: {manifest['generated_artifacts']['phase_report_path']}",
             "",
             "## Files",
             *[f"- {filename}" for filename in REQUIRED_FILES],
@@ -405,6 +453,57 @@ def _readme_markdown(manifest: dict[str, Any]) -> str:
             "",
         ]
     )
+
+
+def _phase_report_markdown(manifest: dict[str, Any]) -> str:
+    source = manifest["source_state"]
+    artifacts = manifest["generated_artifacts"]
+    lines = [
+        "# AgentOffice Orchestration Phase Report",
+        "",
+        "marker: ORCHESTRATION_REVIEWABLE_PHASE_REPORT",
+        f"orchestration_id: {manifest['orchestration_id']}",
+        f"mode: {manifest['mode']}",
+        f"task_type: {manifest['task_understanding']['task_type']}",
+        "",
+        "## Generated Artifacts",
+        f"- artifact_root: {artifacts['artifact_root']}",
+        f"- manifest_path: {artifacts['manifest_path']}",
+        f"- phase_report_path: {artifacts['phase_report_path']}",
+        "",
+        "## Source State",
+        f"- source_branch: {source['source_branch']}",
+        f"- source_commit: {source['source_commit']}",
+        f"- source_state: {source['state']}",
+        f"- baseline_ref: {source['baseline_ref']}",
+        f"- baseline_commit: {source['baseline_commit']}",
+        f"- tracked_dirty: {str(source['tracked_dirty']).lower()}",
+        f"- pending_change_state: {source['pending_change_state']}",
+        f"- pending_change_count: {source['pending_change_count']}",
+        "",
+        "## Validation",
+    ]
+    lines.extend(f"- {command}" for command in manifest["validation_commands"])
+    lines.extend(
+        [
+            "",
+            "## Next Action",
+            f"- {manifest['review_gate_hint']}",
+            "",
+            "## Known Follow-ups",
+        ]
+    )
+    followups = manifest.get("known_followups", [])
+    if followups:
+        lines.extend(f"- {item}" for item in followups)
+    else:
+        lines.append("- none")
+    pending_changes = source.get("pending_changes", [])
+    if pending_changes:
+        lines.extend(["", "## Pending Tracked Changes"])
+        lines.extend(f"- {item}" for item in pending_changes)
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _packet_markdown(manifest: dict[str, Any], assignment: dict[str, Any]) -> str:
@@ -611,6 +710,7 @@ def _run_error_payload(command: str, out_path: Path, task: str, mode: str, warni
         "command": command,
         "path": str(out_path),
         "manifest_path": str(out_path / "manifest.json"),
+        "phase_report_path": str(out_path / "phase_report.md"),
         "orchestration_id": _orchestration_id(task),
         "mode": mode,
         "task_type": classify_task(task),
@@ -620,6 +720,78 @@ def _run_error_payload(command: str, out_path: Path, task: str, mode: str, warni
         "warnings": warnings,
         "errors": errors,
     }
+
+
+def _git_source_state() -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[1]
+    unavailable = {
+        "available": False,
+        "source_branch": "unavailable",
+        "source_commit": "unavailable",
+        "state": "unavailable",
+        "baseline_ref": "unavailable",
+        "baseline_commit": "unavailable",
+        "tracked_dirty": False,
+        "pending_change_state": "unavailable",
+        "pending_change_count": 0,
+        "pending_changes": [],
+    }
+    if _git_output(root, ["rev-parse", "--is-inside-work-tree"]) != "true":
+        return unavailable
+    head = _git_output(root, ["rev-parse", "HEAD"])
+    if not head:
+        return unavailable
+    branch = _git_output(root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "detached"
+    baseline_ref = _baseline_ref(root)
+    baseline_commit = head
+    if baseline_ref != "HEAD":
+        baseline_commit = _git_output(root, ["merge-base", "HEAD", baseline_ref]) or head
+    status_text = _git_output(root, ["status", "--porcelain=v1", "--untracked-files=no"])
+    pending_changes = status_text.splitlines() if status_text else []
+    tracked_dirty = bool(pending_changes)
+    return {
+        "available": True,
+        "source_branch": branch,
+        "source_commit": head,
+        "state": "dirty" if tracked_dirty else "clean",
+        "baseline_ref": baseline_ref,
+        "baseline_commit": baseline_commit,
+        "tracked_dirty": tracked_dirty,
+        "pending_change_state": "tracked_changes_pending" if tracked_dirty else "none",
+        "pending_change_count": len(pending_changes),
+        "pending_changes": pending_changes,
+    }
+
+
+def _baseline_ref(root: Path) -> str:
+    if _git_output(root, ["rev-parse", "--verify", "origin/phase6/mainline"]):
+        return "origin/phase6/mainline"
+    upstream = _git_output(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    return upstream or "HEAD"
+
+
+def _git_output(root: Path, args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _validation_commands_for_path(path: Path) -> list[str]:
+    return [
+        _command_text("orchestrate inspect", ["--path", str(path), "--json"]),
+        _command_text("orchestrate validate", ["--path", str(path), "--json"]),
+        "attach project-specific validation output before synthesis or judge approval",
+    ]
 
 
 def _add_check(checks: list[dict[str, str]], name: str, passed: bool) -> None:
