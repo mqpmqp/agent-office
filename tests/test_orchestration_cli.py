@@ -49,7 +49,8 @@ class OrchestrationCliTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "static")
         self.assertFalse(payload["external_call_made"])
         self.assertEqual(payload["provider_calls"], [])
-        self.assertEqual(list(manifest)[:6], ["schema_version", "orchestration_id", "mode", "task", "created_at", "external_call_made"])
+        self.assertEqual(list(manifest)[:6], ["schema_version", "orchestration_id", "mode", "task", "external_call_made", "provider_calls"])
+        self.assertNotIn("created_at", manifest)
         self.assertFalse(manifest["external_call_made"])
         self.assertEqual(manifest["provider_calls"], [])
         self.assertIn("task_understanding", manifest)
@@ -62,6 +63,40 @@ class OrchestrationCliTests(unittest.TestCase):
             self.assertTrue(files_present[filename], filename)
         for role in PACKET_ROLES:
             self.assertTrue(role_packets_present[role], role)
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_orchestrate_run_is_byte_reproducible_for_same_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first = root / "first"
+            second = root / "second"
+            task = "Review reproducibility polish before merge"
+            first_result = run_cli(["orchestrate", "run", "--task", task, "--mode", "static", "--out", str(first), "--json"])
+            second_result = run_cli(["orchestrate", "run", "--task", task, "--mode", "static", "--out", str(second), "--json"])
+            first_files = sorted(path.relative_to(first).as_posix() for path in first.rglob("*") if path.is_file())
+            second_files = sorted(path.relative_to(second).as_posix() for path in second.rglob("*") if path.is_file())
+            file_bytes = {filename: ((first / filename).read_bytes(), (second / filename).read_bytes()) for filename in first_files}
+
+        self.assertEqual(first_result[0], 0, first_result[2])
+        self.assertEqual(second_result[0], 0, second_result[2])
+        self.assertEqual(first_files, second_files)
+        self.assertEqual(first_files, sorted(REQUIRED_FILES))
+        for filename, (first_content, second_content) in file_bytes.items():
+            self.assertEqual(first_content, second_content, filename)
+
+    def test_orchestrate_run_refuses_symlink_output_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            link.symlink_to(target, target_is_directory=True)
+            code, stdout, stderr = run_cli(["orchestrate", "run", "--task", "Review symlink safety", "--mode", "static", "--out", str(link), "--json"])
+
+        self.assertEqual(code, 2)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIn("output_path_symlink_refused", payload["errors"])
         self.assertNotIn("Traceback", stdout + stderr)
 
     def test_task_classification_rules(self) -> None:
@@ -125,7 +160,6 @@ class OrchestrationCliTests(unittest.TestCase):
             self.assertFalse(payload["valid"])
             self.assertTrue(payload["errors"])
             self.assertNotIn("Traceback", stdout + stderr)
-
 
     def test_orchestrate_run_reports_output_directory_errors_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
