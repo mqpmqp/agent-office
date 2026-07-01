@@ -4,8 +4,8 @@ Marker: P30_ORCHESTRATION_PROVENANCE_DOC_TEST_POLISH_COMPLETE
 
 Branch: phase30/orchestration-provenance-doc-test-polish
 Baseline: b3614d562595e17a7ad52e12221cc4c4ff27978c
-Commit: final branch HEAD is emitted after this report is committed and pushed; this report is part of that commit.
-Pushed: final push status is emitted after commit/push.
+Commit: final branch HEAD is emitted in the P30 closeout; this report is part of that branch history.
+Pushed: yes; origin/phase30/orchestration-provenance-doc-test-polish was updated after validation.
 
 ## Changed files
 
