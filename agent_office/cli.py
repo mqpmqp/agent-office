@@ -80,6 +80,7 @@ from .review_artifact import (
     review_artifact_error_payload,
     self_check_review_artifact_payload,
 )
+from . import review_lifecycle
 from .run_bundle import (
     RunBundleError,
     export_review_error_payload,
@@ -1125,6 +1126,83 @@ def cmd_run_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    action = args.review_action
+    command = f"review {action}"
+    try:
+        if action == "bundle":
+            payload = review_lifecycle.review_bundle_payload(
+                baseline=args.baseline,
+                head=args.head,
+                branch=args.branch,
+                report=args.report,
+                out=args.out,
+                prompt_out=args.prompt_out,
+                title=args.title,
+                bundle_marker=args.bundle_marker,
+                review_marker=args.review_marker,
+                focus=args.focus,
+                project_root=PROJECT_ROOT,
+                run_validation=args.run_validation,
+                validation_fixture_dir=args.validation_fixture_dir,
+                allow_dirty=args.allow_dirty,
+                mkdirs=args.mkdirs,
+            )
+        elif action == "prompt":
+            payload = review_lifecycle.review_prompt_payload(
+                baseline=args.baseline,
+                head=args.head,
+                branch=args.branch,
+                report=args.report,
+                bundle=args.bundle,
+                out=args.out,
+                review_marker=args.review_marker,
+                title=args.title,
+                project_root=PROJECT_ROOT,
+                mkdirs=args.mkdirs,
+            )
+        elif action == "attest":
+            payload = review_lifecycle.review_attest_payload(
+                review_report=args.review_report,
+                expected_marker=args.expected_marker,
+                expected_verdict=args.expected_verdict,
+                out=args.out,
+                mkdirs=args.mkdirs,
+            )
+        elif action == "merge-packet":
+            payload = review_lifecycle.review_merge_packet_payload(
+                baseline=args.baseline,
+                source_branch=args.source_branch,
+                source_commit=args.source_commit,
+                implementation_report=args.implementation_report,
+                review_bundle=args.review_bundle,
+                review_attestation=args.review_attestation,
+                out=args.out,
+                merge_marker=args.merge_marker,
+                project_root=PROJECT_ROOT,
+                mkdirs=args.mkdirs,
+            )
+        else:
+            raise review_lifecycle.ReviewLifecycleError("review_unknown_action", "unknown review action", {"action": action})
+    except review_lifecycle.ReviewLifecycleError as exc:
+        payload = review_lifecycle.error_payload(command, exc)
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(review_lifecycle.format_error(payload), file=sys.stderr)
+        return exc.exit_code
+    except Exception as exc:
+        safe = review_lifecycle.ReviewLifecycleError("review_unexpected_error", "unexpected review lifecycle error", {"type": type(exc).__name__})
+        payload = review_lifecycle.error_payload(command, safe)
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(review_lifecycle.format_error(payload), file=sys.stderr)
+        return 2
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else review_lifecycle.format_review_lifecycle_success(payload))
+    return 0
+
+
 def cmd_review_artifact(args: argparse.Namespace) -> int:
     if args.review_artifact_action == "registry":
         action = args.registry_action
@@ -1464,6 +1542,61 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifact", help="Project-local artifact file to intake as actor result metadata.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p.set_defaults(func=cmd_run_bundle)
+
+    p = sub.add_parser("review", help="Generate phase lifecycle review bundles, prompts, attestations, and merge packets.")
+    review_sub = p.add_subparsers(dest="review_action", required=True)
+    bundle = review_sub.add_parser("bundle", help="Generate a Markdown review bundle and Claude prompt without provider calls.")
+    bundle.add_argument("--baseline", required=True, help="Baseline commit for diff evidence.")
+    bundle.add_argument("--head", required=True, help="Reviewed head commit.")
+    bundle.add_argument("--branch", required=True, help="Reviewed branch name.")
+    bundle.add_argument("--report", required=True, help="Implementation report Markdown path.")
+    bundle.add_argument("--out", required=True, help="Review bundle Markdown output path.")
+    bundle.add_argument("--prompt-out", required=True, help="Claude review prompt output path.")
+    bundle.add_argument("--title", required=True, help="Review bundle title.")
+    bundle.add_argument("--bundle-marker", required=True, help="Marker written into the generated bundle.")
+    bundle.add_argument("--review-marker", required=True, help="Marker Claude must output on PASS.")
+    bundle.add_argument("--focus", help="Review focus text or a path to a UTF-8 focus file.")
+    bundle.add_argument("--run-validation", action="store_true", help="Run the default validation command set and capture transcripts.")
+    bundle.add_argument("--validation-fixture-dir", help="Read fixed validation transcripts from a fixture directory instead of running commands.")
+    bundle.add_argument("--allow-dirty", action="store_true", help="Allow tracked dirty state and record it in the bundle.")
+    bundle.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
+    bundle.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    bundle.set_defaults(func=cmd_review)
+
+    prompt = review_sub.add_parser("prompt", help="Generate a Claude artifact review prompt from existing bundle metadata.")
+    prompt.add_argument("--baseline", required=True, help="Baseline commit for the review.")
+    prompt.add_argument("--head", required=True, help="Reviewed head commit.")
+    prompt.add_argument("--branch", required=True, help="Reviewed branch name.")
+    prompt.add_argument("--report", required=True, help="Implementation report Markdown path.")
+    prompt.add_argument("--bundle", required=True, help="Review bundle Markdown path.")
+    prompt.add_argument("--out", required=True, help="Claude prompt output path.")
+    prompt.add_argument("--review-marker", required=True, help="Marker Claude must output on PASS.")
+    prompt.add_argument("--title", help="Prompt title.")
+    prompt.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
+    prompt.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    prompt.set_defaults(func=cmd_review)
+
+    attest = review_sub.add_parser("attest", help="Verify Claude review verdict and marker, then write an attestation.")
+    attest.add_argument("--review-report", required=True, help="Claude review output Markdown/text path.")
+    attest.add_argument("--expected-marker", required=True, help="Required PASS marker.")
+    attest.add_argument("--expected-verdict", default="pass", help="Expected verdict. Default: pass.")
+    attest.add_argument("--out", required=True, help="Attestation Markdown output path.")
+    attest.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
+    attest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    attest.set_defaults(func=cmd_review)
+
+    merge_packet = review_sub.add_parser("merge-packet", help="Generate a merge-gate packet without executing merge or push.")
+    merge_packet.add_argument("--baseline", required=True, help="Mainline baseline before merge.")
+    merge_packet.add_argument("--source-branch", required=True, help="Source branch to merge later.")
+    merge_packet.add_argument("--source-commit", required=True, help="Source commit to merge later.")
+    merge_packet.add_argument("--implementation-report", required=True, help="Implementation report Markdown path.")
+    merge_packet.add_argument("--review-bundle", required=True, help="Review bundle Markdown path.")
+    merge_packet.add_argument("--review-attestation", help="Optional Claude review attestation Markdown path.")
+    merge_packet.add_argument("--out", required=True, help="Merge-gate packet Markdown output path.")
+    merge_packet.add_argument("--merge-marker", default="MERGE_GATE_PASS_MAINLINE_SYNCED", help="Suggested merge-gate completion marker.")
+    merge_packet.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
+    merge_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    merge_packet.set_defaults(func=cmd_review)
 
     p = sub.add_parser("review-artifact", help="Export, verify, or close a Claude review artifact without calling providers.")
     review_sub = p.add_subparsers(dest="review_artifact_action", required=True)

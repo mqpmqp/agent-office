@@ -388,6 +388,22 @@ Run `sha256sum -c` from the artifact directory:
 cd /tmp && sha256sum -c agentoffice-p14-review.md.sha256
 ```
 
+## Phase Lifecycle Review System
+
+P31 adds a built-in phase lifecycle review system for the standard AgentOffice release flow:
+Codex implements on the VPS, captures validation evidence, generates a single artifact review bundle and Claude review prompt, records Claude's artifact-based review with a structural attestation, and generates a merge-gate packet for an independent merge gate.
+
+```bash
+python3 -m agent_office review bundle --help
+python3 -m agent_office review prompt --help
+python3 -m agent_office review attest --help
+python3 -m agent_office review merge-packet --help
+```
+
+The bundle and prompt commands prepare review materials; they do not call providers, runtimes, models, or adapters. Claude reviews the uploaded bundle as artifact-based evidence and must not claim it personally ran VPS tests unless it actually did. The attestation verifier checks stable structure signals such as `verdict: pass` and the expected review marker; it does not replace human judgment about the review quality. The merge-packet generator writes a checklist/report-ready Markdown packet only; it does not execute merge, push, tag, or default-branch mutation. The independent merge gate still performs preflight, validation, merge, post-merge validation, and push under explicit authorization.
+
+Safety boundaries remain unchanged: lifecycle review commands refuse `.env` input paths, do not print environment variables, do not trigger real provider/model calls, reject symlink output paths, and return stable JSON/text errors without traceback.
+
 JSON and text output include the exact directory-aware verification command as `sha256_verify_command` / `Verification command`.
 
 Review gate status can be recorded directly in the artifact:
