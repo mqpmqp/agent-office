@@ -4,7 +4,7 @@ Marker: P27_REVIEW_FIX_COMPLETE
 Branch: phase27/p27-orchestration-review-fix
 Base branch: phase27/fugu-like-orchestration-core
 Original P27 commit: 8afbe35022b1d862b9b517309c570d7c25ab9544
-Commit: pending at report generation; final branch HEAD is authoritative after commit/push.
+Commit: 4818ca28b1255d1a5322216a4eef7ec1c975c70f
 
 ## Finding
 Static self-review found that `orchestrate run` could raise a traceback when the requested output path had a parent component that was an existing file rather than a directory.

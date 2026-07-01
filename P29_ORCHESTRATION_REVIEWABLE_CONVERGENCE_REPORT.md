@@ -19,6 +19,9 @@ Changed files:
 - agent_office/orchestration.py
 - tests/test_orchestration_cli.py
 - P29_ORCHESTRATION_REVIEWABLE_CONVERGENCE_REPORT.md
+- P27_FUGU_LIKE_ORCHESTRATION_CORE_REPORT.md
+- P27_ORCHESTRATION_REVIEW_FIX_REPORT.md
+- P28_ORCHESTRATION_REPRODUCIBILITY_POLISH_REPORT.md
 
 What changed:
 - Added deterministic `phase_report.md` generation to static orchestration artifacts.
@@ -27,6 +30,7 @@ What changed:
 - Added text formatter output for source state and phase report path.
 - Added a symlink portability guard in the focused orchestration CLI test without weakening Linux symlink refusal behavior.
 - Documented generated phase report commit/source-state semantics in README.
+- Replaced historical orchestration report commit placeholders with their actual reviewed branch commits.
 
 Validation commands:
 - python3 -m compileall agent_office tests
@@ -52,6 +56,8 @@ Validation result summary:
 - focused orchestration CLI tests: passed, 10 tests
 - git diff --check: passed
 - focused manual P29 run/inspect/validate smoke: passed
+- post-commit clean source-state smoke: passed
+- report-only placeholder cleanup check: passed
 
 Safety summary:
 - .env read: no

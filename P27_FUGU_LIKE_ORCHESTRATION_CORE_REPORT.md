@@ -3,7 +3,7 @@
 Marker: P27_FUGU_LIKE_ORCHESTRATION_CORE_COMPLETE
 Branch: phase27/fugu-like-orchestration-core
 Base: origin/phase6/mainline @ 1f00c165507bc17a387c6ae518b7e9919c90ce5a
-Commit: pending at report generation; final branch HEAD is authoritative after commit/push.
+Commit: 8afbe35022b1d862b9b517309c570d7c25ab9544
 
 ## Scope
 Added a static, auditable multi-agent orchestration surface for AgentOffice.
