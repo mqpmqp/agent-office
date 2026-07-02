@@ -52,7 +52,14 @@ python3 -m agent_office runtime packet --workspace .ai/workspaces/demo --json
 python3 -m agent_office runtime replay --workspace .ai/workspaces/demo --json
 python3 -m agent_office runtime evidence --workspace .ai/workspaces/demo --out .ai/workspaces/demo/evidence.json --format json --json
 python3 -m agent_office runtime close --workspace .ai/workspaces/demo --out .ai/workspaces/demo/closure_packet.json --json
+python3 -m agent_office runtime governance --workspace .ai/workspaces/demo --closure-packet .ai/workspaces/demo/closure_packet.json --evidence-out .ai/workspaces/demo/runtime-governance-evidence.json --format json
+python3 -m agent_office runtime job create --workspace .ai/workspaces/demo --job-id demo-job --json
+python3 -m agent_office runtime job status --workspace .ai/workspaces/demo --job-id demo-job --json
+python3 -m agent_office runtime worker-adapter --list --json
+python3 -m agent_office runtime worker-adapter --name external-prototype --describe --json
 ```
+
+`external-prototype` is a contract stub only; it does not call models, providers, browsers, shells, or external workers.
 
 
 ## Claude Token Rule

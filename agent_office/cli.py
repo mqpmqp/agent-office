@@ -51,12 +51,15 @@ from .runtime_foundation import (
     runtime_close_payload,
     runtime_evidence_payload,
     runtime_error_payload,
+    runtime_governance_payload,
     runtime_init_payload,
+    runtime_job_payload,
     runtime_packet_payload,
     runtime_plan_payload,
     runtime_replay_payload,
     runtime_run_payload,
     runtime_status_payload,
+    runtime_worker_adapter_payload,
 )
 from .objectives import (
     ObjectiveSpecError,
@@ -1393,6 +1396,8 @@ def cmd_orchestrate(args: argparse.Namespace) -> int:
 def cmd_runtime(args: argparse.Namespace) -> int:
     action = args.runtime_action
     command = f"runtime {action}"
+    if action == "job" and getattr(args, "job_action", None):
+        command = f"runtime job {args.job_action}"
     try:
         if action == "init":
             payload = runtime_init_payload(workspace=args.workspace, goal=args.goal, project_root=PROJECT_ROOT)
@@ -1415,8 +1420,14 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             payload = runtime_replay_payload(workspace=args.workspace, project_root=PROJECT_ROOT)
         elif action == "evidence":
             payload = runtime_evidence_payload(workspace=args.workspace, out=args.out, evidence_format=args.format, project_root=PROJECT_ROOT)
-        elif action == "close":
+        elif action in {"close", "closure-packet"}:
             payload = runtime_close_payload(workspace=args.workspace, out=args.out, project_root=PROJECT_ROOT)
+        elif action == "governance":
+            payload = runtime_governance_payload(workspace=args.workspace, closure_packet=args.closure_packet, evidence_out=args.evidence_out, evidence_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "job":
+            payload = runtime_job_payload(action=args.job_action, workspace=args.workspace, job_id=getattr(args, "job_id", None), reason=getattr(args, "reason", None), project_root=PROJECT_ROOT)
+        elif action == "worker-adapter":
+            payload = runtime_worker_adapter_payload(list_adapters=bool(args.list_adapters), name=args.name, describe=bool(args.describe))
         else:
             raise RuntimeFoundationError("runtime_unknown_action", "unknown runtime action")
     except RuntimeFoundationError as exc:
@@ -1429,8 +1440,10 @@ def cmd_runtime(args: argparse.Namespace) -> int:
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runtime_payload(payload))
     if action == "replay":
         return 0 if payload["replay_valid"] else 2
-    if action == "close":
+    if action in {"close", "closure-packet"}:
         return 0 if payload["closure_packet_valid"] else 2
+    if action == "governance":
+        return 0 if payload["runtime_governance_ready"] else 2
     return 0
 
 
@@ -1650,7 +1663,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_plan.set_defaults(func=cmd_runtime)
     runtime_run = runtime_sub.add_parser("run", help="Run or preview the local deterministic runtime loop.")
     runtime_run.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
-    runtime_run.add_argument("--adapter", required=True, help="Local adapter name. Supported: local-static, noop.")
+    runtime_run.add_argument("--adapter", required=True, help="Runtime adapter name. Supported: local-static, noop, external-prototype.")
     runtime_run.add_argument("--dry-run", action="store_true", help="Preview ready tasks without mutating task state.")
     runtime_run.add_argument("--execute-local", action="store_true", help="Execute deterministic local/static task results.")
     runtime_run.add_argument("--reset", action="store_true", help="Reset task statuses before --execute-local.")
@@ -1679,6 +1692,52 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_close.add_argument("--out", help="Optional project-local closure packet JSON output path.")
     runtime_close.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_close.set_defaults(func=cmd_runtime)
+    runtime_closure_packet = runtime_sub.add_parser("closure-packet", help="Alias for runtime close; writes a runtime closure packet.")
+    runtime_closure_packet.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_closure_packet.add_argument("--out", help="Optional project-local closure packet JSON output path.")
+    runtime_closure_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_closure_packet.set_defaults(func=cmd_runtime)
+    runtime_governance = runtime_sub.add_parser("governance", help="Write runtime governance evidence from closure/readback artifacts.")
+    runtime_governance.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_governance.add_argument("--closure-packet", required=True, help="Project-local runtime closure packet JSON path.")
+    runtime_governance.add_argument("--evidence-out", required=True, help="Project-local governance evidence output path.")
+    runtime_governance.add_argument("--format", choices=["json", "text"], default="json", help="Governance evidence output format. Default: json.")
+    runtime_governance.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_governance.set_defaults(func=cmd_runtime)
+    runtime_job = runtime_sub.add_parser("job", help="Create and read local deterministic runtime job state.")
+    runtime_job_sub = runtime_job.add_subparsers(dest="job_action", required=True)
+    runtime_job_create = runtime_job_sub.add_parser("create", help="Create a local runtime job state file.")
+    runtime_job_create.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_job_create.add_argument("--job-id", required=True, help="Stable runtime job id.")
+    runtime_job_create.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_job_create.set_defaults(func=cmd_runtime)
+    runtime_job_status = runtime_job_sub.add_parser("status", help="Read local runtime job state.")
+    runtime_job_status.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_job_status.add_argument("--job-id", required=True, help="Stable runtime job id.")
+    runtime_job_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_job_status.set_defaults(func=cmd_runtime)
+    runtime_job_cancel = runtime_job_sub.add_parser("cancel", help="Cancel a local runtime job state.")
+    runtime_job_cancel.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_job_cancel.add_argument("--job-id", required=True, help="Stable runtime job id.")
+    runtime_job_cancel.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_job_cancel.set_defaults(func=cmd_runtime)
+    runtime_job_fail = runtime_job_sub.add_parser("fail", help="Mark a local runtime job state failed.")
+    runtime_job_fail.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_job_fail.add_argument("--job-id", required=True, help="Stable runtime job id.")
+    runtime_job_fail.add_argument("--reason", required=True, help="Deterministic failure reason.")
+    runtime_job_fail.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_job_fail.set_defaults(func=cmd_runtime)
+    runtime_job_resume = runtime_job_sub.add_parser("resume", help="Resume an allowed local runtime job state.")
+    runtime_job_resume.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_job_resume.add_argument("--job-id", required=True, help="Stable runtime job id.")
+    runtime_job_resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_job_resume.set_defaults(func=cmd_runtime)
+    runtime_worker_adapter = runtime_sub.add_parser("worker-adapter", help="List or describe runtime worker adapter contracts.")
+    runtime_worker_adapter.add_argument("--list", dest="list_adapters", action="store_true", help="List runtime worker adapters.")
+    runtime_worker_adapter.add_argument("--name", help="Runtime worker adapter name to describe.")
+    runtime_worker_adapter.add_argument("--describe", action="store_true", help="Describe one runtime worker adapter contract.")
+    runtime_worker_adapter.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_adapter.set_defaults(func=cmd_runtime)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
