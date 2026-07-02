@@ -309,6 +309,39 @@ class ReviewLifecycleCliTests(unittest.TestCase):
         self.assertEqual(second_result[0], 0, second_result[2])
         self.assertEqual(first_text, second_text)
 
+    def test_default_validation_commands_include_review_lifecycle_suite(self) -> None:
+        commands = [" ".join(command.argv) for command in review_lifecycle.DEFAULT_VALIDATION_COMMANDS]
+        self.assertIn("python3 -m unittest tests.test_review_lifecycle_cli", commands)
+
+    def test_validation_fixture_capture_records_review_lifecycle_command_and_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, tempfile.TemporaryDirectory() as fixture_dir:
+            root = Path(tmpdir)
+            baseline, head, report = self._repo(root)
+            out = Path(export_dir) / "bundle.md"
+            prompt = Path(export_dir) / "prompt.md"
+            fixture = Path(fixture_dir)
+            for command in review_lifecycle.DEFAULT_VALIDATION_COMMANDS:
+                stem = review_lifecycle._slug(command.name)
+                (fixture / f"{stem}.exit").write_text("0\n", encoding="utf-8")
+                (fixture / f"{stem}.stdout").write_text(f"captured {command.name}\n", encoding="utf-8")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(self._bundle_args(baseline, head, report, out, prompt, "--validation-fixture-dir", str(fixture), "--json"))
+            bundle = out.read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(json.loads(stdout)["ok"])
+        self.assertIn("### tests.test_review_lifecycle_cli", bundle)
+        self.assertIn("argv: python3 -m unittest tests.test_review_lifecycle_cli", bundle)
+        self.assertIn("captured tests.test_review_lifecycle_cli", bundle)
+        self.assertNotIn("Traceback", stdout + stderr + bundle)
+
+    def test_default_validation_commands_do_not_reenter_review_bundle_validation(self) -> None:
+        for command in review_lifecycle.DEFAULT_VALIDATION_COMMANDS:
+            joined = " ".join(command.argv)
+            with self.subTest(command=command.name):
+                self.assertNotIn("review bundle", joined)
+                self.assertNotIn("--run-validation", joined)
+
     def test_review_help_is_available(self) -> None:
         for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"]):
             with self.subTest(argv=argv):
