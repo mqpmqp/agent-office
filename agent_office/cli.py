@@ -1192,6 +1192,21 @@ def cmd_review(args: argparse.Namespace) -> int:
                 allow_dirty=args.allow_dirty,
                 mkdirs=args.mkdirs,
             )
+        elif action == "codex-deliver":
+            payload = review_lifecycle.review_codex_deliver_payload(
+                source=args.source,
+                target=args.target,
+                expected_source_head=args.expected_source_head,
+                expected_target_head=args.expected_target_head,
+                out=args.out,
+                project_root=PROJECT_ROOT,
+                phase=args.phase,
+                run_id=args.run_id,
+                merge_authorized=args.merge_authorized,
+                push_authorized=args.push_authorized,
+                allow_dirty=args.allow_dirty,
+                mkdirs=args.mkdirs,
+            )
         else:
             raise review_lifecycle.ReviewLifecycleError("review_unknown_action", "unknown review action", {"action": action})
     except review_lifecycle.ReviewLifecycleError as exc:
@@ -1617,6 +1632,21 @@ def build_parser() -> argparse.ArgumentParser:
     codex_gate.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
     codex_gate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     codex_gate.set_defaults(func=cmd_review)
+
+    codex_deliver = review_sub.add_parser("codex-deliver", help="Generate a one-click Codex delivery readiness report without merge or push by default.")
+    codex_deliver.add_argument("--source", required=True, help="Source branch for the delivery run.")
+    codex_deliver.add_argument("--target", required=True, help="Target branch for the delivery run.")
+    codex_deliver.add_argument("--expected-source-head", required=True, help="Expected source branch head commit.")
+    codex_deliver.add_argument("--expected-target-head", required=True, help="Expected target branch head commit.")
+    codex_deliver.add_argument("--out", required=True, help="Codex delivery runner report Markdown output path.")
+    codex_deliver.add_argument("--phase", help="Phase id recorded in the report.")
+    codex_deliver.add_argument("--run-id", help="Run id recorded in the report.")
+    codex_deliver.add_argument("--merge-authorized", action="store_true", help="Record explicit merge authorization for the delivery run.")
+    codex_deliver.add_argument("--push-authorized", action="store_true", help="Record explicit push authorization for the delivery run.")
+    codex_deliver.add_argument("--allow-dirty", action="store_true", help="Allow tracked dirty state and record it as readiness evidence.")
+    codex_deliver.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
+    codex_deliver.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    codex_deliver.set_defaults(func=cmd_review)
 
     p = sub.add_parser("review-artifact", help="Export, verify, or close a Claude review artifact without calling providers.")
     review_sub = p.add_subparsers(dest="review_artifact_action", required=True)

@@ -391,9 +391,10 @@ cd /tmp && sha256sum -c agentoffice-p14-review.md.sha256
 ## Phase Lifecycle Review System
 
 The standard AgentOffice release flow is Codex-only by default:
-Codex implementation -> Codex self-review -> full validation -> Codex merge gate -> push mainline.
+Codex implementation -> codex-deliver safe report -> full validation -> authorized merge gate -> push mainline.
 
 ```bash
+python3 -m agent_office review codex-deliver --help
 python3 -m agent_office review codex-gate --help
 python3 -m agent_office review bundle --help
 python3 -m agent_office review prompt --help
@@ -404,12 +405,14 @@ python3 -m agent_office review merge-packet --help
 Standard phase sequence:
 
 1. Implement on the VPS and keep the tracked working tree scoped to the phase.
-2. Run Codex self-review with `git diff --name-status`, `git diff --stat`, `git diff --check`, and an out-of-scope change check.
-3. Run full validation before commit and again inside the separately authorized merge gate.
-4. Optionally run `review codex-gate` to generate a static readiness report for the reviewed branch and commit range.
+2. Run `review codex-deliver` in safe mode to write a stable JSON/text readiness report for the source and target heads.
+3. Run Codex self-review with `git diff --name-status`, `git diff --stat`, `git diff --check`, and an out-of-scope change check.
+4. Run full validation before commit and again inside the separately authorized merge gate.
 5. Execute merge and push only in a separately authorized Codex merge gate.
 
-`review codex-gate` records the Codex-only workflow, changed files, diff check, required validation checklist, and safety boundaries. It does not execute merge, push, tag, providers, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation. Codex-only does not mean skipping validation; merge gates remain explicit operator actions.
+`review codex-deliver` records phase/run identity, source and target heads, origin heads, tracked cleanliness, allowed untracked artifacts, changed files, diff stat, diff check, validation checklist, merge/push authorization, post-merge placeholders, final origin target status, blockers, and safety boundaries. Its default mode is safe and non-destructive; merge/push readiness requires explicit `--merge-authorized`, `--push-authorized`, `--expected-source-head`, and `--expected-target-head`.
+
+`review codex-gate` remains a smaller static readiness report for a reviewed branch and commit range. It does not execute merge, push, tag, providers, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation. Codex-only does not mean skipping validation; merge gates remain explicit operator actions.
 
 `review bundle`, `review prompt`, `review attest`, and `review merge-packet` remain available as optional/legacy/lower-level artifact-review tooling. They are not the default mandatory path for new implementation branches. `review-artifact` remains the lower-level commit-range artifact exporter, verifier, registry, and closure toolkit for existing review artifacts and run bundles.
 
