@@ -63,9 +63,12 @@ python3 -m agent_office runtime worker-result intake --workspace .ai/workspaces/
 python3 -m agent_office runtime worker-result replay --workspace .ai/workspaces/demo --packet .ai/workspaces/demo/worker-invocation-packet.json --result .ai/workspaces/demo/worker-result.json --json
 python3 -m agent_office runtime worker-result audit-closure --workspace .ai/workspaces/demo --packet .ai/workspaces/demo/worker-invocation-packet.json --result .ai/workspaces/demo/worker-result.json --out .ai/workspaces/demo/worker-audit-closure.json --json
 python3 -m agent_office runtime worker-result delivery-bundle --workspace .ai/workspaces/demo --packet .ai/workspaces/demo/worker-invocation-packet.json --result .ai/workspaces/demo/worker-result.json --audit-closure .ai/workspaces/demo/worker-audit-closure.json --out .ai/workspaces/demo/worker-delivery-bundle.json --json
+python3 -m agent_office runtime worker-result reviewer-attestation --reviewer-artifact .ai/workspaces/demo/reviewer-output.md --marker R20_REVIEW_COMPLETE --out .ai/workspaces/demo/reviewer-attestation.json --json
+python3 -m agent_office runtime worker-result closure-evidence --reviewer-attestation .ai/workspaces/demo/reviewer-attestation.json --out .ai/workspaces/demo/closure-evidence.json --json
+python3 -m agent_office runtime worker-result merge-readiness --delivery-bundle .ai/workspaces/demo/worker-delivery-bundle.json --reviewer-attestation .ai/workspaces/demo/reviewer-attestation.json --closure-evidence .ai/workspaces/demo/closure-evidence.json --baseline <target-head> --source-branch <source-branch> --source-head <source-head> --target-branch phase6/mainline --out .ai/workspaces/demo/merge-readiness.json --json
 ```
 
-Worker invocation packets, worker result intake, replay, audit closure, and delivery bundles are static governance contracts. They do not call models, providers, browsers, shells, or external workers.
+Worker invocation packets, worker result intake, replay, audit closure, delivery bundles, reviewer attestations, closure evidence imports, and merge-readiness packets are static governance contracts. They do not call models, providers, browsers, shells, external workers, or real reviewers. Reviewer attestation reads a saved Markdown/JSON artifact and records its path, SHA256, byte count, verdict, marker, caveat, findings summary, reviewed artifacts, and safety caveat. Closure evidence imports only a JSON reviewer attestation into an explicit project-local output path. Merge readiness composes the delivery bundle, reviewer attestation, and closure evidence into a deterministic packet whose next action is `safe delivery` when all static gates are ready, otherwise `stop`.
 
 
 ## Claude Token Rule
