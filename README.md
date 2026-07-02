@@ -390,10 +390,11 @@ cd /tmp && sha256sum -c agentoffice-p14-review.md.sha256
 
 ## Phase Lifecycle Review System
 
-P31 adds a built-in phase lifecycle review system for the standard AgentOffice release flow:
-Codex implements on the VPS, captures validation evidence, generates a single artifact review bundle and Claude review prompt, records Claude's artifact-based review with a structural attestation, and generates a merge-gate packet for an independent merge gate.
+The standard AgentOffice release flow is Codex-only by default:
+Codex implementation -> Codex self-review -> full validation -> Codex merge gate -> push mainline.
 
 ```bash
+python3 -m agent_office review codex-gate --help
 python3 -m agent_office review bundle --help
 python3 -m agent_office review prompt --help
 python3 -m agent_office review attest --help
@@ -402,15 +403,17 @@ python3 -m agent_office review merge-packet --help
 
 Standard phase sequence:
 
-1. Run `review bundle --run-validation` after implementation validation to create the review bundle and initial Claude prompt.
-2. Hand the bundle and prompt to Claude for artifact-based review; do not synthesize or summarize a PASS as Claude output.
-3. Save Claude's full output, then run `review attest` against the saved report and expected phase marker.
-4. Run `review merge-packet` with the implementation report, bundle, and passing attestation to prepare the independent merge gate packet.
-5. Execute merge and push only in a separately authorized merge gate.
+1. Implement on the VPS and keep the tracked working tree scoped to the phase.
+2. Run Codex self-review with `git diff --name-status`, `git diff --stat`, `git diff --check`, and an out-of-scope change check.
+3. Run full validation before commit and again inside the separately authorized merge gate.
+4. Optionally run `review codex-gate` to generate a static readiness report for the reviewed branch and commit range.
+5. Execute merge and push only in a separately authorized Codex merge gate.
 
-`review` is the phase lifecycle path for new implementation branches: bundle, prompt, attestation, and merge packet. `review-artifact` remains the lower-level commit-range artifact exporter, verifier, registry, and closure toolkit for existing review artifacts and run bundles.
+`review codex-gate` records the Codex-only workflow, changed files, diff check, required validation checklist, and safety boundaries. It does not execute merge, push, tag, providers, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation. Codex-only does not mean skipping validation; merge gates remain explicit operator actions.
 
-The bundle and prompt commands prepare review materials; they do not call providers, runtimes, models, or adapters. Claude reviews the uploaded bundle as artifact-based evidence and must not claim it personally ran VPS tests unless it actually did. The attestation verifier checks stable structure signals such as `verdict: pass` and the expected review marker; it does not replace human judgment about the review quality. The merge-packet generator writes a checklist/report-ready Markdown packet only; it does not execute merge, push, tag, or default-branch mutation. The independent merge gate still performs preflight, validation, merge, post-merge validation, and push under explicit authorization.
+`review bundle`, `review prompt`, `review attest`, and `review merge-packet` remain available as optional/legacy/lower-level artifact-review tooling. They are not the default mandatory path for new implementation branches. `review-artifact` remains the lower-level commit-range artifact exporter, verifier, registry, and closure toolkit for existing review artifacts and run bundles.
+
+The bundle and prompt commands prepare review materials; they do not call providers, runtimes, models, or adapters. Claude reviews uploaded bundles only as artifact-based evidence and must not claim it personally ran VPS tests unless it actually did. The attestation verifier checks stable structure signals such as `verdict: pass` and the expected review marker; it is optional/legacy evidence, not a default merge prerequisite. The merge-packet generator writes a checklist/report-ready Markdown packet only; it does not execute merge, push, tag, or default-branch mutation. The independent merge gate still performs preflight, validation, merge, post-merge validation, and push under explicit authorization.
 
 Safety boundaries remain unchanged: lifecycle review commands refuse `.env` input paths, do not print environment variables, do not trigger real provider/model calls, reject symlink output paths, and return stable JSON/text errors without traceback.
 
