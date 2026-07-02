@@ -91,6 +91,34 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertNotIn("Traceback", stdout + stderr)
 
+
+    def _prepare_worker_delivery_bundle(self, root: Path) -> None:
+        self._prepare_worker_workspace(root)
+        packet = run_cli([
+            "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/worker-invocation-packet.json", "--json"
+        ], root)
+        self.assertEqual(packet[0], 0, packet[2])
+        result_path = root / ".ai" / "workspaces" / "demo" / "worker-result.json"
+        result_payload = self._worker_result()
+        result_payload["task_results"] = [
+            {"task_id": "inspect", "status": "completed", "summary": "static worker result accepted"},
+            {"task_id": "implement", "status": "completed", "summary": "static worker result accepted"},
+            {"task_id": "review", "status": "completed", "summary": "static worker result accepted"},
+        ]
+        result_path.write_text(json.dumps(result_payload), encoding="utf-8")
+        intake = run_cli([
+            "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--json"
+        ], root)
+        self.assertEqual(intake[0], 0, intake[2])
+        audit = run_cli([
+            "runtime", "worker-result", "audit-closure", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--out", ".ai/workspaces/demo/worker-audit-closure.json", "--json"
+        ], root)
+        self.assertEqual(audit[0], 0, audit[2])
+        delivery = run_cli([
+            "runtime", "worker-result", "delivery-bundle", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--audit-closure", ".ai/workspaces/demo/worker-audit-closure.json", "--out", ".ai/workspaces/demo/worker-delivery-bundle.json", "--json"
+        ], root)
+        self.assertEqual(delivery[0], 0, delivery[2])
+
     def test_init_json_positive_creates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1132,6 +1160,193 @@ class RuntimeFoundationCliTests(unittest.TestCase):
             self.assertEqual(json.loads(symlink_result[1])["error_code"], "runtime_worker_audit_closure_output_symlink")
             combined += symlink_result[1] + symlink_result[2]
         self.assertNotIn("Traceback", combined)
+
+
+    def test_worker_result_reviewer_attestation_closure_evidence_and_merge_readiness_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_worker_delivery_bundle(root)
+            base = root / ".ai" / "workspaces" / "demo"
+            reviewer_output = base / "reviewer-output.md"
+            reviewer_output.write_text(
+                "\n".join([
+                    "# Static Reviewer Output",
+                    "verdict: PASS",
+                    "marker: R20_REVIEW_COMPLETE",
+                    "review_type: artifact",
+                    "review_caveat: artifact-only reviewer output",
+                    "findings_summary: no blockers",
+                    "reviewed_artifacts: .ai/workspaces/demo/worker-delivery-bundle.json",
+                    "reviewed_bundle_summary: worker delivery bundle ready",
+                    "safety_caveat: no provider/model/browser/shell execution",
+                    "R20_REVIEW_COMPLETE",
+                ]),
+                encoding="utf-8",
+            )
+            attestation_json = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/reviewer-output.md", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/reviewer-attestation.json", "--json"
+            ], root)
+            attestation_text = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/reviewer-output.md", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/reviewer-attestation.txt", "--format", "text", "--json"
+            ], root)
+            closure_json = run_cli([
+                "runtime", "worker-result", "closure-evidence", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--out", ".ai/workspaces/demo/closure-evidence.json", "--json"
+            ], root)
+            closure_text = run_cli([
+                "runtime", "worker-result", "closure-evidence", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--out", ".ai/workspaces/demo/closure-evidence.txt", "--format", "text", "--json"
+            ], root)
+            merge_json = run_cli([
+                "runtime", "worker-result", "merge-readiness", "--delivery-bundle", ".ai/workspaces/demo/worker-delivery-bundle.json", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--closure-evidence", ".ai/workspaces/demo/closure-evidence.json", "--baseline", "base123", "--source-branch", "phase44/r20-r22", "--source-head", "head123", "--target-branch", "phase6/mainline", "--out", ".ai/workspaces/demo/merge-readiness.json", "--json"
+            ], root)
+            merge_text = run_cli([
+                "runtime", "worker-result", "merge-readiness", "--delivery-bundle", ".ai/workspaces/demo/worker-delivery-bundle.json", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--closure-evidence", ".ai/workspaces/demo/closure-evidence.json", "--baseline", "base123", "--source-branch", "phase44/r20-r22", "--source-head", "head123", "--target-branch", "phase6/mainline", "--out", ".ai/workspaces/demo/merge-readiness.txt", "--format", "text", "--json"
+            ], root)
+            attestation_written = json.loads((base / "reviewer-attestation.json").read_text(encoding="utf-8"))
+            attestation_text_body = (base / "reviewer-attestation.txt").read_text(encoding="utf-8")
+            closure_written = json.loads((base / "closure-evidence.json").read_text(encoding="utf-8"))
+            closure_text_body = (base / "closure-evidence.txt").read_text(encoding="utf-8")
+            merge_written = json.loads((base / "merge-readiness.json").read_text(encoding="utf-8"))
+            merge_text_body = (base / "merge-readiness.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(attestation_json[0], 0, attestation_json[2])
+        attestation = json.loads(attestation_json[1])
+        self.assertEqual(attestation["kind"], "runtime_worker_reviewer_attestation_packet")
+        self.assertEqual(attestation["verdict"], "pass")
+        self.assertEqual(attestation["marker"], "R20_REVIEW_COMPLETE")
+        self.assertEqual(attestation["artifact_path"], ".ai/workspaces/demo/reviewer-output.md")
+        self.assertGreater(attestation["byte_count"], 0)
+        self.assertTrue(attestation["reviewer_attestation_present"])
+        self.assertFalse(attestation["provider_calls"])
+        self.assertFalse(attestation["model_calls"])
+        self.assertFalse(attestation["browser_calls"])
+        self.assertFalse(attestation["shell_calls"])
+        self.assertEqual(attestation_written["sha256"], attestation["sha256"])
+        self.assertEqual(attestation_text[0], 0, attestation_text[2])
+        self.assertIn("verdict: pass", attestation_text_body)
+        self.assertIn("external_execution_refused: true", attestation_text_body)
+        self.assertEqual(closure_json[0], 0, closure_json[2])
+        closure = json.loads(closure_json[1])
+        self.assertEqual(closure["kind"], "runtime_worker_closure_evidence")
+        self.assertTrue(closure["closure_evidence_imported"])
+        self.assertTrue(closure["gate_readable"])
+        self.assertFalse(closure["invocation_allowed"])
+        self.assertEqual(closure_written["reviewer_attestation_source"]["sha256"], closure["reviewer_attestation_source"]["sha256"])
+        self.assertEqual(closure_text[0], 0, closure_text[2])
+        self.assertIn("closure_evidence_imported: true", closure_text_body)
+        self.assertEqual(merge_json[0], 0, merge_json[2])
+        merge = json.loads(merge_json[1])
+        self.assertEqual(merge["kind"], "runtime_worker_merge_readiness_packet")
+        self.assertTrue(merge["external_worker_replay_ready"])
+        self.assertTrue(merge["audit_closure_ready"])
+        self.assertTrue(merge["reviewer_attestation_present"])
+        self.assertTrue(merge["closure_evidence_imported"])
+        self.assertTrue(merge["delivery_bundle_ready"])
+        self.assertTrue(merge["merge_readiness_ready"])
+        self.assertEqual(merge["next_action"], "safe delivery")
+        self.assertFalse(merge["invocation_allowed"])
+        self.assertTrue(merge["external_execution_refused"])
+        self.assertFalse(merge["provider_calls"])
+        self.assertFalse(merge["model_calls"])
+        self.assertFalse(merge["browser_calls"])
+        self.assertFalse(merge["shell_calls"])
+        self.assertEqual(merge_written["marker"], "AGENT_OFFICE_MERGE_READINESS_PACKET")
+        self.assertEqual(merge_text[0], 0, merge_text[2])
+        self.assertIn("next_action: safe delivery", merge_text_body)
+        self.assertNotIn("Traceback", attestation_json[1] + attestation_json[2] + attestation_text[1] + attestation_text[2] + closure_json[1] + closure_json[2] + closure_text[1] + closure_text[2] + merge_json[1] + merge_json[2] + merge_text[1] + merge_text[2])
+
+    def test_worker_result_reviewer_attestation_closure_and_merge_refusals_are_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_worker_delivery_bundle(root)
+            base = root / ".ai" / "workspaces" / "demo"
+            empty = base / "empty-review.md"
+            empty.write_text("", encoding="utf-8")
+            missing_marker_file = base / "missing-marker.md"
+            missing_marker_file.write_text("verdict: PASS\n", encoding="utf-8")
+            malformed = base / "bad-review.json"
+            malformed.write_text("{ R20_REVIEW_COMPLETE", encoding="utf-8")
+            non_utf8 = base / "non-utf8-review.md"
+            non_utf8.write_bytes(b"\xff\xfe")
+            missing_artifact = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/missing-review.md", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/attestation.json", "--json"
+            ], root)
+            empty_result = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/empty-review.md", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/attestation.json", "--json"
+            ], root)
+            missing_marker = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/missing-marker.md", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/attestation.json", "--json"
+            ], root)
+            bad_json = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/bad-review.json", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/attestation.json", "--json"
+            ], root)
+            non_utf8_result = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/non-utf8-review.md", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/attestation.json", "--json"
+            ], root)
+            traversal = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/../review.md", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/attestation.json", "--json"
+            ], root)
+            bad_attestation = base / "bad-attestation.json"
+            bad_attestation.write_text(json.dumps({"kind": "wrong", "schema_version": 1}), encoding="utf-8")
+            bad_closure = run_cli([
+                "runtime", "worker-result", "closure-evidence", "--reviewer-attestation", ".ai/workspaces/demo/bad-attestation.json", "--out", ".ai/workspaces/demo/closure-evidence.json", "--json"
+            ], root)
+            good_review = base / "reviewer-output.json"
+            good_review.write_text(json.dumps({
+                "verdict": "PASS",
+                "marker": "R20_REVIEW_COMPLETE",
+                "review_type": "artifact",
+                "review_caveat": "artifact-only",
+                "findings_summary": "no blockers",
+                "reviewed_artifacts": [".ai/workspaces/demo/worker-delivery-bundle.json"],
+                "reviewed_bundle_summary": "worker delivery bundle ready",
+                "safety_caveat": "no provider/model/browser/shell execution",
+            }), encoding="utf-8")
+            good_attestation = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/reviewer-output.json", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/reviewer-attestation.json", "--json"
+            ], root)
+            self.assertEqual(good_attestation[0], 0, good_attestation[2])
+            bad_merge = run_cli([
+                "runtime", "worker-result", "merge-readiness", "--delivery-bundle", ".ai/workspaces/demo/worker-delivery-bundle.json", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--closure-evidence", ".ai/workspaces/demo/missing-closure.json", "--baseline", "base123", "--source-branch", "phase44/r20-r22", "--source-head", "head123", "--target-branch", "phase6/mainline", "--out", ".ai/workspaces/demo/merge-readiness.json", "--json"
+            ], root)
+            link_target = base / "target-review.md"
+            link_target.write_text("verdict: PASS\nR20_REVIEW_COMPLETE\n", encoding="utf-8")
+            link = base / "review-link.md"
+            try:
+                link.symlink_to(link_target)
+            except (NotImplementedError, OSError):
+                link = None
+            symlink_result = run_cli([
+                "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/review-link.md", "--marker", "R20_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/link-attestation.json", "--json"
+            ], root) if link else None
+
+        self.assertEqual(json.loads(missing_artifact[1])["error_code"], "runtime_worker_reviewer_artifact_missing")
+        self.assertEqual(json.loads(empty_result[1])["error_code"], "runtime_worker_reviewer_artifact_empty")
+        self.assertEqual(json.loads(missing_marker[1])["error_code"], "runtime_worker_reviewer_artifact_marker_missing")
+        self.assertEqual(json.loads(bad_json[1])["error_code"], "runtime_worker_reviewer_artifact_invalid_json")
+        self.assertEqual(json.loads(non_utf8_result[1])["error_code"], "runtime_worker_reviewer_artifact_non_utf8")
+        self.assertEqual(json.loads(traversal[1])["error_code"], "runtime_worker_reviewer_artifact_path_traversal")
+        self.assertEqual(json.loads(bad_closure[1])["error_code"], "runtime_worker_closure_evidence_attestation_invalid")
+        self.assertEqual(json.loads(bad_merge[1])["error_code"], "runtime_worker_merge_readiness_closure_evidence_missing")
+        combined = missing_artifact[1] + missing_artifact[2] + empty_result[1] + empty_result[2] + missing_marker[1] + missing_marker[2] + bad_json[1] + bad_json[2] + non_utf8_result[1] + non_utf8_result[2] + traversal[1] + traversal[2] + bad_closure[1] + bad_closure[2] + bad_merge[1] + bad_merge[2]
+        if symlink_result:
+            self.assertEqual(json.loads(symlink_result[1])["error_code"], "runtime_worker_reviewer_artifact_symlink")
+            combined += symlink_result[1] + symlink_result[2]
+        self.assertNotIn("Traceback", combined)
+
+    def test_worker_result_r20_r22_help_is_available(self) -> None:
+        for argv in (
+            ["runtime", "worker-result", "reviewer-attestation", "--help"],
+            ["runtime", "worker-result", "closure-evidence", "--help"],
+            ["runtime", "worker-result", "merge-readiness", "--help"],
+        ):
+            with self.subTest(argv=argv):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+                    cli.main(argv)
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn("worker-result", stdout.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
 
     def test_external_worker_adapter_prototype_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

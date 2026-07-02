@@ -12,6 +12,10 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 TASK_STATUSES = {"pending", "completed", "failed", "blocked"}
 JOB_STATES = {"created", "running", "completed", "failed", "cancelled"}
 WORKER_RESULT_STATUSES = {"completed", "failed", "skipped"}
+REVIEWER_ATTESTATION_PACKET_MARKER = "AGENT_OFFICE_REVIEWER_ATTESTATION_PACKET"
+CLOSURE_EVIDENCE_IMPORTED_MARKER = "AGENT_OFFICE_CLOSURE_EVIDENCE_IMPORTED"
+MERGE_READINESS_PACKET_MARKER = "AGENT_OFFICE_MERGE_READINESS_PACKET"
+REVIEWER_ARTIFACT_SAFETY_CAVEAT = "artifact-based static review only; no provider/model/browser/shell execution is implied"
 WORKER_REFUSAL_REASON = "external worker prototype is contract-only; execution refused"
 TERMINAL_WORKSPACE_STATUSES = {"completed", "failed", "blocked"}
 WORKER_ADAPTERS = {
@@ -816,6 +820,213 @@ def runtime_worker_delivery_bundle_payload(*, workspace: str, packet: str, resul
     return bundle
 
 
+
+def runtime_worker_reviewer_attestation_payload(*, reviewer_artifact: str, expected_marker: str, out: str, attestation_format: str, project_root: Path) -> dict[str, Any]:
+    if attestation_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_reviewer_attestation_format_invalid", f"Unsupported reviewer attestation format: {attestation_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_reviewer_attestation")
+    artifact_path = _safe_input_path(reviewer_artifact, project_root, "runtime_worker_reviewer_artifact")
+    parsed = _load_reviewer_artifact(artifact_path, expected_marker)
+    artifact_source = _artifact_source(artifact_path, project_root)
+    attestation = {
+        "ok": True,
+        "command": "runtime worker-result reviewer-attestation",
+        "kind": "runtime_worker_reviewer_attestation_packet",
+        "schema_version": SCHEMA_VERSION,
+        "packet_marker": REVIEWER_ATTESTATION_PACKET_MARKER,
+        "artifact_path": artifact_source["path"],
+        "sha256": artifact_source["sha256"],
+        "byte_count": artifact_source["bytes"],
+        "reviewer_artifact_source": artifact_source,
+        "verdict": parsed["verdict"],
+        "marker": parsed["marker"],
+        "review_type": parsed["review_type"],
+        "review_caveat": parsed["review_caveat"],
+        "findings_summary": parsed["findings_summary"],
+        "reviewed_artifacts": parsed["reviewed_artifacts"],
+        "reviewed_bundle_summary": parsed["reviewed_bundle_summary"],
+        "safety_caveat": parsed["safety_caveat"],
+        "reviewer_attestation_present": True,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "external_execution_allowed": False,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "validation_commands": _worker_validation_commands(),
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "attestation_format": attestation_format,
+        "written": True,
+    }
+    if attestation_format == "json":
+        _write_json(output_path, attestation)
+    else:
+        _write_text(output_path, _format_reviewer_attestation_text(attestation))
+    return attestation
+
+
+def runtime_worker_closure_evidence_payload(*, reviewer_attestation: str, out: str, evidence_format: str, project_root: Path) -> dict[str, Any]:
+    if evidence_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_closure_evidence_format_invalid", f"Unsupported closure evidence format: {evidence_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_closure_evidence")
+    attestation_path = _safe_input_path(reviewer_attestation, project_root, "runtime_worker_closure_evidence_attestation")
+    attestation = _load_input_json(attestation_path, "runtime_worker_closure_evidence_attestation")
+    _validate_reviewer_attestation_packet(attestation, "runtime_worker_closure_evidence_attestation")
+    evidence = {
+        "ok": True,
+        "command": "runtime worker-result closure-evidence",
+        "kind": "runtime_worker_closure_evidence",
+        "schema_version": SCHEMA_VERSION,
+        "marker": CLOSURE_EVIDENCE_IMPORTED_MARKER,
+        "closure_evidence_imported": True,
+        "audit_replayable": True,
+        "gate_readable": True,
+        "reviewer_attestation_present": True,
+        "reviewer_attestation_source": _artifact_source(attestation_path, project_root),
+        "reviewer_artifact_source": attestation["reviewer_artifact_source"],
+        "verdict": attestation["verdict"],
+        "review_marker": attestation["marker"],
+        "review_type": attestation["review_type"],
+        "findings_summary": attestation["findings_summary"],
+        "reviewed_artifacts": list(attestation["reviewed_artifacts"]),
+        "reviewed_bundle_summary": attestation["reviewed_bundle_summary"],
+        "safety_caveat": attestation["safety_caveat"],
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "external_execution_allowed": False,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "validation_commands": _worker_validation_commands(),
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "evidence_format": evidence_format,
+        "written": True,
+    }
+    if evidence_format == "json":
+        _write_json(output_path, evidence)
+    else:
+        _write_text(output_path, _format_closure_evidence_text(evidence))
+    return evidence
+
+
+def runtime_worker_merge_readiness_payload(
+    *,
+    delivery_bundle: str,
+    reviewer_attestation: str,
+    closure_evidence: str,
+    baseline: str,
+    source_branch: str,
+    source_head: str,
+    target_branch: str,
+    out: str,
+    readiness_format: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if readiness_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_merge_readiness_format_invalid", f"Unsupported merge readiness format: {readiness_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_merge_readiness")
+    delivery_path = _safe_input_path(delivery_bundle, project_root, "runtime_worker_merge_readiness_delivery_bundle")
+    attestation_path = _safe_input_path(reviewer_attestation, project_root, "runtime_worker_merge_readiness_attestation")
+    evidence_path = _safe_input_path(closure_evidence, project_root, "runtime_worker_merge_readiness_closure_evidence")
+    delivery = _load_input_json(delivery_path, "runtime_worker_merge_readiness_delivery_bundle")
+    attestation = _load_input_json(attestation_path, "runtime_worker_merge_readiness_attestation")
+    evidence = _load_input_json(evidence_path, "runtime_worker_merge_readiness_closure_evidence")
+    _validate_worker_delivery_bundle_for_merge(delivery)
+    _validate_reviewer_attestation_packet(attestation, "runtime_worker_merge_readiness_attestation")
+    _validate_closure_evidence_packet(evidence, attestation_path, project_root)
+
+    replay_summary = delivery.get("replay_summary", {})
+    audit_summary = delivery.get("audit_closure_summary", {})
+    external_worker_replay_ready = bool(replay_summary.get("replay_ready"))
+    audit_closure_ready = bool(audit_summary.get("governance_ready")) and bool(audit_summary.get("replay_ready"))
+    delivery_bundle_ready = bool(delivery.get("delivery_ready")) and bool(delivery.get("reviewer_ready"))
+    reviewer_attestation_present = bool(attestation.get("reviewer_attestation_present"))
+    closure_evidence_imported = bool(evidence.get("closure_evidence_imported"))
+    safety_false = all(
+        item is False
+        for item in (
+            delivery.get("worker_gate_summary", {}).get("provider_calls"),
+            delivery.get("worker_gate_summary", {}).get("model_calls"),
+            delivery.get("worker_gate_summary", {}).get("browser_calls"),
+            delivery.get("worker_gate_summary", {}).get("shell_calls"),
+            attestation.get("provider_calls"),
+            attestation.get("model_calls"),
+            attestation.get("browser_calls"),
+            attestation.get("shell_calls"),
+            evidence.get("provider_calls"),
+            evidence.get("model_calls"),
+            evidence.get("browser_calls"),
+            evidence.get("shell_calls"),
+        )
+    )
+    blockers: list[str] = []
+    if not external_worker_replay_ready:
+        blockers.append("external_worker_replay_not_ready")
+    if not audit_closure_ready:
+        blockers.append("audit_closure_not_ready")
+    if not reviewer_attestation_present:
+        blockers.append("reviewer_attestation_missing")
+    if str(attestation.get("verdict", "")).lower() != "pass":
+        blockers.append("reviewer_verdict_not_pass")
+    if not closure_evidence_imported:
+        blockers.append("closure_evidence_not_imported")
+    if not delivery_bundle_ready:
+        blockers.append("delivery_bundle_not_ready")
+    if delivery.get("invocation_packet_summary", {}).get("invocation_allowed") is not False:
+        blockers.append("invocation_not_refused")
+    if not safety_false:
+        blockers.append("static_safety_calls_not_false")
+
+    ready = not blockers
+    packet = {
+        "ok": True,
+        "command": "runtime worker-result merge-readiness",
+        "kind": "runtime_worker_merge_readiness_packet",
+        "schema_version": SCHEMA_VERSION,
+        "marker": MERGE_READINESS_PACKET_MARKER,
+        "baseline": baseline,
+        "source_branch": source_branch,
+        "source_head": source_head,
+        "target_branch": target_branch,
+        "delivery_bundle_source": _artifact_source(delivery_path, project_root),
+        "reviewer_attestation_source": _artifact_source(attestation_path, project_root),
+        "closure_evidence_source": _artifact_source(evidence_path, project_root),
+        "external_worker_replay_ready": external_worker_replay_ready,
+        "audit_closure_ready": audit_closure_ready,
+        "reviewer_attestation_present": reviewer_attestation_present,
+        "closure_evidence_imported": closure_evidence_imported,
+        "delivery_bundle_ready": delivery_bundle_ready,
+        "merge_readiness_ready": ready,
+        "readiness_blocking_reasons": blockers,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "external_execution_allowed": False,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "validation_commands": _worker_validation_commands(),
+        "next_action": "safe delivery" if ready else "stop",
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "readiness_format": readiness_format,
+        "written": True,
+    }
+    if readiness_format == "json":
+        _write_json(output_path, packet)
+    else:
+        _write_text(output_path, _format_merge_readiness_text(packet))
+    return packet
+
+
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -944,6 +1155,32 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"job_id: {payload['job_id']}")
         lines.append(f"reviewer_ready: {str(payload['reviewer_ready']).lower()}")
         lines.append(f"delivery_ready: {str(payload['delivery_ready']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_reviewer_attestation_packet":
+        lines.append(f"reviewer_artifact: {payload['artifact_path']}")
+        lines.append(f"verdict: {payload['verdict']}")
+        lines.append(f"marker: {payload['marker']}")
+        lines.append(f"review_type: {payload['review_type']}")
+        lines.append(f"reviewer_attestation_present: {str(payload['reviewer_attestation_present']).lower()}")
+        lines.append(f"external_execution_refused: {str(payload['external_execution_refused']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_closure_evidence":
+        lines.append(f"closure_evidence_imported: {str(payload['closure_evidence_imported']).lower()}")
+        lines.append(f"reviewer_attestation_present: {str(payload['reviewer_attestation_present']).lower()}")
+        lines.append(f"verdict: {payload['verdict']}")
+        lines.append(f"external_execution_refused: {str(payload['external_execution_refused']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_merge_readiness_packet":
+        lines.append(f"source_branch: {payload['source_branch']}")
+        lines.append(f"source_head: {payload['source_head']}")
+        lines.append(f"target_branch: {payload['target_branch']}")
+        lines.append(f"external_worker_replay_ready: {str(payload['external_worker_replay_ready']).lower()}")
+        lines.append(f"audit_closure_ready: {str(payload['audit_closure_ready']).lower()}")
+        lines.append(f"reviewer_attestation_present: {str(payload['reviewer_attestation_present']).lower()}")
+        lines.append(f"closure_evidence_imported: {str(payload['closure_evidence_imported']).lower()}")
+        lines.append(f"delivery_bundle_ready: {str(payload['delivery_bundle_ready']).lower()}")
+        lines.append(f"merge_readiness_ready: {str(payload['merge_readiness_ready']).lower()}")
+        lines.append(f"next_action: {payload['next_action']}")
         lines.append(f"output_path: {payload['output_path']}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
@@ -1593,6 +1830,145 @@ def _load_input_json(path: Path, code_prefix: str) -> dict[str, Any]:
     return data
 
 
+
+def _read_input_text(path: Path, code_prefix: str) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", f"Input text is unreadable: {path.name}") from exc
+    if not data:
+        raise RuntimeFoundationError(f"{code_prefix}_empty", f"Input text is empty: {path.name}")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeFoundationError(f"{code_prefix}_non_utf8", f"Input text must be UTF-8: {path.name}") from exc
+    if not text.strip():
+        raise RuntimeFoundationError(f"{code_prefix}_empty", f"Input text is empty: {path.name}")
+    return text
+
+
+def _load_reviewer_artifact(path: Path, expected_marker: str) -> dict[str, Any]:
+    marker = str(expected_marker).strip()
+    if not marker:
+        raise RuntimeFoundationError("runtime_worker_reviewer_artifact_marker_required", "Expected review marker is required.")
+    text = _read_input_text(path, "runtime_worker_reviewer_artifact")
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeFoundationError("runtime_worker_reviewer_artifact_invalid_json", "Reviewer JSON artifact is invalid.") from exc
+        if not isinstance(data, dict):
+            raise RuntimeFoundationError("runtime_worker_reviewer_artifact_invalid_json", "Reviewer JSON artifact must be an object.")
+        parsed = _parse_reviewer_json(data, marker)
+    else:
+        if marker not in text:
+            raise RuntimeFoundationError("runtime_worker_reviewer_artifact_marker_missing", "Expected review marker is missing.")
+        parsed = _parse_reviewer_text(text, marker)
+    if parsed["marker"] != marker:
+        raise RuntimeFoundationError("runtime_worker_reviewer_artifact_marker_mismatch", "Reviewer artifact marker does not match expected marker.")
+    if not parsed["verdict"]:
+        raise RuntimeFoundationError("runtime_worker_reviewer_artifact_verdict_missing", "Reviewer artifact verdict is missing.")
+    return parsed
+
+
+def _parse_reviewer_json(data: dict[str, Any], expected_marker: str) -> dict[str, Any]:
+    verdict = _normalise_verdict(_reviewer_json_value(data, "verdict", "review_verdict"))
+    marker = str(_reviewer_json_value(data, "marker", "review_marker") or expected_marker).strip()
+    return {
+        "verdict": verdict,
+        "marker": marker,
+        "review_type": str(_reviewer_json_value(data, "review_type", "type") or "artifact").strip(),
+        "review_caveat": str(_reviewer_json_value(data, "review_caveat", "caveat") or REVIEWER_ARTIFACT_SAFETY_CAVEAT).strip(),
+        "findings_summary": str(_reviewer_json_value(data, "findings_summary", "findings") or "not provided").strip(),
+        "reviewed_artifacts": _reviewed_artifacts_from_value(_reviewer_json_value(data, "reviewed_artifacts", "artifacts")),
+        "reviewed_bundle_summary": str(_reviewer_json_value(data, "reviewed_bundle_summary", "bundle_summary") or "not provided").strip(),
+        "safety_caveat": str(_reviewer_json_value(data, "safety_caveat", "safety") or REVIEWER_ARTIFACT_SAFETY_CAVEAT).strip(),
+    }
+
+
+def _parse_reviewer_text(text: str, expected_marker: str) -> dict[str, Any]:
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.match(r"^\s*[-*]?\s*([A-Za-z][A-Za-z0-9 _-]{1,64})\s*:\s*(.*?)\s*$", line)
+        if match:
+            values[_normalise_reviewer_key(match.group(1))] = match.group(2).strip()
+    reviewed_artifacts = _reviewed_artifacts_from_value(values.get("reviewed_artifacts"))
+    if not reviewed_artifacts:
+        reviewed_artifacts = _reviewed_artifacts_from_text(text)
+    return {
+        "verdict": _normalise_verdict(values.get("verdict") or values.get("review_verdict")),
+        "marker": values.get("marker") or values.get("review_marker") or expected_marker,
+        "review_type": values.get("review_type") or "artifact",
+        "review_caveat": values.get("review_caveat") or values.get("caveat") or REVIEWER_ARTIFACT_SAFETY_CAVEAT,
+        "findings_summary": values.get("findings_summary") or values.get("findings") or "not provided",
+        "reviewed_artifacts": reviewed_artifacts,
+        "reviewed_bundle_summary": values.get("reviewed_bundle_summary") or values.get("bundle_summary") or "not provided",
+        "safety_caveat": values.get("safety_caveat") or values.get("safety") or REVIEWER_ARTIFACT_SAFETY_CAVEAT,
+    }
+
+
+def _reviewer_json_value(data: dict[str, Any], *keys: str) -> Any:
+    candidates = [data]
+    for nested_key in ("review", "reviewer", "summary"):
+        nested = data.get(nested_key)
+        if isinstance(nested, dict):
+            candidates.append(nested)
+    wanted = {_normalise_reviewer_key(key) for key in keys}
+    for candidate in candidates:
+        normalised = {_normalise_reviewer_key(str(key)): value for key, value in candidate.items()}
+        for key in wanted:
+            if key in normalised:
+                return normalised[key]
+    return None
+
+
+def _normalise_reviewer_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
+
+
+def _normalise_verdict(value: Any) -> str:
+    verdict = str(value or "").strip().lower()
+    return {"approved": "pass", "passed": "pass", "changes requested": "fail"}.get(verdict, verdict)
+
+
+def _reviewed_artifacts_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        artifacts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                artifacts.append(str(item.get("path") or item.get("artifact") or json.dumps(item, sort_keys=True)))
+            else:
+                artifacts.append(str(item))
+        return [artifact.strip() for artifact in artifacts if artifact.strip()]
+    text = str(value)
+    parts = re.split(r"[,\n]", text)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _reviewed_artifacts_from_text(text: str) -> list[str]:
+    artifacts: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^#{1,6}\s+reviewed artifacts\b", stripped, re.IGNORECASE) or _normalise_reviewer_key(stripped.rstrip(":")) == "reviewed_artifacts":
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            break
+        if stripped.startswith(("-", "*")):
+            artifacts.append(stripped.lstrip("-* ").strip())
+        elif artifacts:
+            break
+    return artifacts
+
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1995,6 +2371,130 @@ def _format_worker_delivery_bundle_text(payload: dict[str, Any]) -> str:
         "provider/runtime/adapter execution: not triggered",
     ]
     return "\n".join(lines)
+
+
+
+def _validate_reviewer_attestation_packet(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_reviewer_attestation_packet":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Reviewer attestation packet schema is invalid.")
+    if payload.get("reviewer_attestation_present") is not True:
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Reviewer attestation must be present.")
+    if payload.get("external_execution_refused") is not True or payload.get("invocation_allowed") is not False:
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Reviewer attestation must refuse external execution.")
+    for key in ("provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if payload.get(key) is not False:
+            raise RuntimeFoundationError(f"{code_prefix}_invalid", f"Reviewer attestation must report {key}=false.")
+    for key in ("artifact_path", "sha256", "byte_count", "verdict", "marker", "review_type", "reviewed_bundle_summary", "safety_caveat"):
+        if payload.get(key) in (None, ""):
+            raise RuntimeFoundationError(f"{code_prefix}_invalid", f"Reviewer attestation missing {key}.")
+
+
+def _validate_closure_evidence_packet(payload: dict[str, Any], attestation_path: Path, project_root: Path) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_closure_evidence":
+        raise RuntimeFoundationError("runtime_worker_merge_readiness_closure_evidence_invalid", "Closure evidence packet schema is invalid.")
+    if payload.get("closure_evidence_imported") is not True or payload.get("reviewer_attestation_present") is not True:
+        raise RuntimeFoundationError("runtime_worker_merge_readiness_closure_evidence_invalid", "Closure evidence import is incomplete.")
+    current = _artifact_source(attestation_path, project_root)
+    recorded = payload.get("reviewer_attestation_source", {})
+    if recorded.get("sha256") != current["sha256"]:
+        raise RuntimeFoundationError("runtime_worker_merge_readiness_closure_evidence_mismatch", "Closure evidence does not match reviewer attestation.")
+    if payload.get("external_execution_refused") is not True or payload.get("invocation_allowed") is not False:
+        raise RuntimeFoundationError("runtime_worker_merge_readiness_closure_evidence_invalid", "Closure evidence must refuse external execution.")
+    for key in ("provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if payload.get(key) is not False:
+            raise RuntimeFoundationError("runtime_worker_merge_readiness_closure_evidence_invalid", f"Closure evidence must report {key}=false.")
+
+
+def _validate_worker_delivery_bundle_for_merge(payload: dict[str, Any]) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_delivery_bundle":
+        raise RuntimeFoundationError("runtime_worker_merge_readiness_delivery_bundle_invalid", "Worker delivery bundle schema is invalid.")
+    for key in ("worker_gate_summary", "invocation_packet_summary", "replay_summary", "audit_closure_summary"):
+        if not isinstance(payload.get(key), dict):
+            raise RuntimeFoundationError("runtime_worker_merge_readiness_delivery_bundle_invalid", f"Worker delivery bundle missing {key}.")
+
+
+def _format_reviewer_attestation_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Reviewer Attestation Packet",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"packet_marker: {payload['packet_marker']}",
+        f"artifact_path: {payload['artifact_path']}",
+        f"sha256: {payload['sha256']}",
+        f"byte_count: {payload['byte_count']}",
+        f"verdict: {payload['verdict']}",
+        f"marker: {payload['marker']}",
+        f"review_type: {payload['review_type']}",
+        f"review_caveat: {payload['review_caveat']}",
+        f"findings_summary: {payload['findings_summary']}",
+        f"reviewed_bundle_summary: {payload['reviewed_bundle_summary']}",
+        f"safety_caveat: {payload['safety_caveat']}",
+        f"invocation_allowed: {str(payload['invocation_allowed']).lower()}",
+        f"external_execution_refused: {str(payload['external_execution_refused']).lower()}",
+        f"provider_calls: {str(payload['provider_calls']).lower()}",
+        f"model_calls: {str(payload['model_calls']).lower()}",
+        f"browser_calls: {str(payload['browser_calls']).lower()}",
+        f"shell_calls: {str(payload['shell_calls']).lower()}",
+        "",
+        "## Reviewed Artifacts",
+    ]
+    lines.extend(f"- {artifact}" for artifact in payload["reviewed_artifacts"])
+    return "\n".join(lines)
+
+
+def _format_closure_evidence_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Closure Evidence Import",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"marker: {payload['marker']}",
+        f"closure_evidence_imported: {str(payload['closure_evidence_imported']).lower()}",
+        f"gate_readable: {str(payload['gate_readable']).lower()}",
+        f"audit_replayable: {str(payload['audit_replayable']).lower()}",
+        f"reviewer_attestation: {payload['reviewer_attestation_source']['path']}",
+        f"verdict: {payload['verdict']}",
+        f"review_marker: {payload['review_marker']}",
+        f"external_execution_refused: {str(payload['external_execution_refused']).lower()}",
+        f"provider_calls: {str(payload['provider_calls']).lower()}",
+        f"model_calls: {str(payload['model_calls']).lower()}",
+        f"browser_calls: {str(payload['browser_calls']).lower()}",
+        f"shell_calls: {str(payload['shell_calls']).lower()}",
+        "",
+        "provider/runtime/adapter execution: not triggered",
+    ]
+    return "\n".join(lines)
+
+
+def _format_merge_readiness_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Merge Readiness Packet",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"marker: {payload['marker']}",
+        f"baseline: {payload['baseline']}",
+        f"source_branch: {payload['source_branch']}",
+        f"source_head: {payload['source_head']}",
+        f"target_branch: {payload['target_branch']}",
+        f"external_worker_replay_ready: {str(payload['external_worker_replay_ready']).lower()}",
+        f"audit_closure_ready: {str(payload['audit_closure_ready']).lower()}",
+        f"reviewer_attestation_present: {str(payload['reviewer_attestation_present']).lower()}",
+        f"closure_evidence_imported: {str(payload['closure_evidence_imported']).lower()}",
+        f"delivery_bundle_ready: {str(payload['delivery_bundle_ready']).lower()}",
+        f"merge_readiness_ready: {str(payload['merge_readiness_ready']).lower()}",
+        f"invocation_allowed: {str(payload['invocation_allowed']).lower()}",
+        f"external_execution_refused: {str(payload['external_execution_refused']).lower()}",
+        f"provider_calls: {str(payload['provider_calls']).lower()}",
+        f"model_calls: {str(payload['model_calls']).lower()}",
+        f"browser_calls: {str(payload['browser_calls']).lower()}",
+        f"shell_calls: {str(payload['shell_calls']).lower()}",
+        f"next_action: {payload['next_action']}",
+        f"blocking_reasons: {', '.join(payload['readiness_blocking_reasons']) or 'none'}",
+        "",
+        "## Validation Commands",
+    ]
+    lines.extend(f"- {command}" for command in payload["validation_commands"])
+    return "\n".join(lines)
+
 
 
 def _event_summary(event: dict[str, Any] | None) -> str:

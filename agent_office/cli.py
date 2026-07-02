@@ -61,11 +61,14 @@ from .runtime_foundation import (
     runtime_status_payload,
     runtime_worker_adapter_payload,
     runtime_worker_audit_closure_payload,
+    runtime_worker_closure_evidence_payload,
     runtime_worker_delivery_bundle_payload,
     runtime_worker_gate_payload,
     runtime_worker_invocation_packet_payload,
+    runtime_worker_merge_readiness_payload,
     runtime_worker_result_intake_payload,
     runtime_worker_result_replay_payload,
+    runtime_worker_reviewer_attestation_payload,
 )
 from .objectives import (
     ObjectiveSpecError,
@@ -1448,6 +1451,23 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             payload = runtime_worker_audit_closure_payload(workspace=args.workspace, packet=args.packet, result=args.result, out=args.out, closure_format=args.format, project_root=PROJECT_ROOT)
         elif action == "worker-result" and args.worker_result_action == "delivery-bundle":
             payload = runtime_worker_delivery_bundle_payload(workspace=args.workspace, packet=args.packet, result=args.result, audit_closure=args.audit_closure, out=args.out, bundle_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "reviewer-attestation":
+            payload = runtime_worker_reviewer_attestation_payload(reviewer_artifact=args.reviewer_artifact, expected_marker=args.marker, out=args.out, attestation_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "closure-evidence":
+            payload = runtime_worker_closure_evidence_payload(reviewer_attestation=args.reviewer_attestation, out=args.out, evidence_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "merge-readiness":
+            payload = runtime_worker_merge_readiness_payload(
+                delivery_bundle=args.delivery_bundle,
+                reviewer_attestation=args.reviewer_attestation,
+                closure_evidence=args.closure_evidence,
+                baseline=args.baseline,
+                source_branch=args.source_branch,
+                source_head=args.source_head,
+                target_branch=args.target_branch,
+                out=args.out,
+                readiness_format=args.format,
+                project_root=PROJECT_ROOT,
+            )
         else:
             raise RuntimeFoundationError("runtime_unknown_action", "unknown runtime action")
     except RuntimeFoundationError as exc:
@@ -1803,6 +1823,31 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_worker_delivery_bundle.add_argument("--format", choices=["json", "text"], default="json", help="Delivery bundle output format. Default: json.")
     runtime_worker_delivery_bundle.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_worker_delivery_bundle.set_defaults(func=cmd_runtime)
+    runtime_worker_reviewer_attestation = runtime_worker_result_sub.add_parser("reviewer-attestation", help="Write a deterministic reviewer attestation packet from a saved reviewer artifact.")
+    runtime_worker_reviewer_attestation.add_argument("--reviewer-artifact", required=True, help="Project-local reviewer output artifact path, Markdown or JSON.")
+    runtime_worker_reviewer_attestation.add_argument("--marker", required=True, help="Expected review marker that must appear in the reviewer artifact.")
+    runtime_worker_reviewer_attestation.add_argument("--out", required=True, help="Project-local reviewer attestation output path.")
+    runtime_worker_reviewer_attestation.add_argument("--format", choices=["json", "text"], default="json", help="Reviewer attestation output format. Default: json.")
+    runtime_worker_reviewer_attestation.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_reviewer_attestation.set_defaults(func=cmd_runtime)
+    runtime_worker_closure_evidence = runtime_worker_result_sub.add_parser("closure-evidence", help="Import reviewer attestation as static closure evidence.")
+    runtime_worker_closure_evidence.add_argument("--reviewer-attestation", required=True, help="Project-local reviewer attestation JSON path.")
+    runtime_worker_closure_evidence.add_argument("--out", required=True, help="Project-local closure evidence output path.")
+    runtime_worker_closure_evidence.add_argument("--format", choices=["json", "text"], default="json", help="Closure evidence output format. Default: json.")
+    runtime_worker_closure_evidence.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_closure_evidence.set_defaults(func=cmd_runtime)
+    runtime_worker_merge_readiness = runtime_worker_result_sub.add_parser("merge-readiness", help="Write a static merge-readiness packet from delivery bundle, reviewer attestation, and closure evidence.")
+    runtime_worker_merge_readiness.add_argument("--delivery-bundle", required=True, help="Project-local worker delivery bundle JSON path.")
+    runtime_worker_merge_readiness.add_argument("--reviewer-attestation", required=True, help="Project-local reviewer attestation JSON path.")
+    runtime_worker_merge_readiness.add_argument("--closure-evidence", required=True, help="Project-local closure evidence JSON path.")
+    runtime_worker_merge_readiness.add_argument("--baseline", required=True, help="Target baseline commit for the readiness packet.")
+    runtime_worker_merge_readiness.add_argument("--source-branch", required=True, help="Source branch name for delivery.")
+    runtime_worker_merge_readiness.add_argument("--source-head", required=True, help="Source branch head commit for delivery.")
+    runtime_worker_merge_readiness.add_argument("--target-branch", required=True, help="Target branch name for delivery.")
+    runtime_worker_merge_readiness.add_argument("--out", required=True, help="Project-local merge-readiness output path.")
+    runtime_worker_merge_readiness.add_argument("--format", choices=["json", "text"], default="json", help="Merge-readiness output format. Default: json.")
+    runtime_worker_merge_readiness.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_merge_readiness.set_defaults(func=cmd_runtime)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
