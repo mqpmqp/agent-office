@@ -60,9 +60,12 @@ python3 -m agent_office runtime worker-adapter --name external-prototype --descr
 python3 -m agent_office runtime worker-gate --workspace .ai/workspaces/demo --adapter external-prototype --json
 python3 -m agent_office runtime worker-packet --workspace .ai/workspaces/demo --adapter external-prototype --job-id demo-job --out .ai/workspaces/demo/worker-invocation-packet.json --json
 python3 -m agent_office runtime worker-result intake --workspace .ai/workspaces/demo --packet .ai/workspaces/demo/worker-invocation-packet.json --result .ai/workspaces/demo/worker-result.json --json
+python3 -m agent_office runtime worker-result replay --workspace .ai/workspaces/demo --packet .ai/workspaces/demo/worker-invocation-packet.json --result .ai/workspaces/demo/worker-result.json --json
+python3 -m agent_office runtime worker-result audit-closure --workspace .ai/workspaces/demo --packet .ai/workspaces/demo/worker-invocation-packet.json --result .ai/workspaces/demo/worker-result.json --out .ai/workspaces/demo/worker-audit-closure.json --json
+python3 -m agent_office runtime worker-result delivery-bundle --workspace .ai/workspaces/demo --packet .ai/workspaces/demo/worker-invocation-packet.json --result .ai/workspaces/demo/worker-result.json --audit-closure .ai/workspaces/demo/worker-audit-closure.json --out .ai/workspaces/demo/worker-delivery-bundle.json --json
 ```
 
-Worker invocation packets and worker result intake are static governance contracts. They do not call models, providers, browsers, shells, or external workers.
+Worker invocation packets, worker result intake, replay, audit closure, and delivery bundles are static governance contracts. They do not call models, providers, browsers, shells, or external workers.
 
 
 ## Claude Token Rule
