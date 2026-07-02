@@ -369,7 +369,7 @@ class ReviewLifecycleCliTests(unittest.TestCase):
             "target_expected_head", "origin_source_head", "origin_target_head", "tracked_tree_clean", "untracked_artifacts_allowed",
             "changed_files", "diff_stat", "diff_check_status", "validation_command_list", "pre_merge_validation_status",
             "post_merge_validation_status", "merge_authorization_status", "push_authorization_status", "merge_planned", "push_planned",
-            "merge_executed", "push_executed", "execution_status", "execution_failed_step", "final_target_head",
+            "merge_executed", "push_executed", "non_destructive", "execution_status", "execution_failed_step", "final_target_head",
             "final_origin_target_status", "safety_boundary_checklist", "readiness", "blocking_reasons", "outputs",
         }
         self.assertTrue(expected_keys.issubset(payload))
@@ -382,9 +382,11 @@ class ReviewLifecycleCliTests(unittest.TestCase):
         self.assertFalse(payload["push_planned"])
         self.assertFalse(payload["merge_executed"])
         self.assertFalse(payload["push_executed"])
+        self.assertTrue(payload["non_destructive"])
         self.assertEqual(payload["execution_status"], "safe_mode")
         self.assertIn("P34_CODEX_DELIVERY_RUNNER_COMPLETE", text)
         self.assertIn("Safe mode generated this report only", text)
+        self.assertIn("non_destructive: true", text)
         self.assertIn("no Claude merge packet generated", text)
         self.assertNotIn("Traceback", stdout + stderr + text)
 
@@ -408,6 +410,7 @@ class ReviewLifecycleCliTests(unittest.TestCase):
         self.assertEqual(payload["push_authorization_status"], "not_authorized")
         self.assertTrue(payload["merge_planned"])
         self.assertFalse(payload["push_planned"])
+        self.assertTrue(payload["non_destructive"])
         self.assertFalse(payload["merge_gate_ready"])
         self.assertFalse(payload["merge_executed"])
         self.assertFalse(payload["push_executed"])
@@ -737,6 +740,7 @@ P31_ARTIFACT_REVIEW_COMPLETE
         self.assertTrue(authorized_payload["merge_gate_ready"])
         self.assertTrue(authorized_payload["merge_executed"])
         self.assertTrue(authorized_payload["push_executed"])
+        self.assertFalse(authorized_payload["non_destructive"])
         self.assertEqual(authorized_payload["delivery_execution_status"], "executed")
         self.assertEqual(final_target, final_origin)
         self.assertEqual(authorized_payload["final_target_head"], final_target)

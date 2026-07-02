@@ -451,6 +451,7 @@ def review_codex_deliver_payload(
         "push_planned": push_planned,
         "merge_executed": False,
         "push_executed": False,
+        "non_destructive": execution_status in {"safe_mode", "blocked"},
         "execution_status": execution_status,
         "execution_failed_step": "none",
         "execution_error": "",
@@ -475,6 +476,7 @@ def review_codex_deliver_payload(
             error_text = stderr or stdout or message
             details.update({"argv": completed.args, "stdout": stdout, "stderr": stderr})
         payload["execution_status"] = "failed"
+        payload["non_destructive"] = not payload["merge_executed"] and not payload["push_executed"]
         payload["execution_failed_step"] = step
         payload["execution_error"] = error_text
         payload["final_target_head"] = _git_optional(root, target)
@@ -509,6 +511,7 @@ def review_codex_deliver_payload(
         if payload["final_origin_target_status"] != payload["final_target_head"]:
             record_execution_failure("push_verify", "origin target did not match local target after push")
         payload["execution_status"] = "executed"
+        payload["non_destructive"] = False
 
     _safe_write(out_path, _codex_deliver_markdown(payload))
     return payload
@@ -615,6 +618,7 @@ def review_reviewed_delivery_payload(
             "push_authorization_status": delivery_payload["push_authorization_status"],
             "merge_executed": delivery_payload["merge_executed"],
             "push_executed": delivery_payload["push_executed"],
+            "non_destructive": delivery_payload["non_destructive"],
             "final_target_head": delivery_payload["final_target_head"],
             "final_origin_target_status": delivery_payload["final_origin_target_status"],
             "marker": "REVIEWED_DELIVERY_WORKFLOW_COMPLETE",
@@ -1355,6 +1359,7 @@ def _codex_deliver_markdown(payload: dict[str, Any]) -> str:
         f"- push_planned: {str(payload['push_planned']).lower()}",
         f"- merge_executed: {str(payload['merge_executed']).lower()}",
         f"- push_executed: {str(payload['push_executed']).lower()}",
+        f"- non_destructive: {str(payload['non_destructive']).lower()}",
         f"- execution_status: {payload['execution_status']}",
         f"- execution_failed_step: {payload['execution_failed_step']}",
         f"- final_target_head: {payload['final_target_head']}",

@@ -8,10 +8,53 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
-ALLOWED_ADAPTERS = {"local-static", "noop"}
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 TASK_STATUSES = {"pending", "completed", "failed", "blocked"}
+JOB_STATES = {"created", "running", "completed", "failed", "cancelled"}
 TERMINAL_WORKSPACE_STATUSES = {"completed", "failed", "blocked"}
+WORKER_ADAPTERS = {
+    "local-static": {
+        "name": "local-static",
+        "kind": "local_static_worker_adapter",
+        "dry_run_supported": True,
+        "execute_local_supported": True,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "shell_calls": False,
+        "browser_calls": False,
+        "reason": "deterministic local/static adapter",
+    },
+    "noop": {
+        "name": "noop",
+        "kind": "local_static_worker_adapter",
+        "dry_run_supported": True,
+        "execute_local_supported": True,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "shell_calls": False,
+        "browser_calls": False,
+        "reason": "deterministic noop/local adapter",
+    },
+    "external-prototype": {
+        "name": "external-prototype",
+        "kind": "external_worker_adapter_prototype",
+        "dry_run_supported": True,
+        "execute_local_supported": False,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "shell_calls": False,
+        "browser_calls": False,
+        "reason": "prototype interface only",
+    },
+}
+ALLOWED_ADAPTERS = set(WORKER_ADAPTERS)
+EXPLICIT_RUNTIME_BOUNDARY = [
+    "local/static/deterministic runtime only",
+    "not real multi-agent runtime",
+]
 SAFETY_BOUNDARIES = {
     "mode": "local_static",
     "provider_calls": [],
@@ -118,6 +161,8 @@ def runtime_run_payload(
 ) -> dict[str, Any]:
     if adapter not in ALLOWED_ADAPTERS:
         raise RuntimeFoundationError("runtime_unsupported_adapter", f"Unsupported runtime adapter: {adapter}")
+    if adapter == "external-prototype" and execute_local:
+        raise RuntimeFoundationError("runtime_external_prototype_execute_refused", "external-prototype is a contract stub and cannot execute local or external work.")
     if dry_run == execute_local:
         raise RuntimeFoundationError("runtime_run_mode_required", "runtime run requires exactly one of --dry-run or --execute-local.")
     if dry_run and reset:
@@ -129,6 +174,10 @@ def runtime_run_payload(
     tasks = _graph_tasks(graph)
     topological_order = _topological_order(tasks)
     task_by_id = {task["id"]: task for task in tasks}
+    job = _load_job(paths["job"], required=False)
+    if execute_local and job:
+        _ensure_job_allows_run(job)
+        job = _write_job_state(paths=paths, workspace_root=workspace_root, project_root=project_root, manifest=manifest, tasks=tasks, existing=job, state="running")
     if reset:
         for task in tasks:
             task["status"] = "pending"
@@ -153,6 +202,8 @@ def runtime_run_payload(
             "failed_task_ids": _ids_with_status(tasks, "failed"),
             "task_counts": _task_counts(tasks),
             "memory_entry_count": _jsonl_count(paths["memory"]),
+            "job": _job_readback(job) if job else None,
+            "worker_adapter": _worker_adapter_descriptor(adapter),
             "external_behavior": dict(SAFETY_BOUNDARIES),
         }
 
@@ -196,6 +247,13 @@ def runtime_run_payload(
     _write_json(paths["task_graph"], graph)
     manifest["status"] = _workspace_status(tasks)
     _write_json(paths["manifest"], manifest)
+    if job:
+        if manifest["status"] == "completed":
+            job = _write_job_state(paths=paths, workspace_root=workspace_root, project_root=project_root, manifest=manifest, tasks=tasks, existing=job, state="completed", failure_reason=None)
+        elif manifest["status"] in {"failed", "blocked"}:
+            job = _write_job_state(paths=paths, workspace_root=workspace_root, project_root=project_root, manifest=manifest, tasks=tasks, existing=job, state="failed", failure_reason=f"workspace_status={manifest['status']}")
+        else:
+            job = _write_job_state(paths=paths, workspace_root=workspace_root, project_root=project_root, manifest=manifest, tasks=tasks, existing=job, state="running")
     return {
         "ok": True,
         "command": "runtime run",
@@ -213,6 +271,8 @@ def runtime_run_payload(
         "failed_task_ids": _ids_with_status(tasks, "failed"),
         "task_counts": _task_counts(tasks),
         "memory_entry_count": _jsonl_count(paths["memory"]),
+        "job": _job_readback(job) if job else None,
+        "worker_adapter": _worker_adapter_descriptor(adapter),
         "external_behavior": dict(SAFETY_BOUNDARIES),
     }
 
@@ -238,6 +298,7 @@ def runtime_status_payload(*, workspace: str, project_root: Path) -> dict[str, A
         "blocked_task_ids": _ids_with_status(tasks, "blocked"),
         "memory_entry_count": _jsonl_count(paths["memory"]),
         "latest_event_summary": _event_summary(latest_event),
+        "job": _job_readback(_load_job(paths["job"], required=False)),
         "external_behavior": dict(SAFETY_BOUNDARIES),
     }
 
@@ -367,6 +428,127 @@ def runtime_close_payload(*, workspace: str, out: str | None, project_root: Path
     return payload
 
 
+def runtime_governance_payload(*, workspace: str, closure_packet: str, evidence_out: str, evidence_format: str, project_root: Path) -> dict[str, Any]:
+    if evidence_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_governance_format_invalid", f"Unsupported governance evidence format: {evidence_format}")
+    output_path = _safe_output_path(evidence_out, project_root, "runtime_governance")
+    closure_path = _safe_input_path(closure_packet, project_root, "runtime_governance_closure_packet")
+    closure = _load_input_json(closure_path, "runtime_governance_closure_packet")
+    status = runtime_status_payload(workspace=workspace, project_root=project_root)
+    replay = runtime_replay_payload(workspace=workspace, project_root=project_root)
+    closure_lifecycle = closure.get("packet", {}).get("lifecycle", {}) if isinstance(closure.get("packet"), dict) else {}
+    closure_replay = closure.get("replay", {}) if isinstance(closure.get("replay"), dict) else {}
+    workspace_identity_match = closure.get("workspace") == status["workspace"] == replay["workspace"]
+    task_counts_match = closure_lifecycle.get("task_counts") == status["task_counts"]
+    replay_valid = bool(replay.get("replay_valid")) and bool(closure_replay.get("replay_valid"))
+    closure_packet_valid = bool(closure.get("closure_packet_valid"))
+    closure_ready = bool(closure.get("closure_ready"))
+    blocking_reasons: list[str] = []
+    if closure.get("kind") != "runtime_closure_packet":
+        blocking_reasons.append("closure_packet_kind_invalid")
+    if not workspace_identity_match:
+        blocking_reasons.append("workspace_identity_mismatch")
+    if not task_counts_match:
+        blocking_reasons.append("task_counts_mismatch")
+    if not replay_valid:
+        blocking_reasons.append("replay_readback_invalid")
+    if not closure_packet_valid:
+        blocking_reasons.append("closure_packet_invalid")
+    if not closure_ready:
+        blocking_reasons.append("closure_not_ready")
+    runtime_governance_ready = not blocking_reasons
+    evidence = {
+        "ok": True,
+        "command": "runtime governance",
+        "kind": "runtime_governance_evidence",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": status["workspace"],
+        "goal": status.get("goal", ""),
+        "runtime_status": status["workspace_status"],
+        "task_counts": status["task_counts"],
+        "completed_task_ids": status["completed_task_ids"],
+        "failed_task_ids": status["failed_task_ids"],
+        "memory_entry_count": status["memory_entry_count"],
+        "replay_valid": replay_valid,
+        "closure_packet_valid": closure_packet_valid,
+        "closure_ready": closure_ready,
+        "runtime_governance_ready": runtime_governance_ready,
+        "blocking_reasons": blocking_reasons,
+        "closure_packet_path": _project_relative(closure_path, project_root),
+        "closure_packet_hash": _sha256_file(closure_path),
+        "evidence_path": _project_relative(output_path, project_root),
+        "evidence_format": evidence_format,
+        "safety_boundaries": dict(SAFETY_BOUNDARIES),
+        "explicit_boundary": list(EXPLICIT_RUNTIME_BOUNDARY),
+        "written": True,
+    }
+    if evidence_format == "json":
+        _write_json(output_path, evidence)
+    else:
+        _write_text(output_path, _format_governance_text(evidence))
+    return evidence
+
+
+def runtime_job_payload(*, action: str, workspace: str, job_id: str | None, reason: str | None, project_root: Path) -> dict[str, Any]:
+    workspace_root = _existing_workspace_path(workspace, project_root)
+    paths = _workspace_files(workspace_root, project_root)
+    manifest = _load_manifest(paths["manifest"])
+    graph = _load_task_graph(paths["task_graph"], allow_empty=True)
+    tasks = _graph_tasks(graph, allow_empty=True)
+    if action == "create":
+        required_job_id = _require_job_id(job_id)
+        if paths["job"].exists():
+            raise RuntimeFoundationError("runtime_job_already_exists", "Runtime job already exists for this workspace.")
+        payload = _write_job_state(paths=paths, workspace_root=workspace_root, project_root=project_root, manifest=manifest, tasks=tasks, existing=None, state="created", job_id=required_job_id)
+        return {"ok": True, "command": "runtime job create", **_job_readback(payload), "external_behavior": dict(SAFETY_BOUNDARIES)}
+
+    job = _load_job(paths["job"], required=True)
+    if job_id is not None and job.get("job_id") != job_id:
+        raise RuntimeFoundationError("runtime_job_id_mismatch", f"Runtime job id does not match: {job_id}")
+    if action == "status":
+        return {"ok": True, "command": "runtime job status", **_job_readback(job), "external_behavior": dict(SAFETY_BOUNDARIES)}
+    if action == "cancel":
+        if not _job_cancel_allowed(str(job.get("state", ""))):
+            raise RuntimeFoundationError("runtime_job_cancel_not_allowed", f"Runtime job cannot be cancelled from state: {job.get('state')}")
+        payload = _write_job_state(paths=paths, workspace_root=workspace_root, project_root=project_root, manifest=manifest, tasks=tasks, existing=job, state="cancelled")
+        return {"ok": True, "command": "runtime job cancel", **_job_readback(payload), "external_behavior": dict(SAFETY_BOUNDARIES)}
+    if action == "fail":
+        if str(job.get("state")) in {"completed", "cancelled"}:
+            raise RuntimeFoundationError("runtime_job_fail_not_allowed", f"Runtime job cannot be failed from state: {job.get('state')}")
+        payload = _write_job_state(paths=paths, workspace_root=workspace_root, project_root=project_root, manifest=manifest, tasks=tasks, existing=job, state="failed", failure_reason=reason or "manual failure")
+        return {"ok": True, "command": "runtime job fail", **_job_readback(payload), "external_behavior": dict(SAFETY_BOUNDARIES)}
+    if action == "resume":
+        if not _job_resume_allowed(str(job.get("state", ""))):
+            raise RuntimeFoundationError("runtime_job_resume_not_allowed", f"Runtime job cannot be resumed from state: {job.get('state')}")
+        payload = _write_job_state(paths=paths, workspace_root=workspace_root, project_root=project_root, manifest=manifest, tasks=tasks, existing=job, state="running", failure_reason=None)
+        return {"ok": True, "command": "runtime job resume", **_job_readback(payload), "external_behavior": dict(SAFETY_BOUNDARIES)}
+    raise RuntimeFoundationError("runtime_job_unknown_action", f"Unsupported runtime job action: {action}")
+
+
+def runtime_worker_adapter_payload(*, list_adapters: bool, name: str | None, describe: bool) -> dict[str, Any]:
+    if list_adapters and (name or describe):
+        raise RuntimeFoundationError("runtime_worker_adapter_args_invalid", "Use --list by itself, or --name with --describe.")
+    if list_adapters:
+        return {
+            "ok": True,
+            "command": "runtime worker-adapter",
+            "kind": "runtime_worker_adapter_registry",
+            "schema_version": SCHEMA_VERSION,
+            "adapters": [_worker_adapter_descriptor(adapter_name) for adapter_name in sorted(WORKER_ADAPTERS)],
+            "external_behavior": dict(SAFETY_BOUNDARIES),
+        }
+    if describe and name:
+        return {
+            "ok": True,
+            "command": "runtime worker-adapter",
+            "kind": "runtime_worker_adapter_contract",
+            "schema_version": SCHEMA_VERSION,
+            "adapter": _worker_adapter_descriptor(name),
+            "external_behavior": dict(SAFETY_BOUNDARIES),
+        }
+    raise RuntimeFoundationError("runtime_worker_adapter_args_required", "runtime worker-adapter requires --list or --name with --describe.")
+
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -433,6 +615,24 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"closure_ready: {str(payload['closure_ready']).lower()}")
         lines.append(f"readiness: {payload['readiness']}")
         lines.append(f"blocking_reasons: {', '.join(payload['blocking_reasons']) or 'none'}")
+    if payload.get("kind") == "runtime_governance_evidence":
+        lines.append(f"runtime_governance_ready: {str(payload['runtime_governance_ready']).lower()}")
+        lines.append(f"closure_ready: {str(payload['closure_ready']).lower()}")
+        lines.append(f"replay_valid: {str(payload['replay_valid']).lower()}")
+        lines.append(f"evidence_path: {payload['evidence_path']}")
+        lines.append(f"blocking_reasons: {', '.join(payload['blocking_reasons']) or 'none'}")
+    if payload.get("kind") == "runtime_job_state" or "job_id" in payload:
+        lines.append(f"job_id: {payload['job_id']}")
+        lines.append(f"job_state: {payload['state']}")
+        lines.append(f"resume_allowed: {str(payload['resume_allowed']).lower()}")
+        lines.append(f"cancel_allowed: {str(payload['cancel_allowed']).lower()}")
+    if payload.get("kind") == "runtime_worker_adapter_registry":
+        lines.append("adapters: " + ", ".join(adapter["name"] for adapter in payload["adapters"]))
+    if payload.get("kind") == "runtime_worker_adapter_contract":
+        adapter = payload["adapter"]
+        lines.append(f"adapter: {adapter['name']}")
+        lines.append(f"external_execution_enabled: {str(adapter['external_execution_enabled']).lower()}")
+        lines.append(f"reason: {adapter['reason']}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
@@ -487,6 +687,7 @@ def _workspace_files(workspace_root: Path, project_root: Path) -> dict[str, Path
         "task_graph": _workspace_child(workspace_root, "task_graph.json"),
         "memory": _workspace_child(workspace_root, "memory.jsonl"),
         "events": _workspace_child(workspace_root, "events.jsonl"),
+        "job": _workspace_child(workspace_root, "runtime-job.json"),
     }
 
 
@@ -501,6 +702,114 @@ def _workspace_child(workspace_root: Path, relative: str) -> Path:
     if target.exists() and target.is_symlink():
         raise RuntimeFoundationError("runtime_workspace_file_symlink_refused", f"Refusing workspace file symlink: {relative}")
     return resolved
+
+
+def _worker_adapter_descriptor(name: str) -> dict[str, Any]:
+    if name not in WORKER_ADAPTERS:
+        raise RuntimeFoundationError("runtime_worker_adapter_unknown", f"Unsupported runtime worker adapter: {name}")
+    return dict(WORKER_ADAPTERS[name])
+
+
+def _require_job_id(job_id: str | None) -> str:
+    if not job_id:
+        raise RuntimeFoundationError("runtime_job_id_required", "Runtime job id is required.")
+    if not TASK_ID_RE.match(job_id) or job_id in {".", ".."}:
+        raise RuntimeFoundationError("runtime_job_id_invalid", f"Invalid runtime job id: {job_id}")
+    return job_id
+
+
+def _load_job(path: Path, *, required: bool) -> dict[str, Any] | None:
+    if not path.exists():
+        if required:
+            raise RuntimeFoundationError("runtime_job_missing", "Runtime job state is missing. Run runtime job create first.")
+        return None
+    data = _load_json(path, "runtime_job_missing", "Runtime job state is missing.")
+    if data.get("schema_version") != SCHEMA_VERSION or data.get("kind") != "runtime_job_state":
+        raise RuntimeFoundationError("runtime_job_invalid", "Runtime job state schema is invalid.")
+    state = str(data.get("state", ""))
+    if state not in JOB_STATES:
+        raise RuntimeFoundationError("runtime_job_invalid", f"Runtime job state is unsupported: {state}")
+    return data
+
+
+def _write_job_state(
+    *,
+    paths: dict[str, Path],
+    workspace_root: Path,
+    project_root: Path,
+    manifest: dict[str, Any],
+    tasks: list[dict[str, Any]],
+    existing: dict[str, Any] | None,
+    state: str,
+    job_id: str | None = None,
+    failure_reason: str | None = None,
+) -> dict[str, Any]:
+    if state not in JOB_STATES:
+        raise RuntimeFoundationError("runtime_job_invalid", f"Runtime job state is unsupported: {state}")
+    revision = int(existing.get("revision", 0)) + 1 if existing else 1
+    created_timestamp = existing.get("created_at_or_static_timestamp") if existing else _logical_timestamp(1)
+    current_reason = failure_reason if failure_reason is not None else (existing or {}).get("failure_reason")
+    if state != "failed":
+        current_reason = None
+    payload = {
+        "kind": "runtime_job_state",
+        "schema_version": SCHEMA_VERSION,
+        "job_id": _require_job_id(job_id or (str(existing.get("job_id")) if existing else None)),
+        "workspace": _project_relative(workspace_root, project_root),
+        "goal": str(manifest.get("goal", "")),
+        "state": state,
+        "created_at_or_static_timestamp": created_timestamp,
+        "updated_at_or_static_timestamp": _logical_timestamp(revision),
+        "revision": revision,
+        "task_counts": _task_counts(tasks),
+        "last_event_summary": _event_summary(_latest_jsonl(paths["events"])),
+        "resume_allowed": _job_resume_allowed(state),
+        "cancel_allowed": _job_cancel_allowed(state),
+        "failure_reason": current_reason,
+    }
+    _write_json(paths["job"], payload)
+    return payload
+
+
+def _job_readback(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    state = str(job.get("state", ""))
+    return {
+        "kind": "runtime_job_state",
+        "schema_version": SCHEMA_VERSION,
+        "job_id": str(job.get("job_id", "")),
+        "workspace": str(job.get("workspace", "")),
+        "goal": str(job.get("goal", "")),
+        "state": state,
+        "created_at_or_static_timestamp": str(job.get("created_at_or_static_timestamp", "")),
+        "updated_at_or_static_timestamp": str(job.get("updated_at_or_static_timestamp", "")),
+        "task_counts": dict(job.get("task_counts", {})),
+        "last_event_summary": str(job.get("last_event_summary", "")),
+        "resume_allowed": _job_resume_allowed(state),
+        "cancel_allowed": _job_cancel_allowed(state),
+        "failure_reason": job.get("failure_reason"),
+    }
+
+
+def _ensure_job_allows_run(job: dict[str, Any]) -> None:
+    state = str(job.get("state", ""))
+    if state == "cancelled":
+        raise RuntimeFoundationError("runtime_job_cancelled", "Runtime job is cancelled and cannot execute.")
+    if state == "failed":
+        raise RuntimeFoundationError("runtime_job_failed", "Runtime job is failed; resume it before executing again.")
+
+
+def _job_resume_allowed(state: str) -> bool:
+    return state in {"created", "failed"}
+
+
+def _job_cancel_allowed(state: str) -> bool:
+    return state in {"created", "running", "failed"}
+
+
+def _logical_timestamp(revision: int) -> str:
+    return f"logical-{revision:06d}"
 
 
 def _manifest_payload(workspace_root: Path, goal: str, status: str, paths: dict[str, Path], project_root: Path) -> dict[str, Any]:
@@ -934,6 +1243,52 @@ def _runtime_file_digests(paths: dict[str, Path], project_root: Path) -> dict[st
     return digests
 
 
+def _safe_input_path(path: str, project_root: Path, code_prefix: str) -> Path:
+    if not str(path).strip():
+        raise RuntimeFoundationError(f"{code_prefix}_required", "Input path is required.")
+    raw = Path(path)
+    if any(part == ".." for part in raw.parts):
+        raise RuntimeFoundationError(f"{code_prefix}_path_traversal", f"Refusing input path traversal: {path}")
+    if any(part == ".env" for part in raw.parts):
+        raise RuntimeFoundationError(f"{code_prefix}_dotenv_refused", f"Refusing .env input path: {path}")
+    root = project_root.resolve(strict=True)
+    candidate = raw if raw.is_absolute() else root / raw
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeFoundationError(f"{code_prefix}_outside_project", f"Input path must stay inside project root: {path}") from exc
+    parent = candidate.parent.resolve(strict=False)
+    if parent != root and root not in parent.parents:
+        raise RuntimeFoundationError(f"{code_prefix}_outside_project", f"Input path must stay inside project root: {path}")
+    if candidate.parent.exists() and candidate.parent.is_symlink():
+        raise RuntimeFoundationError(f"{code_prefix}_parent_symlink", f"Refusing symlink input parent: {candidate.parent}")
+    if not candidate.exists():
+        raise RuntimeFoundationError(f"{code_prefix}_missing", f"Input file does not exist: {candidate}")
+    if candidate.is_symlink():
+        raise RuntimeFoundationError(f"{code_prefix}_symlink", f"Refusing symlink input path: {candidate}")
+    if not candidate.is_file():
+        raise RuntimeFoundationError(f"{code_prefix}_not_file", f"Input path is not a file: {candidate}")
+    return candidate.resolve(strict=False)
+
+
+def _load_input_json(path: Path, code_prefix: str) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", f"Input JSON is invalid: {path.name}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", f"Input JSON must be an object: {path.name}")
+    return data
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _safe_output_path(path: str, project_root: Path, code_prefix: str) -> Path:
     if not str(path).strip():
         raise RuntimeFoundationError(f"{code_prefix}_output_required", "Output path is required.")
@@ -987,6 +1342,31 @@ def _format_evidence_text(payload: dict[str, Any]) -> str:
     lines.extend(["", "## File Digests", ""])
     for name, digest in payload["file_digests"].items():
         lines.append(f"- {name}: {digest['sha256']} ({digest['bytes']} bytes)")
+    lines.extend(["", "provider/runtime/adapter execution: not triggered"])
+    return "\n".join(lines)
+
+
+def _format_governance_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Runtime Governance Evidence",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"workspace: {payload['workspace']}",
+        f"goal: {payload['goal']}",
+        f"runtime_status: {payload['runtime_status']}",
+        f"runtime_governance_ready: {str(payload['runtime_governance_ready']).lower()}",
+        f"closure_packet_valid: {str(payload['closure_packet_valid']).lower()}",
+        f"closure_ready: {str(payload['closure_ready']).lower()}",
+        f"replay_valid: {str(payload['replay_valid']).lower()}",
+        f"memory_entry_count: {payload['memory_entry_count']}",
+        f"closure_packet_path: {payload['closure_packet_path']}",
+        f"closure_packet_hash: {payload['closure_packet_hash']}",
+        f"blocking_reasons: {', '.join(payload['blocking_reasons']) if payload['blocking_reasons'] else 'none'}",
+        "",
+        "## Explicit Boundary",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in payload["explicit_boundary"])
     lines.extend(["", "provider/runtime/adapter execution: not triggered"])
     return "\n".join(lines)
 
