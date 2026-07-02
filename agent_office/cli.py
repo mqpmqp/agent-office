@@ -45,6 +45,15 @@ from .orchestration import (
     orchestrate_run_payload,
     orchestrate_validate_payload,
 )
+from .runtime_foundation import (
+    RuntimeFoundationError,
+    format_runtime_payload,
+    runtime_error_payload,
+    runtime_init_payload,
+    runtime_plan_payload,
+    runtime_run_payload,
+    runtime_status_payload,
+)
 from .objectives import (
     ObjectiveSpecError,
     objective_detail_payload,
@@ -1377,6 +1386,38 @@ def cmd_orchestrate(args: argparse.Namespace) -> int:
     raise AgentOfficeError("orchestrate requires run, inspect, or validate.")
 
 
+def cmd_runtime(args: argparse.Namespace) -> int:
+    action = args.runtime_action
+    command = f"runtime {action}"
+    try:
+        if action == "init":
+            payload = runtime_init_payload(workspace=args.workspace, goal=args.goal, project_root=PROJECT_ROOT)
+        elif action == "plan":
+            payload = runtime_plan_payload(workspace=args.workspace, tasks=list(args.task or []), depends=list(args.depends or []), project_root=PROJECT_ROOT)
+        elif action == "run":
+            payload = runtime_run_payload(
+                workspace=args.workspace,
+                adapter=args.adapter,
+                dry_run=bool(args.dry_run),
+                execute_local=bool(args.execute_local),
+                reset=bool(args.reset),
+                project_root=PROJECT_ROOT,
+            )
+        elif action == "status":
+            payload = runtime_status_payload(workspace=args.workspace, project_root=PROJECT_ROOT)
+        else:
+            raise RuntimeFoundationError("runtime_unknown_action", "unknown runtime action")
+    except RuntimeFoundationError as exc:
+        payload = runtime_error_payload(command, exc)
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            raise AgentOfficeError(str(exc)) from exc
+        return 2
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runtime_payload(payload))
+    return 0
+
+
 def cmd_run_demo(args: argparse.Namespace) -> int:
     demo_mode = resolve_mode(args, "run-demo")
     validate_task_id(args.task_id)
@@ -1577,6 +1618,32 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--path", required=True, help="Orchestration artifact directory.")
     validate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     validate.set_defaults(func=cmd_orchestrate)
+
+    p = sub.add_parser("runtime", help="Manage a local deterministic runtime foundation workspace.")
+    runtime_sub = p.add_subparsers(dest="runtime_action", required=True)
+    runtime_init = runtime_sub.add_parser("init", help="Create a local runtime workspace manifest.")
+    runtime_init.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_init.add_argument("--goal", required=True, help="Runtime workspace goal.")
+    runtime_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_init.set_defaults(func=cmd_runtime)
+    runtime_plan = runtime_sub.add_parser("plan", help="Write a static deterministic runtime task graph.")
+    runtime_plan.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_plan.add_argument("--task", action="append", default=[], required=True, help="Task in id:title format. Repeatable.")
+    runtime_plan.add_argument("--depends", action="append", default=[], help="Dependency in task:dependency format. Repeatable.")
+    runtime_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_plan.set_defaults(func=cmd_runtime)
+    runtime_run = runtime_sub.add_parser("run", help="Run or preview the local deterministic runtime loop.")
+    runtime_run.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_run.add_argument("--adapter", required=True, help="Local adapter name. Supported: local-static, noop.")
+    runtime_run.add_argument("--dry-run", action="store_true", help="Preview ready tasks without mutating task state.")
+    runtime_run.add_argument("--execute-local", action="store_true", help="Execute deterministic local/static task results.")
+    runtime_run.add_argument("--reset", action="store_true", help="Reset task statuses before --execute-local.")
+    runtime_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_run.set_defaults(func=cmd_runtime)
+    runtime_status = runtime_sub.add_parser("status", help="Read back runtime workspace status and memory counts.")
+    runtime_status.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_status.set_defaults(func=cmd_runtime)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
