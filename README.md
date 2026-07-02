@@ -48,6 +48,10 @@ python3 -m agent_office runtime plan --workspace .ai/workspaces/demo --task "ins
 python3 -m agent_office runtime run --workspace .ai/workspaces/demo --adapter local-static --dry-run --json
 python3 -m agent_office runtime run --workspace .ai/workspaces/demo --adapter local-static --execute-local --json
 python3 -m agent_office runtime status --workspace .ai/workspaces/demo --json
+python3 -m agent_office runtime packet --workspace .ai/workspaces/demo --json
+python3 -m agent_office runtime replay --workspace .ai/workspaces/demo --json
+python3 -m agent_office runtime evidence --workspace .ai/workspaces/demo --out .ai/workspaces/demo/evidence.json --format json --json
+python3 -m agent_office runtime close --workspace .ai/workspaces/demo --out .ai/workspaces/demo/closure_packet.json --json
 ```
 
 
@@ -119,6 +123,10 @@ agent-office runtime plan --workspace .ai/workspaces/demo --task "inspect:Inspec
 agent-office runtime run --workspace .ai/workspaces/demo --adapter local-static --dry-run --json
 agent-office runtime run --workspace .ai/workspaces/demo --adapter local-static --execute-local --json
 agent-office runtime status --workspace .ai/workspaces/demo --json
+agent-office runtime packet --workspace .ai/workspaces/demo --json
+agent-office runtime replay --workspace .ai/workspaces/demo --json
+agent-office runtime evidence --workspace .ai/workspaces/demo --out .ai/workspaces/demo/evidence.json --format json --json
+agent-office runtime close --workspace .ai/workspaces/demo --out .ai/workspaces/demo/closure_packet.json --json
 agent-office profiles --plan --audit
 agent-office profiles --plan --audit --json
 agent-office doctor --profiles

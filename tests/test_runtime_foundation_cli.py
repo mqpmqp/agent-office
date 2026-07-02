@@ -56,6 +56,17 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", stdout + stderr)
         return json.loads(stdout)
 
+    def _completed_workspace(self, root: Path, workspace: str = ".ai/workspaces/demo") -> None:
+        self._init(root, workspace)
+        self._plan(root, workspace)
+        code, stdout, stderr = run_cli(
+            ["runtime", "run", "--workspace", workspace, "--adapter", "local-static", "--execute-local", "--json"],
+            root,
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["task_counts"]["completed"], 3)
+        self.assertNotIn("Traceback", stdout + stderr)
+
     def test_init_json_positive_creates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -332,6 +343,122 @@ class RuntimeFoundationCliTests(unittest.TestCase):
             self.assertIn(key, payload)
         self.assertFalse(payload["external_behavior"]["adapter_external_behavior"])
         self.assertNotIn("Traceback", stdout + stderr + json_stdout + json_stderr)
+
+    def test_packet_replay_evidence_and_close_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._completed_workspace(root)
+            packet_code, packet_stdout, packet_stderr = run_cli(["runtime", "packet", "--workspace", ".ai/workspaces/demo", "--json"], root)
+            replay_code, replay_stdout, replay_stderr = run_cli(["runtime", "replay", "--workspace", ".ai/workspaces/demo", "--json"], root)
+            evidence_path = root / ".ai" / "workspaces" / "demo" / "evidence.json"
+            evidence_code, evidence_stdout, evidence_stderr = run_cli(
+                ["runtime", "evidence", "--workspace", ".ai/workspaces/demo", "--out", ".ai/workspaces/demo/evidence.json", "--format", "json", "--json"],
+                root,
+            )
+            close_code, close_stdout, close_stderr = run_cli(
+                ["runtime", "close", "--workspace", ".ai/workspaces/demo", "--out", ".ai/workspaces/demo/closure_packet.json", "--json"],
+                root,
+            )
+            text_code, text_stdout, text_stderr = run_cli(["runtime", "close", "--workspace", ".ai/workspaces/demo"], root)
+            self.assertTrue(evidence_path.exists())
+            written = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(packet_code, 0, packet_stderr)
+        packet = json.loads(packet_stdout)
+        self.assertEqual(packet["kind"], "runtime_lifecycle_packet")
+        self.assertEqual(packet["lifecycle"]["workspace_status"], "completed")
+        self.assertTrue(packet["lifecycle"]["terminal"])
+        self.assertTrue(packet["readback_contract"]["replay_valid"])
+        self.assertFalse(packet["external_behavior"]["adapter_external_behavior"])
+
+        self.assertEqual(replay_code, 0, replay_stderr)
+        replay = json.loads(replay_stdout)
+        self.assertTrue(replay["replay_valid"])
+        self.assertTrue(replay["graph_order_valid"])
+        self.assertEqual(replay["memory_entry_count"], 3)
+        self.assertEqual(replay["event_entry_count"], 3)
+        self.assertEqual([item["task_id"] for item in replay["task_statuses"]], ["inspect", "implement", "review"])
+
+        self.assertEqual(evidence_code, 0, evidence_stderr)
+        evidence = json.loads(evidence_stdout)
+        self.assertEqual(evidence["kind"], "runtime_workspace_evidence")
+        self.assertEqual(written["file_digests"]["manifest"]["path"], ".ai/workspaces/demo/manifest.json")
+        self.assertEqual(written["packet"]["lifecycle"]["completed_task_ids"], ["inspect", "implement", "review"])
+
+        self.assertEqual(close_code, 0, close_stderr)
+        close = json.loads(close_stdout)
+        self.assertTrue(close["closure_packet_valid"])
+        self.assertTrue(close["closure_ready"])
+        self.assertEqual(close["readiness"], "ready")
+        self.assertEqual(close["output_path"], ".ai/workspaces/demo/closure_packet.json")
+        self.assertEqual(text_code, 0, text_stderr)
+        self.assertIn("closure_packet_valid: true", text_stdout)
+        self.assertIn("readiness: ready", text_stdout)
+        self.assertNotIn("Traceback", packet_stdout + packet_stderr + replay_stdout + replay_stderr + evidence_stdout + evidence_stderr + close_stdout + close_stderr + text_stdout + text_stderr)
+
+    def test_evidence_text_and_output_path_errors_are_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as outside:
+            root = Path(tmpdir)
+            self._completed_workspace(root)
+            text_code, text_stdout, text_stderr = run_cli(
+                ["runtime", "evidence", "--workspace", ".ai/workspaces/demo", "--out", ".ai/workspaces/demo/evidence.md", "--format", "text", "--json"],
+                root,
+            )
+            text_artifact = root / ".ai" / "workspaces" / "demo" / "evidence.md"
+            text_body = text_artifact.read_text(encoding="utf-8")
+            outside_code, outside_stdout, outside_stderr = run_cli(
+                ["runtime", "evidence", "--workspace", ".ai/workspaces/demo", "--out", str(Path(outside) / "evidence.json"), "--json"],
+                root,
+            )
+            traversal_code, traversal_stdout, traversal_stderr = run_cli(
+                ["runtime", "evidence", "--workspace", ".ai/workspaces/demo", "--out", ".ai/workspaces/demo/../evidence.json", "--json"],
+                root,
+            )
+            symlink_target = root / ".ai" / "workspaces" / "demo" / "target.json"
+            symlink_target.write_text("keep\n", encoding="utf-8")
+            symlink_path = root / ".ai" / "workspaces" / "demo" / "link.json"
+            try:
+                symlink_path.symlink_to(symlink_target)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+            symlink_code, symlink_stdout, symlink_stderr = run_cli(
+                ["runtime", "evidence", "--workspace", ".ai/workspaces/demo", "--out", ".ai/workspaces/demo/link.json", "--json"],
+                root,
+            )
+
+        self.assertEqual(text_code, 0, text_stderr)
+        self.assertIn("# AgentOffice Runtime Workspace Evidence", text_body)
+        self.assertEqual(json.loads(text_stdout)["evidence_format"], "text")
+        cases = [
+            (outside_code, outside_stdout, outside_stderr, "runtime_evidence_outside_project"),
+            (traversal_code, traversal_stdout, traversal_stderr, "runtime_evidence_path_traversal"),
+            (symlink_code, symlink_stdout, symlink_stderr, "runtime_evidence_output_symlink"),
+        ]
+        for code, stdout, stderr, error_code in cases:
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads(stdout)["error_code"], error_code)
+            self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_replay_and_close_block_tampered_readback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._completed_workspace(root)
+            graph_path = root / ".ai" / "workspaces" / "demo" / "task_graph.json"
+            graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            graph["tasks"][1]["status"] = "pending"
+            graph_path.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
+            replay_code, replay_stdout, replay_stderr = run_cli(["runtime", "replay", "--workspace", ".ai/workspaces/demo", "--json"], root)
+            close_code, close_stdout, close_stderr = run_cli(["runtime", "close", "--workspace", ".ai/workspaces/demo", "--json"], root)
+
+        self.assertEqual(replay_code, 2)
+        replay = json.loads(replay_stdout)
+        self.assertFalse(replay["replay_valid"])
+        self.assertTrue(replay["mismatches"])
+        self.assertEqual(close_code, 2)
+        close = json.loads(close_stdout)
+        self.assertFalse(close["closure_packet_valid"])
+        self.assertIn("replay_readback_invalid", close["blocking_reasons"])
+        self.assertNotIn("Traceback", replay_stdout + replay_stderr + close_stdout + close_stderr)
 
 
 if __name__ == "__main__":
