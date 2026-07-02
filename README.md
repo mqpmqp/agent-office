@@ -38,6 +38,18 @@ python3 -m agent_office orchestrate inspect --path /tmp/ao-orch --json
 python3 -m agent_office orchestrate validate --path /tmp/ao-orch --json
 ```
 
+## Runtime Foundation Slice
+
+The runtime foundation slice is local, deterministic, and static. It writes only a project-local workspace manifest, task graph, JSONL memory/events, and local/static task results. It does not read `.env`, print environment values, call providers, call models, start daemons, run background workers, or execute external adapters.
+
+```bash
+python3 -m agent_office runtime init --workspace .ai/workspaces/demo --goal "demo" --json
+python3 -m agent_office runtime plan --workspace .ai/workspaces/demo --task "inspect:Inspect" --task "review:Review" --depends review:inspect --json
+python3 -m agent_office runtime run --workspace .ai/workspaces/demo --adapter local-static --dry-run --json
+python3 -m agent_office runtime run --workspace .ai/workspaces/demo --adapter local-static --execute-local --json
+python3 -m agent_office runtime status --workspace .ai/workspaces/demo --json
+```
+
 
 ## Claude Token Rule
 
@@ -102,6 +114,11 @@ agent-office objectives --phase P6-10 --json
 agent-office orchestrate run --task "Review this change safely" --mode static --out /tmp/ao-orch --json
 agent-office orchestrate inspect --path /tmp/ao-orch --json
 agent-office orchestrate validate --path /tmp/ao-orch --json
+agent-office runtime init --workspace .ai/workspaces/demo --goal "demo" --json
+agent-office runtime plan --workspace .ai/workspaces/demo --task "inspect:Inspect" --task "review:Review" --depends review:inspect --json
+agent-office runtime run --workspace .ai/workspaces/demo --adapter local-static --dry-run --json
+agent-office runtime run --workspace .ai/workspaces/demo --adapter local-static --execute-local --json
+agent-office runtime status --workspace .ai/workspaces/demo --json
 agent-office profiles --plan --audit
 agent-office profiles --plan --audit --json
 agent-office doctor --profiles
