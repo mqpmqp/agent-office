@@ -312,6 +312,7 @@ class ReviewLifecycleCliTests(unittest.TestCase):
     def test_default_validation_commands_include_review_lifecycle_suite(self) -> None:
         commands = [" ".join(command.argv) for command in review_lifecycle.DEFAULT_VALIDATION_COMMANDS]
         self.assertIn("python3 -m unittest tests.test_review_lifecycle_cli", commands)
+        self.assertIn("python3 -m agent_office review codex-deliver --help", commands)
 
     def test_validation_fixture_capture_records_review_lifecycle_command_and_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, tempfile.TemporaryDirectory() as fixture_dir:
@@ -339,8 +340,86 @@ class ReviewLifecycleCliTests(unittest.TestCase):
         for command in review_lifecycle.DEFAULT_VALIDATION_COMMANDS:
             joined = " ".join(command.argv)
             with self.subTest(command=command.name):
-                self.assertNotIn("review bundle", joined)
+                self.assertNotIn("review bundle --run-validation", joined)
                 self.assertNotIn("--run-validation", joined)
+                self.assertNotIn("--merge-authorized", joined)
+                self.assertNotIn("--push-authorized", joined)
+
+    def test_codex_deliver_safe_mode_creates_stable_report_without_merge_or_push(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, _report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            out = Path(export_dir) / "codex-deliver.md"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli([
+                    "review", "codex-deliver", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                    "--expected-source-head", head, "--expected-target-head", baseline, "--phase", "P34", "--run-id", "P34-TEST",
+                    "--out", str(out), "--json",
+                ])
+            payload = json.loads(stdout)
+            text = out.read_text(encoding="utf-8")
+            target_after = git(root, "rev-parse", "phase6/mainline")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(target_after, baseline)
+        expected_keys = {
+            "ok", "command", "phase", "run_id", "source_branch", "source_head", "expected_source_head", "target_branch",
+            "target_expected_head", "origin_source_head", "origin_target_head", "tracked_tree_clean", "untracked_artifacts_allowed",
+            "changed_files", "diff_stat", "diff_check_status", "validation_command_list", "pre_merge_validation_status",
+            "post_merge_validation_status", "merge_authorization_status", "push_authorization_status", "final_origin_target_status",
+            "safety_boundary_checklist", "readiness", "blocking_reasons", "outputs",
+        }
+        self.assertTrue(expected_keys.issubset(payload))
+        self.assertEqual(payload["command"], "review codex-deliver")
+        self.assertEqual(payload["readiness"], "ready")
+        self.assertFalse(payload["merge_gate_ready"])
+        self.assertIn("merge_authorization_missing", payload["blocking_reasons"])
+        self.assertIn("push_authorization_missing", payload["blocking_reasons"])
+        self.assertFalse(payload["merge_executed"])
+        self.assertFalse(payload["push_executed"])
+        self.assertIn("P34_CODEX_DELIVERY_RUNNER_COMPLETE", text)
+        self.assertIn("Safe mode generated this report only", text)
+        self.assertIn("no Claude merge packet generated", text)
+        self.assertNotIn("Traceback", stdout + stderr + text)
+
+    def test_codex_deliver_authorized_mode_requires_both_authorizations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, _report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            out = Path(export_dir) / "codex-deliver.md"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli([
+                    "review", "codex-deliver", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                    "--expected-source-head", head, "--expected-target-head", baseline, "--merge-authorized", "--out", str(out), "--json",
+                ])
+            payload = json.loads(stdout)
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["merge_authorization_status"], "authorized")
+        self.assertEqual(payload["push_authorization_status"], "not_authorized")
+        self.assertFalse(payload["merge_gate_ready"])
+        self.assertIn("push_authorization_missing", payload["blocking_reasons"])
+        self.assertNotIn("merge_authorization_missing", payload["blocking_reasons"])
+
+    def test_codex_deliver_head_mismatch_blocks_readiness_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, _head, _report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            out = Path(export_dir) / "codex-deliver.md"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli([
+                    "review", "codex-deliver", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                    "--expected-source-head", baseline, "--expected-target-head", baseline, "--out", str(out), "--json",
+                ])
+            payload = json.loads(stdout)
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["readiness"], "blocked")
+        self.assertIn("source_head_mismatch", payload["readiness_blocking_reasons"])
+        self.assertNotIn("Traceback", stdout + stderr)
 
     def test_codex_gate_positive_creates_readiness_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
@@ -385,14 +464,17 @@ class ReviewLifecycleCliTests(unittest.TestCase):
 
     def test_readme_documents_codex_only_default_and_legacy_claude_path(self) -> None:
         text = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
-        self.assertIn("Codex implementation -> Codex self-review -> full validation -> Codex merge gate -> push mainline", text)
+        self.assertIn("Codex implementation -> codex-deliver safe report -> full validation -> authorized merge gate -> push mainline", text)
+        self.assertIn("review codex-deliver --help", text)
         self.assertIn("review codex-gate --help", text)
         self.assertIn("optional/legacy/lower-level", text)
         self.assertIn("not the default mandatory path", text)
         self.assertIn("Codex-only does not mean skipping validation", text)
+        self.assertIn("--merge-authorized", text)
+        self.assertIn("--push-authorized", text)
 
     def test_review_help_is_available(self) -> None:
-        for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"], ["review", "codex-gate", "--help"]):
+        for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"], ["review", "codex-gate", "--help"], ["review", "codex-deliver", "--help"]):
             with self.subTest(argv=argv):
                 stdout = io.StringIO()
                 stderr = io.StringIO()

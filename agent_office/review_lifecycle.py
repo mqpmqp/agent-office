@@ -34,7 +34,12 @@ CODEX_ONLY_VALIDATION_CHECKLIST = (
     "./scripts/verify.sh",
     "./scripts/smoke-test.sh P6-PROFILES",
     "python3 -m agent_office run-staged P6-PROFILES --dry-run --reset",
-    "review help smokes",
+    "python3 -m agent_office review --help",
+    "python3 -m agent_office review bundle --help",
+    "python3 -m agent_office review attest --help",
+    "python3 -m agent_office review merge-packet --help",
+    "python3 -m agent_office review codex-gate --help",
+    "python3 -m agent_office review codex-deliver --help",
     "git diff --check",
 )
 EXPECTED_REVIEW_FIELDS = (
@@ -65,15 +70,19 @@ class CaptureCommand:
 
 DEFAULT_VALIDATION_COMMANDS = (
     CaptureCommand("compileall", ("python3", "-m", "compileall", "agent_office", "tests")),
+    CaptureCommand("tests.test_review_lifecycle_cli", ("python3", "-m", "unittest", "tests.test_review_lifecycle_cli")),
     CaptureCommand("unittest", ("python3", "-m", "unittest")),
     CaptureCommand("unittest discovery", ("python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py")),
     CaptureCommand("doctor --adapters", ("python3", "-m", "agent_office", "doctor", "--adapters")),
     CaptureCommand("verify.sh", ("./scripts/verify.sh",)),
     CaptureCommand("smoke-test.sh P6-PROFILES", ("./scripts/smoke-test.sh", "P6-PROFILES")),
     CaptureCommand("run-staged P6-PROFILES --dry-run --reset", ("python3", "-m", "agent_office", "run-staged", "P6-PROFILES", "--dry-run", "--reset")),
-    CaptureCommand("orchestrate --help", ("python3", "-m", "agent_office", "orchestrate", "--help")),
-    CaptureCommand("tests.test_orchestration_cli", ("python3", "-m", "unittest", "tests.test_orchestration_cli")),
-    CaptureCommand("tests.test_review_lifecycle_cli", ("python3", "-m", "unittest", "tests.test_review_lifecycle_cli")),
+    CaptureCommand("review --help", ("python3", "-m", "agent_office", "review", "--help")),
+    CaptureCommand("review bundle --help", ("python3", "-m", "agent_office", "review", "bundle", "--help")),
+    CaptureCommand("review attest --help", ("python3", "-m", "agent_office", "review", "attest", "--help")),
+    CaptureCommand("review merge-packet --help", ("python3", "-m", "agent_office", "review", "merge-packet", "--help")),
+    CaptureCommand("review codex-gate --help", ("python3", "-m", "agent_office", "review", "codex-gate", "--help")),
+    CaptureCommand("review codex-deliver --help", ("python3", "-m", "agent_office", "review", "codex-deliver", "--help")),
     CaptureCommand("git diff --check", ("git", "diff", "--check")),
 )
 
@@ -348,6 +357,103 @@ def review_codex_gate_payload(
     )
 
 
+def review_codex_deliver_payload(
+    *,
+    source: str,
+    target: str,
+    expected_source_head: str,
+    expected_target_head: str,
+    out: str | Path,
+    project_root: Path,
+    phase: str | None = None,
+    run_id: str | None = None,
+    merge_authorized: bool = False,
+    push_authorized: bool = False,
+    allow_dirty: bool = False,
+    mkdirs: bool = False,
+) -> dict[str, Any]:
+    command = "review codex-deliver"
+    root = project_root.resolve()
+    _require_branch(root, source)
+    _require_branch(root, target)
+    expected_source = _resolve_commit(root, expected_source_head, "source")
+    expected_target = _resolve_commit(root, expected_target_head, "target")
+    source_head = _git(root, ("rev-parse", source)).stdout.strip()
+    target_head = _git(root, ("rev-parse", target)).stdout.strip()
+    origin_source_head = _git_optional(root, f"origin/{source}")
+    origin_target_head = _git_optional(root, f"origin/{target}")
+    tracked_status = _tracked_status(root)
+    untracked_files = _untracked_files(root)
+    diff_check = _git_capture(root, ("diff", "--check", expected_target, expected_source))
+    changed_files = _git(root, ("diff", "--name-only", expected_target, expected_source)).stdout.splitlines()
+    diff_stat = _git(root, ("diff", "--stat", expected_target, expected_source)).stdout
+    name_status = _git(root, ("diff", "--name-status", expected_target, expected_source)).stdout
+
+    readiness_blockers: list[str] = []
+    if source_head != expected_source:
+        readiness_blockers.append("source_head_mismatch")
+    if target_head != expected_target:
+        readiness_blockers.append("target_head_mismatch")
+    if origin_source_head != "unavailable" and origin_source_head != expected_source:
+        readiness_blockers.append("origin_source_head_mismatch")
+    if origin_target_head != "unavailable" and origin_target_head != expected_target:
+        readiness_blockers.append("origin_target_head_mismatch")
+    if tracked_status and not allow_dirty:
+        readiness_blockers.append("tracked_tree_dirty")
+    if diff_check["exit_code"] != 0:
+        readiness_blockers.append("diff_check_failed")
+
+    merge_gate_blockers = list(readiness_blockers)
+    if not merge_authorized:
+        merge_gate_blockers.append("merge_authorization_missing")
+    if not push_authorized:
+        merge_gate_blockers.append("push_authorization_missing")
+
+    out_path = _prepare_output_path(out, "review_codex_deliver", mkdirs=mkdirs)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "command": command,
+        "phase": phase or "unspecified",
+        "run_id": run_id or f"{source}->{target}",
+        "source_branch": source,
+        "source_head": source_head,
+        "expected_source_head": expected_source,
+        "target_branch": target,
+        "target_head": target_head,
+        "target_expected_head": expected_target,
+        "origin_source_head": origin_source_head,
+        "origin_target_head": origin_target_head,
+        "tracked_tree_clean": not bool(tracked_status),
+        "tracked_status": tracked_status or "clean",
+        "untracked_artifacts_allowed": True,
+        "untracked_artifact_count": len(untracked_files),
+        "changed_files": changed_files,
+        "diff_stat": diff_stat,
+        "name_status": name_status,
+        "diff_check_status": "pass" if diff_check["exit_code"] == 0 else "fail",
+        "diff_check_exit_code": diff_check["exit_code"],
+        "validation_command_list": codex_only_validation_command_list(),
+        "pre_merge_validation_status": "not_run_by_runner",
+        "post_merge_validation_status": "not_executed",
+        "merge_authorization_status": "authorized" if merge_authorized else "not_authorized",
+        "push_authorization_status": "authorized" if push_authorized else "not_authorized",
+        "merge_executed": False,
+        "push_executed": False,
+        "final_origin_target_status": origin_target_head,
+        "safety_boundary_checklist": _codex_delivery_safety_checklist(),
+        "claude_path": "optional_legacy_lower_level",
+        "readiness": "ready" if not readiness_blockers else "blocked",
+        "readiness_blocking_reasons": readiness_blockers,
+        "merge_gate_ready": not merge_gate_blockers,
+        "blocking_reasons": merge_gate_blockers,
+        "outputs": {"codex_delivery_report": str(out_path)},
+        "marker": "P34_CODEX_DELIVERY_RUNNER_COMPLETE",
+    }
+    _safe_write(out_path, _codex_deliver_markdown(payload))
+    return payload
+
+
+
 def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
     lines = ["AgentOffice review lifecycle command complete", f"command: {payload['command']}"]
     for key in ("marker", "review_marker", "merge_marker", "status"):
@@ -356,10 +462,10 @@ def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
     outputs = payload.get("outputs")
     if isinstance(outputs, dict):
         lines.append("outputs:")
-        for key in ("bundle", "prompt", "attestation", "merge_packet", "codex_gate"):
+        for key in ("bundle", "prompt", "attestation", "merge_packet", "codex_gate", "codex_delivery_report"):
             if outputs.get(key):
                 lines.append(f"  {key}: {outputs[key]}")
-    if payload.get("command") == "review codex-gate":
+    if payload.get("command") in {"review codex-gate", "review codex-deliver"}:
         lines.append("next_action: run full validation, then use a separately authorized Codex merge gate")
     else:
         lines.append("next_action: hand artifacts to Claude for artifact-based review or run the next explicit lifecycle step")
@@ -690,6 +796,111 @@ def _prompt_markdown(*, baseline: str, head: str, branch: str, report_path: Path
         review_marker,
     ]
     return "\n".join(lines)
+
+
+def codex_only_validation_command_list() -> list[str]:
+    return list(CODEX_ONLY_VALIDATION_CHECKLIST)
+
+
+def _codex_delivery_safety_checklist() -> list[str]:
+    return [
+        ".env not read",
+        "env vars not printed",
+        "provider/model/runtime/adapter external behavior not triggered",
+        "no force push",
+        "no tag",
+        "no Claude output generated",
+        "no Claude attestation generated",
+        "no Claude merge packet generated",
+    ]
+
+
+def _untracked_files(root: Path) -> list[str]:
+    return [line[3:] for line in _git(root, ("status", "--short", "--untracked-files=all")).stdout.splitlines() if line.startswith("?? ")]
+
+
+def _codex_deliver_markdown(payload: dict[str, Any]) -> str:
+    return "\n".join([
+        "# AgentOffice Codex Delivery Runner Report",
+        "",
+        "Marker: P34_CODEX_DELIVERY_RUNNER_COMPLETE",
+        "",
+        "## Identity",
+        "",
+        f"- phase: {payload['phase']}",
+        f"- run_id: {payload['run_id']}",
+        f"- command: {payload['command']}",
+        "",
+        "## Source And Target",
+        "",
+        f"- source_branch: {payload['source_branch']}",
+        f"- source_head: {payload['source_head']}",
+        f"- expected_source_head: {payload['expected_source_head']}",
+        f"- origin_source_head: {payload['origin_source_head']}",
+        f"- target_branch: {payload['target_branch']}",
+        f"- target_head: {payload['target_head']}",
+        f"- target_expected_head: {payload['target_expected_head']}",
+        f"- origin_target_head: {payload['origin_target_head']}",
+        "",
+        "## Readiness",
+        "",
+        f"- readiness: {payload['readiness']}",
+        f"- merge_gate_ready: {str(payload['merge_gate_ready']).lower()}",
+        f"- blocking_reasons: {', '.join(payload['blocking_reasons']) if payload['blocking_reasons'] else 'none'}",
+        f"- readiness_blocking_reasons: {', '.join(payload['readiness_blocking_reasons']) if payload['readiness_blocking_reasons'] else 'none'}",
+        "",
+        "## Working Tree",
+        "",
+        f"- tracked_tree_clean: {str(payload['tracked_tree_clean']).lower()}",
+        f"- tracked_status: {payload['tracked_status']}",
+        f"- untracked_artifacts_allowed: {str(payload['untracked_artifacts_allowed']).lower()}",
+        f"- untracked_artifact_count: {payload['untracked_artifact_count']}",
+        "",
+        "## Diff",
+        "",
+        "### Changed Files",
+        "",
+        _bullet_list(payload["changed_files"]),
+        "",
+        "### Name Status",
+        "",
+        _fence(payload["name_status"]),
+        "",
+        "### Diff Stat",
+        "",
+        _fence(payload["diff_stat"]),
+        "",
+        f"diff_check_status: {payload['diff_check_status']}",
+        f"diff_check_exit_code: {payload['diff_check_exit_code']}",
+        "",
+        "## Validation",
+        "",
+        f"- pre_merge_validation_status: {payload['pre_merge_validation_status']}",
+        f"- post_merge_validation_status: {payload['post_merge_validation_status']}",
+        "",
+        _bullet_list(payload["validation_command_list"]),
+        "",
+        "## Authorization",
+        "",
+        f"- merge_authorization_status: {payload['merge_authorization_status']}",
+        f"- push_authorization_status: {payload['push_authorization_status']}",
+        f"- merge_executed: {str(payload['merge_executed']).lower()}",
+        f"- push_executed: {str(payload['push_executed']).lower()}",
+        f"- final_origin_target_status: {payload['final_origin_target_status']}",
+        "",
+        "## Safety Boundary Checklist",
+        "",
+        _bullet_list(payload["safety_boundary_checklist"]),
+        "",
+        "## Claude Path",
+        "",
+        "Claude review, attestation, and merge-packet remain optional/legacy/lower-level only, not mandatory.",
+        "",
+        "## Non-Execution Statement",
+        "",
+        "Safe mode generated this report only. It did not execute merge, push, tag, provider calls, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation.",
+    ])
+
 
 
 def _codex_gate_markdown(**data: Any) -> str:
