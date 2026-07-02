@@ -313,6 +313,7 @@ class ReviewLifecycleCliTests(unittest.TestCase):
         commands = [" ".join(command.argv) for command in review_lifecycle.DEFAULT_VALIDATION_COMMANDS]
         self.assertIn("python3 -m unittest tests.test_review_lifecycle_cli", commands)
         self.assertIn("python3 -m agent_office review codex-deliver --help", commands)
+        self.assertIn("python3 -m agent_office review reviewed-delivery --help", commands)
 
     def test_validation_fixture_capture_records_review_lifecycle_command_and_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir, tempfile.TemporaryDirectory() as fixture_dir:
@@ -486,6 +487,8 @@ class ReviewLifecycleCliTests(unittest.TestCase):
             export_root = Path(export_dir)
             bundle = export_root / "bundle.md"
             prompt = export_root / "prompt.md"
+            impl_report = export_root / "implementation-report.md"
+            impl_report.write_text(report.read_text(encoding="utf-8"), encoding="utf-8")
             review = export_root / "claude-review.md"
             attestation = export_root / "attestation.md"
             packet = export_root / "merge-packet.md"
@@ -620,6 +623,163 @@ P31_ARTIFACT_REVIEW_COMPLETE
             readiness_fail_stderr, stale_stdout, stale_stderr, authorized_stdout, authorized_stderr,
         ]))
 
+    def test_reviewed_delivery_orchestration_json_text_and_delivery_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as remote_dir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            remote = Path(remote_dir) / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            git(root, "remote", "add", "origin", str(remote))
+            git(root, "push", "origin", "phase31/phase-lifecycle-review-system", "phase6/mainline")
+            git(root, "fetch", "origin")
+
+            export_root = Path(export_dir)
+            bundle = export_root / "bundle.md"
+            prompt = export_root / "prompt.md"
+            impl_report = export_root / "implementation-report.md"
+            impl_report.write_text(report.read_text(encoding="utf-8"), encoding="utf-8")
+            review = export_root / "claude-review.md"
+            review.write_text(
+                """verdict: pass
+artifact-based caveat: reviewed static artifact evidence only
+files reviewed: README.md, P31_PHASE_LIFECYCLE_REVIEW_SYSTEM_REPORT.md
+validation artifacts reviewed: bundle validation fixture
+blocker findings: none
+major findings: none
+P31_ARTIFACT_REVIEW_COMPLETE
+""",
+                encoding="utf-8",
+            )
+            with patch.object(cli, "PROJECT_ROOT", root), patch.object(review_lifecycle, "DEFAULT_VALIDATION_COMMANDS", self.validation_commands):
+                bundle_code, _bundle_stdout, bundle_stderr = run_cli(self._bundle_args(
+                    baseline, head, report, bundle, prompt, "--run-validation", "--json"
+                ))
+            self.assertEqual(bundle_code, 0, bundle_stderr)
+
+            def reviewed_delivery_args(out_dir: Path, *extra: str, expected_source: str = head, expected_target: str = baseline, review_path: Path = review) -> list[str]:
+                return [
+                    "review", "reviewed-delivery", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                    "--expected-source-head", expected_source, "--expected-target-head", expected_target,
+                    "--implementation-report", str(impl_report), "--review-bundle", str(bundle), "--review-report", str(review_path),
+                    "--expected-marker", "P31_ARTIFACT_REVIEW_COMPLETE", "--out-dir", str(out_dir), "--run-id", out_dir.name,
+                    "--mkdirs", *extra,
+                ]
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                safe_code, safe_stdout, safe_stderr = run_cli(reviewed_delivery_args(export_root / "safe", "--json"))
+                text_code, text_stdout, text_stderr = run_cli(reviewed_delivery_args(export_root / "text"))
+                missing_auth_code, missing_auth_stdout, missing_auth_stderr = run_cli(reviewed_delivery_args(export_root / "missing-auth", "--merge-authorized", "--json"))
+                readiness_fail_code, readiness_fail_stdout, readiness_fail_stderr = run_cli(reviewed_delivery_args(
+                    export_root / "readiness-fail", "--merge-authorized", "--push-authorized", "--json", expected_source=baseline
+                ))
+            safe_payload = json.loads(safe_stdout)
+            text_report = text_stdout
+            missing_auth_payload = json.loads(missing_auth_stdout)
+            readiness_fail_payload = json.loads(readiness_fail_stdout)
+
+            self.assertEqual(safe_code, 0, safe_stderr)
+            self.assertEqual(safe_payload["status"], "preview")
+            self.assertEqual(safe_payload["attestation_status"], "pass")
+            self.assertEqual(safe_payload["merge_packet_status"], "pass")
+            self.assertEqual(safe_payload["delivery_execution_status"], "safe_mode")
+            self.assertFalse(safe_payload["merge_executed"])
+            self.assertFalse(safe_payload["push_executed"])
+            self.assertTrue(Path(safe_payload["outputs"]["attestation"]).is_file())
+            self.assertTrue(Path(safe_payload["outputs"]["merge_packet"]).is_file())
+            self.assertTrue(Path(safe_payload["outputs"]["codex_delivery_report"]).is_file())
+            self.assertEqual(text_code, 0, text_stderr)
+            self.assertIn("AgentOffice reviewed delivery workflow complete", text_report)
+            self.assertIn("status: preview", text_report)
+            self.assertEqual(missing_auth_code, 0, missing_auth_stderr)
+            self.assertEqual(missing_auth_payload["status"], "blocked")
+            self.assertFalse(missing_auth_payload["merge_executed"])
+            self.assertFalse(missing_auth_payload["push_executed"])
+            self.assertIn("push_authorization_missing", missing_auth_payload["blocking_reasons"])
+            self.assertEqual(readiness_fail_code, 0, readiness_fail_stderr)
+            self.assertEqual(readiness_fail_payload["status"], "blocked")
+            self.assertFalse(readiness_fail_payload["merge_executed"])
+            self.assertFalse(readiness_fail_payload["push_executed"])
+            self.assertIn("source_head_mismatch", readiness_fail_payload["readiness_blocking_reasons"])
+            self.assertEqual(git(root, "rev-parse", "phase6/mainline"), baseline)
+            self.assertEqual(git(root, "rev-parse", "origin/phase6/mainline"), baseline)
+
+            git(root, "checkout", "phase6/mainline")
+            (root / "STALE_TARGET.md").write_text("target moved\n", encoding="utf-8")
+            git(root, "add", "STALE_TARGET.md")
+            git(root, "commit", "-m", "move target")
+            stale_head = git(root, "rev-parse", "phase6/mainline")
+            git(root, "push", "origin", "phase6/mainline")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                stale_code, stale_stdout, stale_stderr = run_cli(reviewed_delivery_args(
+                    export_root / "stale", "--merge-authorized", "--push-authorized", "--json", expected_target=baseline
+                ))
+            stale_payload = json.loads(stale_stdout)
+            self.assertEqual(stale_code, 0, stale_stderr)
+            self.assertEqual(stale_payload["status"], "blocked")
+            self.assertFalse(stale_payload["merge_executed"])
+            self.assertFalse(stale_payload["push_executed"])
+            self.assertIn("target_head_mismatch", stale_payload["readiness_blocking_reasons"])
+            self.assertEqual(git(root, "rev-parse", "phase6/mainline"), stale_head)
+            self.assertEqual(git(root, "rev-parse", "origin/phase6/mainline"), stale_head)
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                authorized_code, authorized_stdout, authorized_stderr = run_cli(reviewed_delivery_args(
+                    export_root / "authorized", "--merge-authorized", "--push-authorized", "--json", expected_target=stale_head
+                ))
+            authorized_payload = json.loads(authorized_stdout)
+            final_target = git(root, "rev-parse", "phase6/mainline")
+            final_origin = git(root, "rev-parse", "origin/phase6/mainline")
+            authorized_report = Path(authorized_payload["outputs"]["codex_delivery_report"]).read_text(encoding="utf-8")
+
+        self.assertEqual(authorized_code, 0, authorized_stderr)
+        self.assertEqual(authorized_payload["status"], "delivered")
+        self.assertTrue(authorized_payload["merge_gate_ready"])
+        self.assertTrue(authorized_payload["merge_executed"])
+        self.assertTrue(authorized_payload["push_executed"])
+        self.assertEqual(authorized_payload["delivery_execution_status"], "executed")
+        self.assertEqual(final_target, final_origin)
+        self.assertEqual(authorized_payload["final_target_head"], final_target)
+        self.assertEqual(authorized_payload["final_origin_target_status"], final_origin)
+        self.assertIn("merge_executed: true", authorized_report)
+        self.assertIn("push_executed: true", authorized_report)
+        self.assertNotIn("Traceback", "".join([
+            safe_stdout, safe_stderr, text_stdout, text_stderr, missing_auth_stdout, missing_auth_stderr,
+            readiness_fail_stdout, readiness_fail_stderr, stale_stdout, stale_stderr, authorized_stdout, authorized_stderr,
+        ]))
+
+    def test_reviewed_delivery_bad_or_missing_review_output_is_stable_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            bundle = Path(export_dir) / "bundle.md"
+            bundle.write_text("review bundle\n", encoding="utf-8")
+            impl_report = Path(export_dir) / "implementation-report.md"
+            impl_report.write_text(report.read_text(encoding="utf-8"), encoding="utf-8")
+            bad_review = Path(export_dir) / "bad-review.md"
+            bad_review.write_text("verdict: pass\n", encoding="utf-8")
+            missing_review = Path(export_dir) / "missing-review.md"
+
+            def args(review_path: Path, out_name: str) -> list[str]:
+                return [
+                    "review", "reviewed-delivery", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                    "--expected-source-head", head, "--expected-target-head", baseline,
+                    "--implementation-report", str(impl_report), "--review-bundle", str(bundle), "--review-report", str(review_path),
+                    "--expected-marker", "P31_ARTIFACT_REVIEW_COMPLETE", "--out-dir", str(Path(export_dir) / out_name),
+                    "--mkdirs", "--json",
+                ]
+
+            with patch.object(cli, "PROJECT_ROOT", root):
+                missing_code, missing_stdout, missing_stderr = run_cli(args(missing_review, "missing"))
+                bad_code, bad_stdout, bad_stderr = run_cli(args(bad_review, "bad"))
+
+        self.assertEqual(missing_code, 2)
+        self.assertEqual(json.loads(missing_stdout)["error_code"], "review_attest_missing_report")
+        self.assertEqual(bad_code, 2)
+        self.assertEqual(json.loads(bad_stdout)["error_code"], "review_attest_marker_missing")
+        self.assertNotIn("Traceback", missing_stdout + missing_stderr + bad_stdout + bad_stderr)
+
     def test_codex_gate_positive_creates_readiness_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
             root = Path(tmpdir)
@@ -666,6 +826,7 @@ P31_ARTIFACT_REVIEW_COMPLETE
         self.assertIn("Codex implementation -> codex-deliver safe report -> full validation -> authorized merge gate -> push mainline", text)
         self.assertIn("review codex-deliver --help", text)
         self.assertIn("review codex-gate --help", text)
+        self.assertIn("review reviewed-delivery --help", text)
         self.assertIn("optional/legacy/lower-level", text)
         self.assertIn("not the default mandatory path", text)
         self.assertIn("Codex-only does not mean skipping validation", text)
@@ -673,7 +834,7 @@ P31_ARTIFACT_REVIEW_COMPLETE
         self.assertIn("--push-authorized", text)
 
     def test_review_help_is_available(self) -> None:
-        for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"], ["review", "codex-gate", "--help"], ["review", "codex-deliver", "--help"]):
+        for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"], ["review", "codex-gate", "--help"], ["review", "reviewed-delivery", "--help"], ["review", "codex-deliver", "--help"]):
             with self.subTest(argv=argv):
                 stdout = io.StringIO()
                 stderr = io.StringIO()

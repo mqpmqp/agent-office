@@ -396,6 +396,7 @@ Codex implementation -> codex-deliver safe report -> full validation -> authoriz
 ```bash
 python3 -m agent_office review codex-deliver --help
 python3 -m agent_office review codex-gate --help
+python3 -m agent_office review reviewed-delivery --help
 python3 -m agent_office review bundle --help
 python3 -m agent_office review prompt --help
 python3 -m agent_office review attest --help
@@ -411,6 +412,8 @@ Standard phase sequence:
 5. Execute merge and push only in a separately authorized Codex merge gate.
 
 `review codex-deliver` records phase/run identity, source and target heads, origin heads, tracked cleanliness, allowed untracked artifacts, changed files, diff stat, diff check, validation checklist, merge/push authorization, executed states, final target/origin status, blockers, and safety boundaries. Its default mode is safe and non-destructive; actual merge/push execution requires explicit `--merge-authorized`, `--push-authorized`, `--expected-source-head`, and `--expected-target-head` with all readiness gates passing.
+
+`review reviewed-delivery` is a static orchestration wrapper for reviewed delivery closure. It verifies a saved Claude review output with `review attest`, generates a `review merge-packet`, then runs `review codex-deliver`; by default it is safe-mode only, and real merge/push still requires explicit `--merge-authorized --push-authorized` with strict source/target SHA guards.
 
 `review codex-gate` remains a smaller static readiness report for a reviewed branch and commit range. It does not execute merge, push, tag, providers, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation. Codex-only does not mean skipping validation; merge gates remain explicit operator actions.
 
