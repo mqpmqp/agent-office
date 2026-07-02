@@ -25,10 +25,12 @@ The feature commit is the source branch HEAD created after this report is staged
 - `agent_office/runtime_foundation.py`
 - `agent_office/cli.py`
 - `tests/test_runtime_foundation_cli.py`
+- `agent_office/review_lifecycle.py`
+- `tests/test_review_lifecycle_cli.py`
 - `README.md`
 - `R11_R13_RUNTIME_GOVERNANCE_JOB_WORKER_BATCH_REPORT.md`
 
-No `agent_office/review_lifecycle.py` change was needed; existing reviewed-delivery evidence bundle tests were run unchanged as regression coverage.
+`agent_office/review_lifecycle.py` was updated only to expose literal `non_destructive` evidence in codex-deliver reports, matching the delivery gate requirement. Runtime delivery semantics did not change.
 
 ## R11 Implemented Scope: Runtime Governance Bridge
 
@@ -201,7 +203,7 @@ Explicit runtime boundary:
 
 Delivery must use `python3 -m agent_office review codex-deliver`:
 
-1. safe-mode report first, proving `merge_executed=false`, `push_executed=false`, and non-destructive behavior
+1. safe-mode report first, proving `merge_executed=false`, `push_executed=false`, and `non_destructive=true`
 2. authorized delivery only with `--merge-authorized --push-authorized`, proving `merge_executed=true` and `push_executed=true`
 
 No Claude review output is forged or used for reviewed-delivery in this batch.
