@@ -409,6 +409,12 @@ def review_codex_deliver_payload(
     if not push_authorized:
         merge_gate_blockers.append("push_authorization_missing")
 
+    merge_planned = merge_authorized and not readiness_blockers
+    push_planned = push_authorized and not readiness_blockers
+    execution_status = "safe_mode" if not merge_authorized and not push_authorized else "blocked"
+    if not merge_gate_blockers:
+        execution_status = "ready_to_execute"
+
     out_path = _prepare_output_path(out, "review_codex_deliver", mkdirs=mkdirs)
     payload: dict[str, Any] = {
         "ok": True,
@@ -437,8 +443,14 @@ def review_codex_deliver_payload(
         "post_merge_validation_status": "not_executed",
         "merge_authorization_status": "authorized" if merge_authorized else "not_authorized",
         "push_authorization_status": "authorized" if push_authorized else "not_authorized",
+        "merge_planned": merge_planned,
+        "push_planned": push_planned,
         "merge_executed": False,
         "push_executed": False,
+        "execution_status": execution_status,
+        "execution_failed_step": "none",
+        "execution_error": "",
+        "final_target_head": target_head,
         "final_origin_target_status": origin_target_head,
         "safety_boundary_checklist": _codex_delivery_safety_checklist(),
         "claude_path": "optional_legacy_lower_level",
@@ -449,9 +461,53 @@ def review_codex_deliver_payload(
         "outputs": {"codex_delivery_report": str(out_path)},
         "marker": "P34_CODEX_DELIVERY_RUNNER_COMPLETE",
     }
+
+    def record_execution_failure(step: str, message: str, completed: subprocess.CompletedProcess[str] | None = None) -> None:
+        error_text = message
+        details: dict[str, Any] = {"step": step, "report": str(out_path)}
+        if completed is not None:
+            stdout = completed.stdout.strip()
+            stderr = completed.stderr.strip()
+            error_text = stderr or stdout or message
+            details.update({"argv": completed.args, "stdout": stdout, "stderr": stderr})
+        payload["execution_status"] = "failed"
+        payload["execution_failed_step"] = step
+        payload["execution_error"] = error_text
+        payload["final_target_head"] = _git_optional(root, target)
+        payload["final_origin_target_status"] = _git_optional(root, f"origin/{target}")
+        _safe_write(out_path, _codex_deliver_markdown(payload))
+        raise ReviewLifecycleError(f"review_codex_deliver_{step}_failed", message, details, exit_code=1)
+
+    if not merge_gate_blockers:
+        checkout = _git(root, ("checkout", target), check=False)
+        if checkout.returncode != 0:
+            record_execution_failure("checkout", "git checkout target branch failed", checkout)
+        checkout_target_head = _git(root, ("rev-parse", "HEAD")).stdout.strip()
+        if checkout_target_head != expected_target:
+            record_execution_failure("target_head_changed", "target branch changed before merge execution")
+
+        merge = _git(root, ("merge", "--no-ff", source, "-m", f"Merge {source} into {target} via codex-deliver"), check=False)
+        if merge.returncode != 0:
+            _git(root, ("merge", "--abort"), check=False)
+            record_execution_failure("merge", "git merge failed", merge)
+        payload["merge_executed"] = True
+        payload["final_target_head"] = _git(root, ("rev-parse", target)).stdout.strip()
+
+        push = _git(root, ("push", "origin", target), check=False)
+        if push.returncode != 0:
+            record_execution_failure("push", "git push failed", push)
+        payload["push_executed"] = True
+
+        fetch = _git(root, ("fetch", "origin", target), check=False)
+        if fetch.returncode != 0:
+            record_execution_failure("post_push_fetch", "git fetch after push failed", fetch)
+        payload["final_origin_target_status"] = _git_optional(root, f"origin/{target}")
+        if payload["final_origin_target_status"] != payload["final_target_head"]:
+            record_execution_failure("push_verify", "origin target did not match local target after push")
+        payload["execution_status"] = "executed"
+
     _safe_write(out_path, _codex_deliver_markdown(payload))
     return payload
-
 
 
 def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
@@ -820,6 +876,9 @@ def _untracked_files(root: Path) -> list[str]:
 
 
 def _codex_deliver_markdown(payload: dict[str, Any]) -> str:
+    execution_error = []
+    if payload.get("execution_error"):
+        execution_error = ["", "### Execution Error", "", _fence(str(payload["execution_error"]))]
     return "\n".join([
         "# AgentOffice Codex Delivery Runner Report",
         "",
@@ -884,9 +943,15 @@ def _codex_deliver_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- merge_authorization_status: {payload['merge_authorization_status']}",
         f"- push_authorization_status: {payload['push_authorization_status']}",
+        f"- merge_planned: {str(payload['merge_planned']).lower()}",
+        f"- push_planned: {str(payload['push_planned']).lower()}",
         f"- merge_executed: {str(payload['merge_executed']).lower()}",
         f"- push_executed: {str(payload['push_executed']).lower()}",
+        f"- execution_status: {payload['execution_status']}",
+        f"- execution_failed_step: {payload['execution_failed_step']}",
+        f"- final_target_head: {payload['final_target_head']}",
         f"- final_origin_target_status: {payload['final_origin_target_status']}",
+        *execution_error,
         "",
         "## Safety Boundary Checklist",
         "",
@@ -898,9 +963,19 @@ def _codex_deliver_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Non-Execution Statement",
         "",
-        "Safe mode generated this report only. It did not execute merge, push, tag, provider calls, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation.",
+        _codex_deliver_execution_statement(payload),
     ])
 
+
+def _codex_deliver_execution_statement(payload: dict[str, Any]) -> str:
+    status = payload.get("execution_status")
+    if status == "executed":
+        return "Authorized mode executed merge and push. It did not execute tag, provider calls, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation."
+    if status == "failed":
+        return "Authorized mode attempted delivery and failed. It did not execute tag, provider calls, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation."
+    if status == "safe_mode":
+        return "Safe mode generated this report only. It did not execute merge, push, tag, provider calls, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation."
+    return "Blocked delivery generated this report only. It did not execute merge, push, tag, provider calls, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation."
 
 
 def _codex_gate_markdown(**data: Any) -> str:

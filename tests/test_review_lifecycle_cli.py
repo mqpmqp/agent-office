@@ -367,8 +367,9 @@ class ReviewLifecycleCliTests(unittest.TestCase):
             "ok", "command", "phase", "run_id", "source_branch", "source_head", "expected_source_head", "target_branch",
             "target_expected_head", "origin_source_head", "origin_target_head", "tracked_tree_clean", "untracked_artifacts_allowed",
             "changed_files", "diff_stat", "diff_check_status", "validation_command_list", "pre_merge_validation_status",
-            "post_merge_validation_status", "merge_authorization_status", "push_authorization_status", "final_origin_target_status",
-            "safety_boundary_checklist", "readiness", "blocking_reasons", "outputs",
+            "post_merge_validation_status", "merge_authorization_status", "push_authorization_status", "merge_planned", "push_planned",
+            "merge_executed", "push_executed", "execution_status", "execution_failed_step", "final_target_head",
+            "final_origin_target_status", "safety_boundary_checklist", "readiness", "blocking_reasons", "outputs",
         }
         self.assertTrue(expected_keys.issubset(payload))
         self.assertEqual(payload["command"], "review codex-deliver")
@@ -376,8 +377,11 @@ class ReviewLifecycleCliTests(unittest.TestCase):
         self.assertFalse(payload["merge_gate_ready"])
         self.assertIn("merge_authorization_missing", payload["blocking_reasons"])
         self.assertIn("push_authorization_missing", payload["blocking_reasons"])
+        self.assertFalse(payload["merge_planned"])
+        self.assertFalse(payload["push_planned"])
         self.assertFalse(payload["merge_executed"])
         self.assertFalse(payload["push_executed"])
+        self.assertEqual(payload["execution_status"], "safe_mode")
         self.assertIn("P34_CODEX_DELIVERY_RUNNER_COMPLETE", text)
         self.assertIn("Safe mode generated this report only", text)
         self.assertIn("no Claude merge packet generated", text)
@@ -395,13 +399,60 @@ class ReviewLifecycleCliTests(unittest.TestCase):
                     "--expected-source-head", head, "--expected-target-head", baseline, "--merge-authorized", "--out", str(out), "--json",
                 ])
             payload = json.loads(stdout)
+            target_after = git(root, "rev-parse", "phase6/mainline")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(target_after, baseline)
+        self.assertEqual(payload["merge_authorization_status"], "authorized")
+        self.assertEqual(payload["push_authorization_status"], "not_authorized")
+        self.assertTrue(payload["merge_planned"])
+        self.assertFalse(payload["push_planned"])
+        self.assertFalse(payload["merge_gate_ready"])
+        self.assertFalse(payload["merge_executed"])
+        self.assertFalse(payload["push_executed"])
+        self.assertEqual(payload["execution_status"], "blocked")
+        self.assertIn("push_authorization_missing", payload["blocking_reasons"])
+        self.assertNotIn("merge_authorization_missing", payload["blocking_reasons"])
+
+    def test_codex_deliver_authorized_mode_executes_merge_and_push(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as remote_dir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, _report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            remote = Path(remote_dir) / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            git(root, "remote", "add", "origin", str(remote))
+            git(root, "push", "origin", "phase31/phase-lifecycle-review-system", "phase6/mainline")
+            git(root, "fetch", "origin")
+            out = Path(export_dir) / "codex-deliver-authorized.md"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli([
+                    "review", "codex-deliver", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                    "--expected-source-head", head, "--expected-target-head", baseline, "--merge-authorized", "--push-authorized",
+                    "--out", str(out), "--json",
+                ])
+            payload = json.loads(stdout)
+            text = out.read_text(encoding="utf-8")
+            target_after = git(root, "rev-parse", "phase6/mainline")
+            origin_after = git(root, "rev-parse", "origin/phase6/mainline")
+            parents = git(root, "rev-list", "--parents", "-n", "1", "phase6/mainline").split()[1:]
 
         self.assertEqual(code, 0, stderr)
         self.assertEqual(payload["merge_authorization_status"], "authorized")
-        self.assertEqual(payload["push_authorization_status"], "not_authorized")
-        self.assertFalse(payload["merge_gate_ready"])
-        self.assertIn("push_authorization_missing", payload["blocking_reasons"])
-        self.assertNotIn("merge_authorization_missing", payload["blocking_reasons"])
+        self.assertEqual(payload["push_authorization_status"], "authorized")
+        self.assertTrue(payload["merge_gate_ready"])
+        self.assertTrue(payload["merge_planned"])
+        self.assertTrue(payload["push_planned"])
+        self.assertTrue(payload["merge_executed"])
+        self.assertTrue(payload["push_executed"])
+        self.assertEqual(payload["execution_status"], "executed")
+        self.assertNotEqual(target_after, baseline)
+        self.assertEqual(payload["final_target_head"], target_after)
+        self.assertEqual(payload["final_origin_target_status"], origin_after)
+        self.assertEqual(origin_after, target_after)
+        self.assertEqual(set(parents), {baseline, head})
+        self.assertIn("Authorized mode executed merge and push", text)
+        self.assertNotIn("Traceback", stdout + stderr + text)
 
     def test_codex_deliver_head_mismatch_blocks_readiness_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
