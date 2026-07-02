@@ -1024,3 +1024,16 @@ test -s /tmp/agentoffice-p23-evidence/README.md
 - `README.md`: system overview, current CLI command map, validation list, safety boundaries, known limitations, registry/lifecycle summaries, example validation summary, and reviewer instructions.
 
 Existing output directories are allowed. The command deterministically overwrites its own `manifest.json` and `README.md` files and leaves unrelated files in the output directory untouched. The package is intended for `/tmp` output unless a reviewer explicitly asks for a repository path.
+
+
+### P35 codex-deliver dogfood
+
+P35 dogfoods the one-click Codex delivery runner introduced by P34. The intended delivery sequence is:
+
+1. create and validate a small source branch;
+2. run `python3 -m agent_office review codex-deliver` in safe mode without merge/push authorization;
+3. confirm the target branch remains unchanged;
+4. rerun the same delivery with `--merge-authorized --push-authorized`;
+5. verify local and remote `phase6/mainline` are synced to the resulting merge commit.
+
+This flow remains static and local to git/repository state; it must not read `.env`, print environment variables, or trigger provider/model/runtime/adapter behavior.
