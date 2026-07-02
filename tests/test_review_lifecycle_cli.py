@@ -342,8 +342,57 @@ class ReviewLifecycleCliTests(unittest.TestCase):
                 self.assertNotIn("review bundle", joined)
                 self.assertNotIn("--run-validation", joined)
 
+    def test_codex_gate_positive_creates_readiness_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, _report = self._repo(root)
+            out = Path(export_dir) / "codex-gate.md"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli([
+                    "review", "codex-gate", "--baseline", baseline, "--head", head, "--branch", "phase31/phase-lifecycle-review-system",
+                    "--out", str(out), "--json",
+                ])
+            payload = json.loads(stdout)
+            text = out.read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "review codex-gate")
+        self.assertEqual(payload["outputs"]["codex_gate"], str(out))
+        self.assertEqual(payload["claude_path"], "optional_legacy_lower_level")
+        self.assertIn("Codex implementation", payload["workflow"])
+        self.assertIn("CODEX_ONLY_DELIVERY_LANE_READY", text)
+        self.assertIn("Codex-only is the default delivery lane", text)
+        self.assertIn("optional/legacy/lower-level", text)
+        self.assertIn("Required Validation Checklist", text)
+        self.assertIn("did not execute merge", text)
+        self.assertNotIn("Traceback", stdout + stderr + text)
+
+    def test_codex_gate_dirty_tree_and_dotenv_output_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline, head, _report = self._repo(root)
+            (root / "README.md").write_text("dirty\n", encoding="utf-8")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                dirty = run_cli(["review", "codex-gate", "--baseline", baseline, "--head", head, "--branch", "phase31/phase-lifecycle-review-system", "--out", str(root / "gate.md"), "--json"])
+                dotenv = run_cli(["review", "codex-gate", "--baseline", baseline, "--head", head, "--branch", "phase31/phase-lifecycle-review-system", "--out", str(root / ".env" / "gate.md"), "--allow-dirty", "--json"])
+
+        self.assertEqual(dirty[0], 2)
+        self.assertEqual(json.loads(dirty[1])["error_code"], "review_codex_gate_dirty_tree")
+        self.assertEqual(dotenv[0], 2)
+        self.assertEqual(json.loads(dotenv[1])["error_code"], "review_codex_gate_dotenv_refused")
+        self.assertNotIn("Traceback", dirty[1] + dirty[2] + dotenv[1] + dotenv[2])
+
+    def test_readme_documents_codex_only_default_and_legacy_claude_path(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Codex implementation -> Codex self-review -> full validation -> Codex merge gate -> push mainline", text)
+        self.assertIn("review codex-gate --help", text)
+        self.assertIn("optional/legacy/lower-level", text)
+        self.assertIn("not the default mandatory path", text)
+        self.assertIn("Codex-only does not mean skipping validation", text)
+
     def test_review_help_is_available(self) -> None:
-        for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"]):
+        for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"], ["review", "codex-gate", "--help"]):
             with self.subTest(argv=argv):
                 stdout = io.StringIO()
                 stderr = io.StringIO()

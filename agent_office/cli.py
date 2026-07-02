@@ -1182,6 +1182,16 @@ def cmd_review(args: argparse.Namespace) -> int:
                 project_root=PROJECT_ROOT,
                 mkdirs=args.mkdirs,
             )
+        elif action == "codex-gate":
+            payload = review_lifecycle.review_codex_gate_payload(
+                baseline=args.baseline,
+                head=args.head,
+                branch=args.branch,
+                out=args.out,
+                project_root=PROJECT_ROOT,
+                allow_dirty=args.allow_dirty,
+                mkdirs=args.mkdirs,
+            )
         else:
             raise review_lifecycle.ReviewLifecycleError("review_unknown_action", "unknown review action", {"action": action})
     except review_lifecycle.ReviewLifecycleError as exc:
@@ -1597,6 +1607,16 @@ def build_parser() -> argparse.ArgumentParser:
     merge_packet.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
     merge_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     merge_packet.set_defaults(func=cmd_review)
+
+    codex_gate = review_sub.add_parser("codex-gate", help="Generate a Codex-only delivery lane readiness report without merge or provider calls.")
+    codex_gate.add_argument("--baseline", required=True, help="Baseline commit for diff evidence.")
+    codex_gate.add_argument("--head", required=True, help="Reviewed head commit.")
+    codex_gate.add_argument("--branch", required=True, help="Reviewed branch name.")
+    codex_gate.add_argument("--out", required=True, help="Codex-only readiness report Markdown output path.")
+    codex_gate.add_argument("--allow-dirty", action="store_true", help="Allow tracked dirty state and record it in the report.")
+    codex_gate.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
+    codex_gate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    codex_gate.set_defaults(func=cmd_review)
 
     p = sub.add_parser("review-artifact", help="Export, verify, or close a Claude review artifact without calling providers.")
     review_sub = p.add_subparsers(dest="review_artifact_action", required=True)

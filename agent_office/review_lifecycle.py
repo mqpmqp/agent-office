@@ -18,6 +18,25 @@ SAFETY_BOUNDARIES = (
     "do not merge/push/tag unless an explicit merge gate authorizes it",
     "do not force push",
 )
+CODEX_ONLY_WORKFLOW = (
+    "Codex implementation",
+    "Codex self-review",
+    "full validation",
+    "Codex merge gate",
+    "push mainline",
+)
+CODEX_ONLY_VALIDATION_CHECKLIST = (
+    "python3 -m compileall agent_office tests",
+    "python3 -m unittest tests.test_review_lifecycle_cli",
+    "python3 -m unittest",
+    "python3 -m unittest discover -s tests -p 'test_*.py'",
+    "python3 -m agent_office doctor --adapters",
+    "./scripts/verify.sh",
+    "./scripts/smoke-test.sh P6-PROFILES",
+    "python3 -m agent_office run-staged P6-PROFILES --dry-run --reset",
+    "review help smokes",
+    "git diff --check",
+)
 EXPECTED_REVIEW_FIELDS = (
     "verdict: pass / conditional pass / fail",
     "artifact-based caveat",
@@ -281,6 +300,54 @@ def review_merge_packet_payload(
     return _success_payload(command, branch=source_branch, baseline=baseline_commit, head=source_commit_resolved, outputs={"bundle": str(bundle_path), "prompt": None, "attestation": str(attestation_path) if attestation_path else None, "merge_packet": str(out_path)}, extra={"merge_marker": merge_marker, "attestation_status": attestation_status})
 
 
+def review_codex_gate_payload(
+    *,
+    baseline: str,
+    head: str,
+    branch: str,
+    out: str | Path,
+    project_root: Path,
+    allow_dirty: bool = False,
+    mkdirs: bool = False,
+) -> dict[str, Any]:
+    command = "review codex-gate"
+    root = project_root.resolve()
+    baseline_commit = _resolve_commit(root, baseline, "baseline")
+    head_commit = _resolve_commit(root, head, "head")
+    _require_branch(root, branch)
+    tracked_status = _tracked_status(root)
+    if tracked_status and not allow_dirty:
+        raise ReviewLifecycleError("review_codex_gate_dirty_tree", "tracked working tree is dirty; pass --allow-dirty to record dirty state", {"status": tracked_status})
+    diff_check = _git_capture(root, ("diff", "--check", baseline_commit, head_commit))
+    if diff_check["exit_code"] != 0:
+        raise ReviewLifecycleError("review_codex_gate_diff_check_failed", "git diff --check failed for the reviewed range", {"stderr": diff_check["stderr"].strip(), "stdout": diff_check["stdout"].strip()}, exit_code=1)
+    git_evidence = _git_evidence(root, baseline_commit, head_commit, branch, tracked_status, diff_check)
+    out_path = _prepare_output_path(out, "review_codex_gate", mkdirs=mkdirs)
+    text = _codex_gate_markdown(
+        root=root,
+        baseline=baseline_commit,
+        head=head_commit,
+        branch=branch,
+        git_evidence=git_evidence,
+    )
+    _safe_write(out_path, text)
+    return _success_payload(
+        command,
+        branch=branch,
+        baseline=baseline_commit,
+        head=head_commit,
+        outputs={"bundle": None, "prompt": None, "attestation": None, "merge_packet": None, "codex_gate": str(out_path)},
+        extra={
+            "status": "ready",
+            "marker": "CODEX_ONLY_DELIVERY_LANE_READY",
+            "workflow": list(CODEX_ONLY_WORKFLOW),
+            "validation_checklist": list(CODEX_ONLY_VALIDATION_CHECKLIST),
+            "changed_files": git_evidence["changed_files"],
+            "claude_path": "optional_legacy_lower_level",
+        },
+    )
+
+
 def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
     lines = ["AgentOffice review lifecycle command complete", f"command: {payload['command']}"]
     for key in ("marker", "review_marker", "merge_marker", "status"):
@@ -289,10 +356,13 @@ def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
     outputs = payload.get("outputs")
     if isinstance(outputs, dict):
         lines.append("outputs:")
-        for key in ("bundle", "prompt", "attestation", "merge_packet"):
+        for key in ("bundle", "prompt", "attestation", "merge_packet", "codex_gate"):
             if outputs.get(key):
                 lines.append(f"  {key}: {outputs[key]}")
-    lines.append("next_action: hand artifacts to Claude for artifact-based review or run the next explicit lifecycle step")
+    if payload.get("command") == "review codex-gate":
+        lines.append("next_action: run full validation, then use a separately authorized Codex merge gate")
+    else:
+        lines.append("next_action: hand artifacts to Claude for artifact-based review or run the next explicit lifecycle step")
     return "\n".join(lines)
 
 
@@ -620,6 +690,61 @@ def _prompt_markdown(*, baseline: str, head: str, branch: str, report_path: Path
         review_marker,
     ]
     return "\n".join(lines)
+
+
+def _codex_gate_markdown(**data: Any) -> str:
+    git_evidence = data["git_evidence"]
+    return "\n".join([
+        "# AgentOffice Codex-Only Delivery Lane Readiness",
+        "",
+        "Marker: CODEX_ONLY_DELIVERY_LANE_READY",
+        "",
+        "## Workflow",
+        "",
+        " -> ".join(CODEX_ONLY_WORKFLOW),
+        "",
+        "## Scope",
+        "",
+        "Codex-only is the default delivery lane. Claude artifact review, review attestation, and review merge-packet remain optional/legacy/lower-level paths, not mandatory gates.",
+        "",
+        "Merge gate still requires separate authorization; this report does not execute merge, push, tag, provider calls, runtimes, models, or adapters.",
+        "",
+        "## Source",
+        "",
+        f"- repo_root: {data['root']}",
+        f"- branch: {data['branch']}",
+        f"- baseline_commit: {data['baseline']}",
+        f"- head_commit: {data['head']}",
+        "",
+        "## Changed Files",
+        "",
+        _bullet_list(git_evidence["changed_files"]),
+        "",
+        "## Name Status",
+        "",
+        _fence(git_evidence["name_status"]),
+        "",
+        "## Diff Stat",
+        "",
+        _fence(git_evidence["diff_stat"]),
+        "",
+        "## Diff Check",
+        "",
+        f"exit_code: {git_evidence['diff_check']['exit_code']}",
+        _fence(_combined_output(git_evidence["diff_check"])),
+        "",
+        "## Required Validation Checklist",
+        "",
+        _bullet_list(CODEX_ONLY_VALIDATION_CHECKLIST),
+        "",
+        "## Safety Boundaries",
+        "",
+        _bullet_list(SAFETY_BOUNDARIES),
+        "",
+        "## Non-Execution Statement",
+        "",
+        "This command generated a readiness report only. It did not execute merge, push, tag, provider calls, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation.",
+    ])
 
 
 def _attestation_markdown(report_path: Path, marker: str, expected: str, detected: str, marker_present: bool, blocker_present: bool, major_present: bool, status: str) -> str:
