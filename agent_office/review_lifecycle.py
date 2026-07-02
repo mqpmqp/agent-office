@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -11,6 +12,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 ARTIFACT_BASED_CAVEAT = "This is an artifact-based review package. Reviewers must not claim they ran VPS validation unless they actually did."
+REVIEWED_DELIVERY_EVIDENCE_MARKER = "REVIEWED_DELIVERY_EVIDENCE_BUNDLE_COMPLETE"
 SAFETY_BOUNDARIES = (
     "do not read .env",
     "do not print env vars",
@@ -532,6 +534,8 @@ def review_reviewed_delivery_payload(
     push_authorized: bool = False,
     allow_dirty: bool = False,
     mkdirs: bool = False,
+    evidence_bundle_out: str | Path | None = None,
+    evidence_bundle_format: str = 'json',
 ) -> dict[str, Any]:
     command = "review reviewed-delivery"
     run_label = run_id or phase or f"{source}-to-{target}"
@@ -582,7 +586,7 @@ def review_reviewed_delivery_payload(
     else:
         status = "blocked"
 
-    return _success_payload(
+    payload = _success_payload(
         command,
         branch=source,
         baseline=delivery_payload["target_expected_head"],
@@ -616,6 +620,269 @@ def review_reviewed_delivery_payload(
             "marker": "REVIEWED_DELIVERY_WORKFLOW_COMPLETE",
         },
     )
+    if evidence_bundle_out:
+        evidence_path = _prepare_evidence_bundle_output_path(evidence_bundle_out, project_root, output_root, mkdirs=mkdirs)
+        evidence_payload = _reviewed_delivery_evidence_payload(
+            reviewed_delivery_payload=payload,
+            delivery_payload=delivery_payload,
+            source=source,
+            target=target,
+            implementation_report=implementation_report,
+            review_bundle=review_bundle,
+            review_report=review_report,
+            expected_marker=expected_marker,
+            expected_verdict=expected_verdict,
+            attestation_path=attestation_out,
+            merge_packet_path=merge_packet_out,
+            delivery_report_path=delivery_out,
+            evidence_path=evidence_path,
+            project_root=project_root,
+            authorized_requested=merge_authorized or push_authorized,
+        )
+        blockers = _reviewed_delivery_evidence_readiness_blockers(evidence_payload, authorized_requested=merge_authorized or push_authorized)
+        evidence_payload["readiness"]["blocking_reasons"] = blockers
+        evidence_payload["readiness"]["verdict"] = "ready" if not blockers else "failed"
+        if blockers:
+            raise ReviewLifecycleError(
+                "reviewed_delivery_evidence_readiness_failed",
+                "reviewed-delivery evidence bundle readiness checks failed",
+                {"blocking_reasons": blockers, "evidence_bundle": str(evidence_path)},
+                exit_code=2,
+            )
+        if evidence_bundle_format == "json":
+            evidence_text = json.dumps(evidence_payload, indent=2, sort_keys=True)
+        elif evidence_bundle_format == "text":
+            evidence_text = _reviewed_delivery_evidence_text(evidence_payload)
+        else:
+            raise ReviewLifecycleError("reviewed_delivery_evidence_format_invalid", "evidence bundle format must be json or text", {"format": evidence_bundle_format})
+        _safe_write(evidence_path, evidence_text)
+        payload["outputs"]["evidence_bundle"] = str(evidence_path)
+        payload["evidence_bundle_format"] = evidence_bundle_format
+        payload["evidence_bundle_readiness"] = evidence_payload["readiness"]["verdict"]
+        payload["evidence_bundle_marker"] = REVIEWED_DELIVERY_EVIDENCE_MARKER
+    return payload
+
+
+def _prepare_evidence_bundle_output_path(path: str | Path, project_root: Path, output_root: Path, *, mkdirs: bool) -> Path:
+    root = project_root.resolve(strict=False)
+    out_root = output_root if output_root.is_absolute() else root / output_root
+    out_root = out_root.resolve(strict=False)
+    p = Path(path)
+    p = p if p.is_absolute() else root / p
+    resolved = p.resolve(strict=False)
+    allowed_roots = (root, out_root)
+    if not any(resolved == base or base in resolved.parents for base in allowed_roots):
+        raise ReviewLifecycleError(
+            "reviewed_delivery_evidence_output_outside_allowed_roots",
+            "evidence bundle output path must stay inside the repository root or reviewed-delivery output root",
+            {"path": str(path), "project_root": str(root), "out_dir": str(out_root)},
+        )
+    return _prepare_output_path(resolved, "reviewed_delivery_evidence", mkdirs=mkdirs)
+
+
+def _reviewed_delivery_evidence_payload(
+    *,
+    reviewed_delivery_payload: dict[str, Any],
+    delivery_payload: dict[str, Any],
+    source: str,
+    target: str,
+    implementation_report: str | Path,
+    review_bundle: str | Path,
+    review_report: str | Path,
+    expected_marker: str,
+    expected_verdict: str,
+    attestation_path: Path,
+    merge_packet_path: Path,
+    delivery_report_path: Path,
+    evidence_path: Path,
+    project_root: Path,
+    authorized_requested: bool,
+) -> dict[str, Any]:
+    root = project_root.resolve(strict=False)
+    delivery_summary = _delivery_execution_summary(delivery_payload, delivery_report_path, root)
+    mode = "authorized" if authorized_requested else "safe_mode"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "marker": REVIEWED_DELIVERY_EVIDENCE_MARKER,
+        "command": "review reviewed-delivery",
+        "mode": mode,
+        "phase": reviewed_delivery_payload["phase"],
+        "run_id": reviewed_delivery_payload["run_id"],
+        "evidence_bundle_path": _display_path(evidence_path, root),
+        "source": {
+            "branch": source,
+            "head": delivery_payload["source_head"],
+            "expected_head": delivery_payload["expected_source_head"],
+            "origin_head": delivery_payload["origin_source_head"],
+        },
+        "target": {
+            "branch": target,
+            "before": delivery_payload["target_head"],
+            "expected_before": delivery_payload["target_expected_head"],
+            "origin_before": delivery_payload["origin_target_head"],
+            "final_target": delivery_payload["final_target_head"],
+            "final_origin": delivery_payload["final_origin_target_status"],
+        },
+        "review_output": {
+            **_file_snapshot(review_report, root, "reviewed_delivery_evidence_missing_review_output"),
+            "expected_marker": expected_marker,
+            "expected_verdict": expected_verdict,
+            "attestation_status": reviewed_delivery_payload["attestation_status"],
+        },
+        "implementation_report": _file_snapshot(implementation_report, root, "reviewed_delivery_evidence_missing_implementation_report"),
+        "review_bundle": _file_snapshot(review_bundle, root, "reviewed_delivery_evidence_missing_review_bundle"),
+        "attestation": {
+            **_file_snapshot(attestation_path, root, "reviewed_delivery_evidence_missing_attestation"),
+            "status": reviewed_delivery_payload["attestation_status"],
+        },
+        "merge_packet": {
+            **_file_snapshot(merge_packet_path, root, "reviewed_delivery_evidence_missing_merge_packet"),
+            "readiness": reviewed_delivery_payload["merge_packet_status"],
+        },
+        "delivery_reports": {
+            "current": delivery_summary,
+            "safe_mode_report": delivery_summary if mode == "safe_mode" else None,
+            "authorized_report": delivery_summary if mode == "authorized" else None,
+        },
+        "execution": {
+            "status": reviewed_delivery_payload["status"],
+            "delivery_readiness": reviewed_delivery_payload["delivery_readiness"],
+            "delivery_execution_status": reviewed_delivery_payload["delivery_execution_status"],
+            "merge_gate_ready": reviewed_delivery_payload["merge_gate_ready"],
+            "merge_authorization_status": reviewed_delivery_payload["merge_authorization_status"],
+            "push_authorization_status": reviewed_delivery_payload["push_authorization_status"],
+            "merge_executed": reviewed_delivery_payload["merge_executed"],
+            "push_executed": reviewed_delivery_payload["push_executed"],
+            "blocking_reasons": reviewed_delivery_payload["blocking_reasons"],
+            "readiness_blocking_reasons": reviewed_delivery_payload["readiness_blocking_reasons"],
+        },
+        "post_validation_summary": {
+            "pre_merge_validation_status": delivery_payload["pre_merge_validation_status"],
+            "post_merge_validation_status": delivery_payload["post_merge_validation_status"],
+            "validation_command_list": delivery_payload["validation_command_list"],
+        },
+        "safety_boundary_summary": {
+            "review_lifecycle": list(SAFETY_BOUNDARIES),
+            "codex_delivery": delivery_payload["safety_boundary_checklist"],
+            "non_execution_statement": _codex_deliver_execution_statement(delivery_payload),
+        },
+        "readiness": {
+            "verdict": "pending",
+            "blocking_reasons": [],
+        },
+    }
+
+
+def _delivery_execution_summary(delivery_payload: dict[str, Any], report_path: Path, root: Path) -> dict[str, Any]:
+    return {
+        **_file_snapshot(report_path, root, "reviewed_delivery_evidence_missing_delivery_report"),
+        "readiness": delivery_payload["readiness"],
+        "execution_status": delivery_payload["execution_status"],
+        "merge_gate_ready": delivery_payload["merge_gate_ready"],
+        "merge_executed": delivery_payload["merge_executed"],
+        "push_executed": delivery_payload["push_executed"],
+        "final_target_head": delivery_payload["final_target_head"],
+        "final_origin_target_status": delivery_payload["final_origin_target_status"],
+    }
+
+
+def _file_snapshot(path: str | Path, root: Path, missing_code: str) -> dict[str, Any]:
+    file_path = _require_input_file(path, missing_code)
+    return {
+        "path": _display_path(file_path, root),
+        "sha256": _sha256_file(file_path),
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _reviewed_delivery_evidence_readiness_blockers(evidence: dict[str, Any], *, authorized_requested: bool) -> list[str]:
+    blockers: list[str] = []
+    execution = evidence["execution"]
+    target = evidence["target"]
+    if evidence["attestation"]["status"] != "pass":
+        blockers.append("attestation_not_pass")
+    if evidence["merge_packet"]["readiness"] != "pass":
+        blockers.append("merge_packet_not_ready")
+    if execution["delivery_readiness"] != "ready":
+        blockers.append("delivery_readiness_not_ready")
+    if execution["status"] not in {"preview", "delivered"}:
+        blockers.append("reviewed_delivery_status_not_ready")
+    if target["final_origin"] == "unavailable":
+        blockers.append("final_origin_unavailable")
+    elif target["final_target"] != target["final_origin"]:
+        blockers.append("final_target_origin_mismatch")
+    if authorized_requested:
+        if execution["delivery_execution_status"] != "executed":
+            blockers.append("authorized_delivery_not_executed")
+        if not execution["merge_gate_ready"]:
+            blockers.append("authorized_merge_gate_not_ready")
+        if not execution["merge_executed"]:
+            blockers.append("authorized_merge_not_executed")
+        if not execution["push_executed"]:
+            blockers.append("authorized_push_not_executed")
+    else:
+        if execution["delivery_execution_status"] != "safe_mode":
+            blockers.append("safe_mode_report_not_safe_mode")
+        if execution["merge_executed"]:
+            blockers.append("safe_mode_merge_executed")
+        if execution["push_executed"]:
+            blockers.append("safe_mode_push_executed")
+    return blockers
+
+
+def _reviewed_delivery_evidence_text(evidence: dict[str, Any]) -> str:
+    current = evidence["delivery_reports"]["current"]
+    execution = evidence["execution"]
+    target = evidence["target"]
+    lines = [
+        "# AgentOffice Reviewed Delivery Evidence Bundle",
+        "",
+        f"Marker: {evidence['marker']}",
+        f"readiness_verdict: {evidence['readiness']['verdict']}",
+        f"mode: {evidence['mode']}",
+        f"source_branch: {evidence['source']['branch']}",
+        f"source_head: {evidence['source']['head']}",
+        f"target_before: {target['before']}",
+        f"final_target: {target['final_target']}",
+        f"final_origin: {target['final_origin']}",
+        f"merge_executed: {str(execution['merge_executed']).lower()}",
+        f"push_executed: {str(execution['push_executed']).lower()}",
+        "",
+        "## Review Evidence",
+        "",
+        f"- review_output: {evidence['review_output']['path']} sha256={evidence['review_output']['sha256']}",
+        f"- attestation: {evidence['attestation']['path']} status={evidence['attestation']['status']} sha256={evidence['attestation']['sha256']}",
+        f"- merge_packet: {evidence['merge_packet']['path']} readiness={evidence['merge_packet']['readiness']} sha256={evidence['merge_packet']['sha256']}",
+        "",
+        "## Delivery Report",
+        "",
+        f"- path: {current['path']}",
+        f"- sha256: {current['sha256']}",
+        f"- readiness: {current['readiness']}",
+        f"- execution_status: {current['execution_status']}",
+        "",
+        "## Post-Validation Summary",
+        "",
+        f"- pre_merge_validation_status: {evidence['post_validation_summary']['pre_merge_validation_status']}",
+        f"- post_merge_validation_status: {evidence['post_validation_summary']['post_merge_validation_status']}",
+        "",
+        "## Safety Boundary Summary",
+        "",
+        _bullet_list(evidence["safety_boundary_summary"]["review_lifecycle"]),
+        "",
+        "## Final Readiness",
+        "",
+        f"final_readiness_verdict: {evidence['readiness']['verdict']}",
+        f"blocking_reasons: {', '.join(evidence['readiness']['blocking_reasons']) if evidence['readiness']['blocking_reasons'] else 'none'}",
+    ]
+    return "\n".join(lines)
 
 
 def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
@@ -658,7 +925,7 @@ def _format_reviewed_delivery_success(payload: dict[str, Any]) -> str:
         "outputs:",
     ]
     outputs = payload.get("outputs") or {}
-    for key in ("attestation", "merge_packet", "codex_delivery_report"):
+    for key in ("attestation", "merge_packet", "codex_delivery_report", "evidence_bundle"):
         if outputs.get(key):
             lines.append(f"  {key}: {outputs[key]}")
     blockers = payload.get("blocking_reasons") or []
