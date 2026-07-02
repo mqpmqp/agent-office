@@ -993,6 +993,146 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertEqual(json.loads(dotenv[1])["error_code"], "runtime_worker_result_packet_dotenv_refused")
         self.assertNotIn("Traceback", malformed_result[1] + malformed_result[2] + missing_packet[1] + missing_packet[2] + missing_result[1] + missing_result[2] + traversal[1] + traversal[2] + dotenv[1] + dotenv[2])
 
+
+    def test_worker_result_replay_audit_closure_and_delivery_bundle_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_worker_workspace(root)
+            packet = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/worker-invocation-packet.json", "--json"
+            ], root)
+            result_path = root / ".ai" / "workspaces" / "demo" / "worker-result.json"
+            result_payload = self._worker_result()
+            result_payload["task_results"] = [
+                {"task_id": "inspect", "status": "completed", "summary": "static worker result accepted"},
+                {"task_id": "implement", "status": "completed", "summary": "static worker result accepted"},
+                {"task_id": "review", "status": "completed", "summary": "static worker result accepted"},
+            ]
+            result_path.write_text(json.dumps(result_payload), encoding="utf-8")
+            intake = run_cli([
+                "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--json"
+            ], root)
+            replay_json = run_cli([
+                "runtime", "worker-result", "replay", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--json"
+            ], root)
+            replay_text = run_cli([
+                "runtime", "worker-result", "replay", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json"
+            ], root)
+            audit = run_cli([
+                "runtime", "worker-result", "audit-closure", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--out", ".ai/workspaces/demo/worker-audit-closure.json", "--json"
+            ], root)
+            audit_text = run_cli([
+                "runtime", "worker-result", "audit-closure", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--out", ".ai/workspaces/demo/worker-audit-closure.txt", "--format", "text", "--json"
+            ], root)
+            delivery = run_cli([
+                "runtime", "worker-result", "delivery-bundle", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--audit-closure", ".ai/workspaces/demo/worker-audit-closure.json", "--out", ".ai/workspaces/demo/worker-delivery-bundle.json", "--json"
+            ], root)
+            delivery_text = run_cli([
+                "runtime", "worker-result", "delivery-bundle", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--audit-closure", ".ai/workspaces/demo/worker-audit-closure.json", "--out", ".ai/workspaces/demo/worker-delivery-bundle.txt", "--format", "text", "--json"
+            ], root)
+            audit_written = json.loads((root / ".ai" / "workspaces" / "demo" / "worker-audit-closure.json").read_text(encoding="utf-8"))
+            delivery_written = json.loads((root / ".ai" / "workspaces" / "demo" / "worker-delivery-bundle.json").read_text(encoding="utf-8"))
+            audit_text_body = (root / ".ai" / "workspaces" / "demo" / "worker-audit-closure.txt").read_text(encoding="utf-8")
+            delivery_text_body = (root / ".ai" / "workspaces" / "demo" / "worker-delivery-bundle.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(packet[0], 0, packet[2])
+        self.assertEqual(intake[0], 0, intake[2])
+        self.assertEqual(replay_json[0], 0, replay_json[2])
+        replay = json.loads(replay_json[1])
+        self.assertEqual(replay["kind"], "runtime_worker_result_replay")
+        self.assertTrue(replay["replay_ready"])
+        self.assertTrue(replay["governance_ready"])
+        self.assertEqual(replay["result_completed_task_count"], 3)
+        self.assertEqual(replay["memory_update_summary"]["entry_count"], 3)
+        self.assertEqual(replay["events_update_summary"]["worker_result_intake_event_count"], 3)
+        self.assertFalse(replay["provider_calls"])
+        self.assertFalse(replay["model_calls"])
+        self.assertFalse(replay["browser_calls"])
+        self.assertFalse(replay["shell_calls"])
+        self.assertTrue(replay["external_execution_refused"])
+        self.assertEqual(replay_text[0], 0, replay_text[2])
+        self.assertIn("replay_ready: true", replay_text[1])
+        self.assertIn("result_completed_task_count: 3", replay_text[1])
+        self.assertEqual(audit[0], 0, audit[2])
+        audit_payload = json.loads(audit[1])
+        self.assertEqual(audit_payload["kind"], "runtime_worker_audit_closure_packet")
+        self.assertTrue(audit_payload["external_execution_refused"])
+        self.assertFalse(audit_payload["invocation_allowed"])
+        self.assertTrue(audit_payload["replay_ready"])
+        self.assertTrue(audit_payload["governance_ready"])
+        self.assertEqual(audit_written["replay_summary"]["result_completed_task_count"], 3)
+        self.assertEqual(audit_text[0], 0, audit_text[2])
+        self.assertIn("external_execution_refused: true", audit_text_body)
+        self.assertEqual(delivery[0], 0, delivery[2])
+        delivery_payload = json.loads(delivery[1])
+        self.assertTrue(delivery_payload["reviewer_ready"])
+        self.assertTrue(delivery_payload["delivery_ready"])
+        self.assertFalse(delivery_payload["worker_gate_summary"]["provider_calls"])
+        self.assertFalse(delivery_payload["invocation_packet_summary"]["invocation_allowed"])
+        self.assertEqual(delivery_written["replay_summary"]["result_completed_task_count"], 3)
+        self.assertEqual(delivery_text[0], 0, delivery_text[2])
+        self.assertIn("delivery_ready: true", delivery_text_body)
+        combined = "".join(str(part) for result in (packet, intake, replay_json, replay_text, audit, audit_text, delivery, delivery_text) for part in result)
+        self.assertNotIn("Traceback", combined)
+
+    def test_worker_result_replay_audit_delivery_refusals_are_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_worker_workspace(root)
+            packet = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/worker-invocation-packet.json", "--json"
+            ], root)
+            self.assertEqual(packet[0], 0, packet[2])
+            base = root / ".ai" / "workspaces" / "demo"
+            good_result = base / "worker-result.json"
+            good_result.write_text(json.dumps(self._worker_result()), encoding="utf-8")
+            bad_result = base / "bad-result.json"
+            bad_result.write_text("{", encoding="utf-8")
+            non_utf8_result = base / "non-utf8-result.json"
+            non_utf8_result.write_bytes(b"\xff\xfe")
+            missing_path = run_cli([
+                "runtime", "worker-result", "replay", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/missing.json", "--json"
+            ], root)
+            malformed = run_cli([
+                "runtime", "worker-result", "replay", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/bad-result.json", "--json"
+            ], root)
+            non_utf8 = run_cli([
+                "runtime", "worker-result", "replay", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/non-utf8-result.json", "--json"
+            ], root)
+            traversal = run_cli([
+                "runtime", "worker-result", "audit-closure", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/../worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--out", ".ai/workspaces/demo/audit.json", "--json"
+            ], root)
+            dotenv = run_cli([
+                "runtime", "worker-result", "delivery-bundle", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--audit-closure", ".env", "--out", ".ai/workspaces/demo/bundle.json", "--json"
+            ], root)
+            bad_audit = base / "bad-audit.json"
+            bad_audit.write_text(json.dumps({"schema_version": 1, "kind": "runtime_worker_audit_closure_packet", "workspace": ".ai/workspaces/other"}), encoding="utf-8")
+            audit_mismatch = run_cli([
+                "runtime", "worker-result", "delivery-bundle", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--audit-closure", ".ai/workspaces/demo/bad-audit.json", "--out", ".ai/workspaces/demo/bundle.json", "--json"
+            ], root)
+            link_target = base / "target-audit.json"
+            link_target.write_text("{}\n", encoding="utf-8")
+            link = base / "audit-link.json"
+            try:
+                link.symlink_to(link_target)
+            except (NotImplementedError, OSError):
+                link = None
+            symlink_result = run_cli([
+                "runtime", "worker-result", "audit-closure", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--out", ".ai/workspaces/demo/audit-link.json", "--json"
+            ], root) if link else None
+
+        self.assertEqual(json.loads(missing_path[1])["error_code"], "runtime_worker_result_missing")
+        self.assertEqual(json.loads(malformed[1])["error_code"], "runtime_worker_result_invalid")
+        self.assertEqual(json.loads(non_utf8[1])["error_code"], "runtime_worker_result_invalid")
+        self.assertEqual(json.loads(traversal[1])["error_code"], "runtime_worker_result_packet_path_traversal")
+        self.assertEqual(json.loads(dotenv[1])["error_code"], "runtime_worker_delivery_bundle_audit_closure_dotenv_refused")
+        self.assertEqual(json.loads(audit_mismatch[1])["error_code"], "runtime_worker_delivery_bundle_workspace_mismatch")
+        combined = missing_path[1] + missing_path[2] + malformed[1] + malformed[2] + non_utf8[1] + non_utf8[2] + traversal[1] + traversal[2] + dotenv[1] + dotenv[2] + audit_mismatch[1] + audit_mismatch[2]
+        if symlink_result:
+            self.assertEqual(json.loads(symlink_result[1])["error_code"], "runtime_worker_audit_closure_output_symlink")
+            combined += symlink_result[1] + symlink_result[2]
+        self.assertNotIn("Traceback", combined)
+
     def test_external_worker_adapter_prototype_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

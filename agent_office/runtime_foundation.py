@@ -691,6 +691,131 @@ def runtime_worker_result_intake_payload(*, workspace: str, packet: str, result:
     }
 
 
+
+
+def runtime_worker_result_replay_payload(*, workspace: str, packet: str, result: str, project_root: Path) -> dict[str, Any]:
+    snapshot, packet_path, result_path, packet_payload, result_payload, task_results = _load_worker_result_static_inputs(
+        workspace=workspace,
+        packet=packet,
+        result=result,
+        project_root=project_root,
+    )
+    return _worker_result_replay_payload(
+        snapshot=snapshot,
+        packet_path=packet_path,
+        result_path=result_path,
+        packet_payload=packet_payload,
+        result_payload=result_payload,
+        task_results=task_results,
+        project_root=project_root,
+    )
+
+
+def runtime_worker_audit_closure_payload(*, workspace: str, packet: str, result: str, out: str, closure_format: str, project_root: Path) -> dict[str, Any]:
+    if closure_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_audit_closure_format_invalid", f"Unsupported worker audit closure format: {closure_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_audit_closure")
+    replay = runtime_worker_result_replay_payload(workspace=workspace, packet=packet, result=result, project_root=project_root)
+    closure = {
+        "ok": True,
+        "command": "runtime worker-result audit-closure",
+        "kind": "runtime_worker_audit_closure_packet",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": replay["workspace"],
+        "job_id": replay["job_id"],
+        "adapter": replay["adapter"],
+        "invocation_packet_source": replay["invocation_packet_source"],
+        "result_artifact_source": replay["result_artifact_source"],
+        "replay_summary": _worker_replay_summary_readback(replay),
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "external_execution_allowed": False,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "governance_ready": replay["governance_ready"],
+        "replay_ready": replay["replay_ready"],
+        "validation_commands": _worker_validation_commands(),
+        "review_delivery_next_action": "review codex-deliver safe-mode, then authorized delivery only if ready",
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "closure_format": closure_format,
+        "written": True,
+    }
+    if closure_format == "json":
+        _write_json(output_path, closure)
+    else:
+        _write_text(output_path, _format_worker_audit_closure_text(closure))
+    return closure
+
+
+def runtime_worker_delivery_bundle_payload(*, workspace: str, packet: str, result: str, audit_closure: str, out: str, bundle_format: str, project_root: Path) -> dict[str, Any]:
+    if bundle_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_delivery_bundle_format_invalid", f"Unsupported worker delivery bundle format: {bundle_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_delivery_bundle")
+    closure_path = _safe_input_path(audit_closure, project_root, "runtime_worker_delivery_bundle_audit_closure")
+    closure = _load_input_json(closure_path, "runtime_worker_delivery_bundle_audit_closure")
+    replay = runtime_worker_result_replay_payload(workspace=workspace, packet=packet, result=result, project_root=project_root)
+    _validate_worker_audit_closure_for_bundle(closure, replay)
+    snapshot = _workspace_snapshot(workspace, project_root, allow_empty=True)
+    gate = runtime_worker_gate_payload(workspace=workspace, adapter=replay["adapter"], project_root=project_root)
+    bundle = {
+        "ok": True,
+        "command": "runtime worker-result delivery-bundle",
+        "kind": "runtime_worker_delivery_bundle",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": replay["workspace"],
+        "job_id": replay["job_id"],
+        "adapter": replay["adapter"],
+        "worker_gate_summary": {
+            "worker_gate_ready": gate["worker_gate_ready"],
+            "external_execution_allowed": gate["external_execution_allowed"],
+            "external_execution_enabled": gate["external_execution_enabled"],
+            "provider_calls": gate["provider_calls"],
+            "model_calls": gate["model_calls"],
+            "browser_calls": gate["browser_calls"],
+            "shell_calls": gate["shell_calls"],
+            "reason": gate["reason"],
+        },
+        "invocation_packet_summary": {
+            "source": replay["invocation_packet_source"],
+            "invocation_ready": replay["invocation_ready"],
+            "invocation_allowed": replay["invocation_allowed"],
+            "task_ids": replay["task_ids"],
+        },
+        "result_intake_summary": {
+            "source": replay["result_artifact_source"],
+            "result_task_count": replay["result_task_count"],
+            "result_completed_task_count": replay["result_completed_task_count"],
+            "memory_update_summary": replay["memory_update_summary"],
+            "events_update_summary": replay["events_update_summary"],
+        },
+        "replay_summary": _worker_replay_summary_readback(replay),
+        "audit_closure_summary": {
+            "source": _project_relative(closure_path, project_root),
+            "governance_ready": bool(closure.get("governance_ready")),
+            "replay_ready": bool(closure.get("replay_ready")),
+            "external_execution_refused": bool(closure.get("external_execution_refused")),
+            "review_delivery_next_action": str(closure.get("review_delivery_next_action", "")),
+        },
+        "reviewer_ready": replay["replay_ready"] and bool(closure.get("replay_ready")),
+        "delivery_ready": replay["governance_ready"] and bool(closure.get("governance_ready")),
+        "validation_commands": _worker_validation_commands(),
+        "static_artifacts": _runtime_file_statuses(snapshot["paths"], project_root),
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "bundle_format": bundle_format,
+        "written": True,
+    }
+    if bundle_format == "json":
+        _write_json(output_path, bundle)
+    else:
+        _write_text(output_path, _format_worker_delivery_bundle_text(bundle))
+    return bundle
+
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -763,7 +888,7 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"replay_valid: {str(payload['replay_valid']).lower()}")
         lines.append(f"evidence_path: {payload['evidence_path']}")
         lines.append(f"blocking_reasons: {', '.join(payload['blocking_reasons']) or 'none'}")
-    if payload.get("kind") == "runtime_job_state" or "job_id" in payload:
+    if payload.get("kind") == "runtime_job_state" or ("job_id" in payload and "state" in payload):
         lines.append(f"job_id: {payload['job_id']}")
         lines.append(f"job_state: {payload['state']}")
         lines.append(f"resume_allowed: {str(payload['resume_allowed']).lower()}")
@@ -798,6 +923,28 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"intake_accepted: {str(payload['intake_accepted']).lower()}")
         lines.append(f"updated: {', '.join(payload['updated_task_ids']) or '-'}")
         lines.append(f"event_entries: {payload['event_entry_count']}")
+    if payload.get("kind") == "runtime_worker_result_replay":
+        lines.append(f"adapter: {payload['adapter']}")
+        lines.append(f"job_id: {payload['job_id']}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"governance_ready: {str(payload['governance_ready']).lower()}")
+        lines.append(f"result_completed_task_count: {payload['result_completed_task_count']}")
+        lines.append(f"memory_updates: {payload['memory_update_summary']['entry_count']}")
+        lines.append(f"event_updates: {payload['events_update_summary']['entry_count']}")
+        lines.append(f"external_execution_refused: {str(payload['external_execution_refused']).lower()}")
+    if payload.get("kind") == "runtime_worker_audit_closure_packet":
+        lines.append(f"adapter: {payload['adapter']}")
+        lines.append(f"job_id: {payload['job_id']}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"governance_ready: {str(payload['governance_ready']).lower()}")
+        lines.append(f"external_execution_refused: {str(payload['external_execution_refused']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_delivery_bundle":
+        lines.append(f"adapter: {payload['adapter']}")
+        lines.append(f"job_id: {payload['job_id']}")
+        lines.append(f"reviewer_ready: {str(payload['reviewer_ready']).lower()}")
+        lines.append(f"delivery_ready: {str(payload['delivery_ready']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
@@ -1439,7 +1586,7 @@ def _safe_input_path(path: str, project_root: Path, code_prefix: str) -> Path:
 def _load_input_json(path: Path, code_prefix: str) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeFoundationError(f"{code_prefix}_invalid", f"Input JSON is invalid: {path.name}") from exc
     if not isinstance(data, dict):
         raise RuntimeFoundationError(f"{code_prefix}_invalid", f"Input JSON must be an object: {path.name}")
@@ -1636,6 +1783,217 @@ def _format_worker_packet_text(payload: dict[str, Any]) -> str:
     lines.extend(f"- {task_id}" for task_id in payload["task_ids"])
     lines.append("")
     lines.append("provider/runtime/adapter execution: not triggered")
+    return "\n".join(lines)
+
+
+
+
+def _load_worker_result_static_inputs(*, workspace: str, packet: str, result: str, project_root: Path) -> tuple[dict[str, Any], Path, Path, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    snapshot = _workspace_snapshot(workspace, project_root, allow_empty=False)
+    packet_path = _safe_input_path(packet, project_root, "runtime_worker_result_packet")
+    result_path = _safe_input_path(result, project_root, "runtime_worker_result")
+    packet_payload = _load_input_json(packet_path, "runtime_worker_result_packet")
+    result_payload = _load_input_json(result_path, "runtime_worker_result")
+    _validate_worker_packet_for_intake(packet_payload, snapshot)
+    task_results = _validate_worker_result_for_intake(result_payload, packet_payload, snapshot)
+    return snapshot, packet_path, result_path, packet_payload, result_payload, task_results
+
+
+def _worker_result_replay_payload(
+    *,
+    snapshot: dict[str, Any],
+    packet_path: Path,
+    result_path: Path,
+    packet_payload: dict[str, Any],
+    result_payload: dict[str, Any],
+    task_results: list[dict[str, Any]],
+    project_root: Path,
+) -> dict[str, Any]:
+    replay = _replay_contract(snapshot)
+    result_status_counts = _worker_result_status_counts(task_results)
+    replay_ready = bool(replay["replay_valid"])
+    governance_ready = replay_ready and replay.get("workspace_status") == "completed"
+    return {
+        "ok": True,
+        "command": "runtime worker-result replay",
+        "kind": "runtime_worker_result_replay",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": snapshot["workspace"],
+        "job_id": str(result_payload["job_id"]),
+        "adapter": str(result_payload["adapter"]),
+        "invocation_packet_source": _artifact_source(packet_path, project_root),
+        "result_artifact_source": _artifact_source(result_path, project_root),
+        "task_ids": [task["id"] for task in snapshot["tasks"]],
+        "result_task_ids": [str(task_result["task_id"]) for task_result in task_results],
+        "result_task_count": len(task_results),
+        "result_completed_task_count": result_status_counts["completed"],
+        "result_failed_task_count": result_status_counts["failed"],
+        "result_skipped_task_count": result_status_counts["skipped"],
+        "runtime_completed_task_count": _task_counts(snapshot["tasks"])["completed"],
+        "memory_update_summary": {
+            "entry_count": len(snapshot["memory_entries"]),
+            "task_memory_ids": [entry.get("task_id") for entry in snapshot["memory_entries"] if entry.get("entry_type") == "task_memory"],
+        },
+        "events_update_summary": {
+            "entry_count": len(snapshot["event_entries"]),
+            "latest_event_summary": _event_summary(snapshot["event_entries"][-1] if snapshot["event_entries"] else None),
+            "worker_result_intake_event_count": sum(1 for entry in snapshot["event_entries"] if entry.get("entry_type") == "worker_result_intake"),
+        },
+        "runtime_replay": replay,
+        "replay_ready": replay_ready,
+        "governance_ready": governance_ready,
+        "worker_result_replay_valid": True,
+        "invocation_ready": bool(packet_payload.get("invocation_ready")),
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "external_execution_allowed": False,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "external_behavior": dict(SAFETY_BOUNDARIES),
+    }
+
+
+def _worker_result_status_counts(task_results: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"completed": 0, "failed": 0, "skipped": 0}
+    for task_result in task_results:
+        counts[str(task_result["status"])] += 1
+    return counts
+
+
+def _artifact_source(path: Path, project_root: Path) -> dict[str, Any]:
+    return {
+        "path": _project_relative(path, project_root),
+        "sha256": _sha256_file(path),
+        "bytes": path.stat().st_size,
+    }
+
+
+def _worker_replay_summary_readback(replay: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "workspace": replay["workspace"],
+        "job_id": replay["job_id"],
+        "adapter": replay["adapter"],
+        "result_completed_task_count": replay["result_completed_task_count"],
+        "runtime_completed_task_count": replay["runtime_completed_task_count"],
+        "memory_update_summary": replay["memory_update_summary"],
+        "events_update_summary": replay["events_update_summary"],
+        "replay_ready": replay["replay_ready"],
+        "governance_ready": replay["governance_ready"],
+        "external_execution_refused": replay["external_execution_refused"],
+        "provider_calls": replay["provider_calls"],
+        "model_calls": replay["model_calls"],
+        "browser_calls": replay["browser_calls"],
+        "shell_calls": replay["shell_calls"],
+    }
+
+
+def _worker_validation_commands() -> list[str]:
+    return [
+        "python3 -m compileall agent_office tests",
+        "python3 -m unittest tests.test_runtime_foundation_cli",
+        "python3 -m unittest tests.test_review_lifecycle_cli",
+        "python3 -m unittest",
+        "python3 -m unittest discover -s tests -p 'test_*.py'",
+        "python3 -m agent_office doctor --adapters",
+        "./scripts/verify.sh",
+        "./scripts/smoke-test.sh P6-PROFILES",
+        "python3 -m agent_office run-staged P6-PROFILES --dry-run --reset",
+        "git diff --check",
+    ]
+
+
+def _validate_worker_audit_closure_for_bundle(closure: dict[str, Any], replay: dict[str, Any]) -> None:
+    if closure.get("schema_version") != SCHEMA_VERSION or closure.get("kind") != "runtime_worker_audit_closure_packet":
+        raise RuntimeFoundationError("runtime_worker_delivery_bundle_audit_closure_invalid", "Worker audit closure packet schema is invalid.")
+    if closure.get("workspace") != replay["workspace"]:
+        raise RuntimeFoundationError("runtime_worker_delivery_bundle_workspace_mismatch", "Worker audit closure workspace does not match replay.")
+    if closure.get("job_id") != replay["job_id"]:
+        raise RuntimeFoundationError("runtime_worker_delivery_bundle_job_mismatch", "Worker audit closure job id does not match replay.")
+    if closure.get("adapter") != replay["adapter"]:
+        raise RuntimeFoundationError("runtime_worker_delivery_bundle_adapter_mismatch", "Worker audit closure adapter does not match replay.")
+    if closure.get("external_execution_refused") is not True or closure.get("invocation_allowed") is not False:
+        raise RuntimeFoundationError("runtime_worker_delivery_bundle_audit_closure_invalid", "Worker audit closure must refuse external execution.")
+    for key in ("provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if closure.get(key) is not False:
+            raise RuntimeFoundationError("runtime_worker_delivery_bundle_audit_closure_invalid", f"Worker audit closure must report {key}=false.")
+
+
+def _format_worker_result_replay_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Worker Result Replay",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"workspace: {payload['workspace']}",
+        f"job_id: {payload['job_id']}",
+        f"adapter: {payload['adapter']}",
+        f"result_completed_task_count: {payload['result_completed_task_count']}",
+        f"runtime_completed_task_count: {payload['runtime_completed_task_count']}",
+        f"memory_entries: {payload['memory_update_summary']['entry_count']}",
+        f"event_entries: {payload['events_update_summary']['entry_count']}",
+        f"replay_ready: {str(payload['replay_ready']).lower()}",
+        f"governance_ready: {str(payload['governance_ready']).lower()}",
+        f"external_execution_refused: {str(payload['external_execution_refused']).lower()}",
+        f"provider_calls: {str(payload['provider_calls']).lower()}",
+        f"model_calls: {str(payload['model_calls']).lower()}",
+        f"browser_calls: {str(payload['browser_calls']).lower()}",
+        f"shell_calls: {str(payload['shell_calls']).lower()}",
+        "",
+        "provider/runtime/adapter execution: not triggered",
+    ]
+    return "\n".join(lines)
+
+
+def _format_worker_audit_closure_text(payload: dict[str, Any]) -> str:
+    summary = payload["replay_summary"]
+    lines = [
+        "# AgentOffice Worker Audit Closure Packet",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"workspace: {payload['workspace']}",
+        f"job_id: {payload['job_id']}",
+        f"adapter: {payload['adapter']}",
+        f"invocation_packet: {payload['invocation_packet_source']['path']}",
+        f"result_artifact: {payload['result_artifact_source']['path']}",
+        f"result_completed_task_count: {summary['result_completed_task_count']}",
+        f"memory_entries: {summary['memory_update_summary']['entry_count']}",
+        f"event_entries: {summary['events_update_summary']['entry_count']}",
+        f"replay_ready: {str(payload['replay_ready']).lower()}",
+        f"governance_ready: {str(payload['governance_ready']).lower()}",
+        f"invocation_allowed: {str(payload['invocation_allowed']).lower()}",
+        f"external_execution_refused: {str(payload['external_execution_refused']).lower()}",
+        f"provider_calls: {str(payload['provider_calls']).lower()}",
+        f"model_calls: {str(payload['model_calls']).lower()}",
+        f"browser_calls: {str(payload['browser_calls']).lower()}",
+        f"shell_calls: {str(payload['shell_calls']).lower()}",
+        "",
+        "## Validation Commands",
+    ]
+    lines.extend(f"- {command}" for command in payload["validation_commands"])
+    lines.extend(["", f"review_delivery_next_action: {payload['review_delivery_next_action']}"])
+    return "\n".join(lines)
+
+
+def _format_worker_delivery_bundle_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Worker Delivery Bundle",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"workspace: {payload['workspace']}",
+        f"job_id: {payload['job_id']}",
+        f"adapter: {payload['adapter']}",
+        f"reviewer_ready: {str(payload['reviewer_ready']).lower()}",
+        f"delivery_ready: {str(payload['delivery_ready']).lower()}",
+        f"worker_gate_ready: {str(payload['worker_gate_summary']['worker_gate_ready']).lower()}",
+        f"invocation_allowed: {str(payload['invocation_packet_summary']['invocation_allowed']).lower()}",
+        f"result_completed_task_count: {payload['replay_summary']['result_completed_task_count']}",
+        f"audit_closure: {payload['audit_closure_summary']['source']}",
+        "",
+        "provider/runtime/adapter execution: not triggered",
+    ]
     return "\n".join(lines)
 
 

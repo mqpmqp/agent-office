@@ -60,9 +60,12 @@ from .runtime_foundation import (
     runtime_run_payload,
     runtime_status_payload,
     runtime_worker_adapter_payload,
+    runtime_worker_audit_closure_payload,
+    runtime_worker_delivery_bundle_payload,
     runtime_worker_gate_payload,
     runtime_worker_invocation_packet_payload,
     runtime_worker_result_intake_payload,
+    runtime_worker_result_replay_payload,
 )
 from .objectives import (
     ObjectiveSpecError,
@@ -1439,6 +1442,12 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             payload = runtime_worker_invocation_packet_payload(workspace=args.workspace, adapter=args.adapter, job_id=args.job_id, out=args.out, packet_format=args.format, project_root=PROJECT_ROOT)
         elif action == "worker-result" and args.worker_result_action == "intake":
             payload = runtime_worker_result_intake_payload(workspace=args.workspace, packet=args.packet, result=args.result, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "replay":
+            payload = runtime_worker_result_replay_payload(workspace=args.workspace, packet=args.packet, result=args.result, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "audit-closure":
+            payload = runtime_worker_audit_closure_payload(workspace=args.workspace, packet=args.packet, result=args.result, out=args.out, closure_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "delivery-bundle":
+            payload = runtime_worker_delivery_bundle_payload(workspace=args.workspace, packet=args.packet, result=args.result, audit_closure=args.audit_closure, out=args.out, bundle_format=args.format, project_root=PROJECT_ROOT)
         else:
             raise RuntimeFoundationError("runtime_unknown_action", "unknown runtime action")
     except RuntimeFoundationError as exc:
@@ -1771,6 +1780,29 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_worker_result_intake.add_argument("--result", required=True, help="Project-local saved worker result JSON path.")
     runtime_worker_result_intake.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_worker_result_intake.set_defaults(func=cmd_runtime)
+    runtime_worker_result_replay = runtime_worker_result_sub.add_parser("replay", help="Replay saved worker packet/result artifacts without executing workers.")
+    runtime_worker_result_replay.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_worker_result_replay.add_argument("--packet", required=True, help="Project-local worker invocation packet JSON path.")
+    runtime_worker_result_replay.add_argument("--result", required=True, help="Project-local saved worker result JSON path.")
+    runtime_worker_result_replay.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_result_replay.set_defaults(func=cmd_runtime)
+    runtime_worker_audit_closure = runtime_worker_result_sub.add_parser("audit-closure", help="Write a deterministic worker audit closure packet.")
+    runtime_worker_audit_closure.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_worker_audit_closure.add_argument("--packet", required=True, help="Project-local worker invocation packet JSON path.")
+    runtime_worker_audit_closure.add_argument("--result", required=True, help="Project-local saved worker result JSON path.")
+    runtime_worker_audit_closure.add_argument("--out", required=True, help="Project-local worker audit closure output path.")
+    runtime_worker_audit_closure.add_argument("--format", choices=["json", "text"], default="json", help="Audit closure output format. Default: json.")
+    runtime_worker_audit_closure.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_audit_closure.set_defaults(func=cmd_runtime)
+    runtime_worker_delivery_bundle = runtime_worker_result_sub.add_parser("delivery-bundle", help="Write a static reviewer-ready worker delivery bundle.")
+    runtime_worker_delivery_bundle.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_worker_delivery_bundle.add_argument("--packet", required=True, help="Project-local worker invocation packet JSON path.")
+    runtime_worker_delivery_bundle.add_argument("--result", required=True, help="Project-local saved worker result JSON path.")
+    runtime_worker_delivery_bundle.add_argument("--audit-closure", required=True, help="Project-local worker audit closure packet JSON path.")
+    runtime_worker_delivery_bundle.add_argument("--out", required=True, help="Project-local worker delivery bundle output path.")
+    runtime_worker_delivery_bundle.add_argument("--format", choices=["json", "text"], default="json", help="Delivery bundle output format. Default: json.")
+    runtime_worker_delivery_bundle.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_delivery_bundle.set_defaults(func=cmd_runtime)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
