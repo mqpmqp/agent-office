@@ -14,9 +14,13 @@ phase32/lifecycle-dogfood-polish
 
 1321cbe8a48282b2e9ac8d1e8eb0f4baa98094a0
 
-## Commit
+## Original Reviewed Commit
 
-Recorded after commit/push in final readback. This report is committed with the P32 branch so the final branch HEAD is the authoritative P32 commit.
+089010f34f79d2685a30f5cebd3f48ff7384ca1d
+
+## Review-Fix Commit
+
+The review-fix commit is the commit containing `P32_CLAUDE_REVIEW_FIX_REPORT.md`; record and verify it with `git rev-parse HEAD` after the review-fix commit is created. The final readback and review-fix delta artifact provide the exact hash.
 
 ## Changed Files
 
@@ -32,7 +36,25 @@ Recorded after commit/push in final readback. This report is committed with the 
 - Documented the standard lifecycle path: `review bundle -> Claude artifact review -> review attest -> review merge-packet -> separately authorized merge gate`.
 - Clarified that `review` is the phase lifecycle path and `review-artifact` remains the lower-level artifact exporter/verifier/registry/closure toolkit.
 
-## Validation Commands
+## Bundle-Captured Validation Commands
+
+These commands are captured inside `/opt/agent-office/P32_REVIEW_ARTIFACT_BUNDLE.md` when `review bundle --run-validation` runs:
+
+- python3 -m compileall agent_office tests
+- python3 -m unittest
+- python3 -m unittest discover -s tests -p 'test_*.py'
+- python3 -m agent_office doctor --adapters
+- ./scripts/verify.sh
+- ./scripts/smoke-test.sh P6-PROFILES
+- python3 -m agent_office run-staged P6-PROFILES --dry-run --reset
+- python3 -m agent_office orchestrate --help
+- python3 -m unittest tests.test_orchestration_cli
+- python3 -m unittest tests.test_review_lifecycle_cli
+- git diff --check
+
+## Separately Run Codex Validation Commands
+
+These commands were run by Codex during P32 validation but were not all captured inside the initial review bundle:
 
 - python3 -m compileall agent_office tests
 - python3 -m unittest
@@ -51,16 +73,16 @@ Recorded after commit/push in final readback. This report is committed with the 
 
 ## Validation Result Summary
 
-All required P32 validation commands passed. Focused review lifecycle tests passed with 12 tests.
+All required P32 validation commands passed. Focused review lifecycle tests passed with 12 tests before the review-fix delta; the review-fix report records the updated focused test count and validation results.
 
-## Dogfood Plan
+## Dogfood Artifacts
 
-After this report is committed, P32 will use `python3 -m agent_office review bundle --run-validation` to generate:
+P32 used `python3 -m agent_office review bundle --run-validation` to generate:
 
 - /opt/agent-office/P32_REVIEW_ARTIFACT_BUNDLE.md
 - /opt/agent-office/P32_CLAUDE_REVIEW_PROMPT.md
 
-Claude review output will not be fabricated. Attestation and merge-packet generation require a real saved Claude review output.
+Claude review output was not fabricated. Attestation and merge-packet generation require a real saved Claude review output.
 
 ## Safety Summary
 
@@ -74,5 +96,5 @@ Claude review output will not be fabricated. Attestation and merge-packet genera
 
 ## Known Follow-ups
 
-- Upload the P32 review bundle and prompt to Claude for artifact-based review.
-- Save the real Claude output and run `review attest` before any future P32 merge gate.
+- Upload the P32 review-fix delta artifact bundle to Claude for artifact-based review.
+- Save the real Claude output and run `review attest` only after a true PASS output exists.
