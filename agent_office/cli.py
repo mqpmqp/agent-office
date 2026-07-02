@@ -1212,6 +1212,8 @@ def cmd_review(args: argparse.Namespace) -> int:
                 push_authorized=args.push_authorized,
                 allow_dirty=args.allow_dirty,
                 mkdirs=args.mkdirs,
+                evidence_bundle_out=args.evidence_bundle_out,
+                evidence_bundle_format=args.evidence_bundle_format,
             )
         elif action == "codex-deliver":
             payload = review_lifecycle.review_codex_deliver_payload(
@@ -1672,6 +1674,8 @@ def build_parser() -> argparse.ArgumentParser:
     reviewed_delivery.add_argument("--push-authorized", action="store_true", help="Authorize push execution after a successful authorized merge.")
     reviewed_delivery.add_argument("--allow-dirty", action="store_true", help="Allow tracked dirty state and record it as readiness evidence.")
     reviewed_delivery.add_argument("--mkdirs", action="store_true", help="Create missing output directories.")
+    reviewed_delivery.add_argument("--evidence-bundle-out", help="Optional static reviewed-delivery evidence/readback bundle output path.")
+    reviewed_delivery.add_argument("--evidence-bundle-format", choices=["json", "text"], default="json", help="Evidence bundle format when --evidence-bundle-out is set. Default: json.")
     reviewed_delivery.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     reviewed_delivery.set_defaults(func=cmd_review)
 

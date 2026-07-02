@@ -415,6 +415,13 @@ Standard phase sequence:
 
 `review reviewed-delivery` is a static orchestration wrapper for reviewed delivery closure. It verifies a saved Claude review output with `review attest`, generates a `review merge-packet`, then runs `review codex-deliver`; by default it is safe-mode only, and real merge/push still requires explicit `--merge-authorized --push-authorized` with strict source/target SHA guards.
 
+It can also write a static evidence/readback bundle after orchestration:
+
+```bash
+python3 -m agent_office review reviewed-delivery ... --evidence-bundle-out /tmp/p38-reviewed-delivery-evidence.json --evidence-bundle-format json
+python3 -m agent_office review reviewed-delivery ... --evidence-bundle-out /tmp/p38-reviewed-delivery-evidence.md --evidence-bundle-format text
+```
+
 `review codex-gate` remains a smaller static readiness report for a reviewed branch and commit range. It does not execute merge, push, tag, providers, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation. Codex-only does not mean skipping validation; merge gates remain explicit operator actions.
 
 `review bundle`, `review prompt`, `review attest`, and `review merge-packet` remain available as optional/legacy/lower-level artifact-review tooling. They are not the default mandatory path for new implementation branches. `review-artifact` remains the lower-level commit-range artifact exporter, verifier, registry, and closure toolkit for existing review artifacts and run bundles.

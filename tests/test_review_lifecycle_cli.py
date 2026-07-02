@@ -748,6 +748,159 @@ P31_ARTIFACT_REVIEW_COMPLETE
             readiness_fail_stdout, readiness_fail_stderr, stale_stdout, stale_stderr, authorized_stdout, authorized_stderr,
         ]))
 
+    def test_reviewed_delivery_evidence_bundle_json_and_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as remote_dir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            remote = Path(remote_dir) / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            git(root, "remote", "add", "origin", str(remote))
+            git(root, "push", "origin", "phase31/phase-lifecycle-review-system", "phase6/mainline")
+            git(root, "fetch", "origin")
+            export_root = Path(export_dir)
+            bundle = export_root / "bundle.md"
+            prompt = export_root / "prompt.md"
+            review = export_root / "claude-review.md"
+            review.write_text(
+                """verdict: pass
+artifact-based caveat: reviewed static artifact evidence only
+files reviewed: README.md, P31_PHASE_LIFECYCLE_REVIEW_SYSTEM_REPORT.md
+validation artifacts reviewed: bundle validation fixture
+blocker findings: none
+major findings: none
+P31_ARTIFACT_REVIEW_COMPLETE
+""",
+                encoding="utf-8",
+            )
+            with patch.object(cli, "PROJECT_ROOT", root), patch.object(review_lifecycle, "DEFAULT_VALIDATION_COMMANDS", self.validation_commands):
+                bundle_code, _bundle_stdout, bundle_stderr = run_cli(self._bundle_args(baseline, head, report, bundle, prompt, "--run-validation", "--json"))
+            self.assertEqual(bundle_code, 0, bundle_stderr)
+
+            def args(out_dir: Path, evidence: Path, fmt: str, *extra: str) -> list[str]:
+                return [
+                    "review", "reviewed-delivery", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                    "--expected-source-head", head, "--expected-target-head", baseline,
+                    "--implementation-report", str(report), "--review-bundle", str(bundle), "--review-report", str(review),
+                    "--expected-marker", "P31_ARTIFACT_REVIEW_COMPLETE", "--out-dir", str(out_dir), "--run-id", out_dir.name,
+                    "--mkdirs", "--evidence-bundle-out", str(evidence), "--evidence-bundle-format", fmt, *extra,
+                ]
+
+            json_dir = export_root / "json"
+            text_dir = export_root / "text"
+            json_evidence = json_dir / "evidence.json"
+            text_evidence = text_dir / "evidence.md"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                json_code, json_stdout, json_stderr = run_cli(args(json_dir, json_evidence, "json", "--json"))
+                text_code, text_stdout, text_stderr = run_cli(args(text_dir, text_evidence, "text"))
+            json_payload = json.loads(json_stdout)
+            evidence_payload = json.loads(json_evidence.read_text(encoding="utf-8"))
+            text_bundle = text_evidence.read_text(encoding="utf-8")
+
+        self.assertEqual(json_code, 0, json_stderr)
+        self.assertEqual(text_code, 0, text_stderr)
+        self.assertEqual(json_payload["outputs"]["evidence_bundle"], str(json_evidence))
+        self.assertEqual(json_payload["evidence_bundle_readiness"], "ready")
+        self.assertEqual(evidence_payload["readiness"]["verdict"], "ready")
+        self.assertFalse(evidence_payload["execution"]["merge_executed"])
+        self.assertFalse(evidence_payload["execution"]["push_executed"])
+        self.assertEqual(evidence_payload["source"]["branch"], "phase31/phase-lifecycle-review-system")
+        self.assertEqual(evidence_payload["source"]["head"], head)
+        self.assertEqual(evidence_payload["target"]["before"], baseline)
+        self.assertEqual(evidence_payload["target"]["final_target"], baseline)
+        self.assertEqual(evidence_payload["target"]["final_origin"], baseline)
+        self.assertIn("REVIEWED_DELIVERY_EVIDENCE_BUNDLE_COMPLETE", text_bundle)
+        self.assertIn("readiness_verdict: ready", text_bundle)
+        self.assertIn("Safety Boundary Summary", text_bundle)
+        self.assertIn("do not read .env", text_bundle)
+        self.assertIn("merge_executed: false", text_bundle)
+        self.assertIn("push_executed: false", text_bundle)
+        self.assertIn("evidence_bundle", text_stdout)
+        self.assertNotIn("Traceback", json_stdout + json_stderr + text_stdout + text_stderr + text_bundle)
+
+    def test_reviewed_delivery_evidence_bundle_clean_errors_and_default_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as remote_dir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            remote = Path(remote_dir) / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            git(root, "remote", "add", "origin", str(remote))
+            git(root, "push", "origin", "phase31/phase-lifecycle-review-system", "phase6/mainline")
+            git(root, "fetch", "origin")
+            export_root = Path(export_dir)
+            bundle = export_root / "bundle.md"
+            bundle.write_text("review bundle\n", encoding="utf-8")
+            review = export_root / "claude-review.md"
+            review.write_text("verdict: pass\nblocker findings: none\nmajor findings: none\nP31_ARTIFACT_REVIEW_COMPLETE\n", encoding="utf-8")
+            out_dir = export_root / "safe"
+            out_dir.mkdir()
+            base_args = [
+                "review", "reviewed-delivery", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                "--expected-source-head", head, "--expected-target-head", baseline,
+                "--implementation-report", str(report), "--review-bundle", str(bundle), "--review-report", str(review),
+                "--expected-marker", "P31_ARTIFACT_REVIEW_COMPLETE", "--out-dir", str(out_dir), "--run-id", "safe",
+                "--json",
+            ]
+            with patch.object(cli, "PROJECT_ROOT", root):
+                missing_parent = run_cli([*base_args, "--evidence-bundle-out", str(out_dir / "missing" / "evidence.json")])
+                outside_root = run_cli([*base_args, "--evidence-bundle-out", str(export_root / "outside.json")])
+                default_code, default_stdout, default_stderr = run_cli(base_args)
+
+        self.assertEqual(missing_parent[0], 2)
+        self.assertEqual(json.loads(missing_parent[1])["error_code"], "reviewed_delivery_evidence_parent_missing")
+        self.assertEqual(outside_root[0], 2)
+        self.assertEqual(json.loads(outside_root[1])["error_code"], "reviewed_delivery_evidence_output_outside_allowed_roots")
+        self.assertEqual(default_code, 0, default_stderr)
+        self.assertNotIn("evidence_bundle", json.loads(default_stdout)["outputs"])
+        self.assertNotIn("Traceback", missing_parent[1] + missing_parent[2] + outside_root[1] + outside_root[2] + default_stdout + default_stderr)
+
+    def test_reviewed_delivery_evidence_bundle_readiness_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as remote_dir, tempfile.TemporaryDirectory() as export_dir:
+            root = Path(tmpdir)
+            baseline, head, report = self._repo(root)
+            git(root, "branch", "phase6/mainline", baseline)
+            remote = Path(remote_dir) / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            git(root, "remote", "add", "origin", str(remote))
+            git(root, "push", "origin", "phase31/phase-lifecycle-review-system", "phase6/mainline")
+            git(root, "fetch", "origin")
+            export_root = Path(export_dir)
+            bundle = export_root / "bundle.md"
+            bundle.write_text("review bundle\n", encoding="utf-8")
+            review = export_root / "claude-review.md"
+            review.write_text("verdict: pass\nblocker findings: none\nmajor findings: none\nP31_ARTIFACT_REVIEW_COMPLETE\n", encoding="utf-8")
+
+            def args(out_dir: Path, evidence: Path, *extra: str) -> list[str]:
+                return [
+                    "review", "reviewed-delivery", "--source", "phase31/phase-lifecycle-review-system", "--target", "phase6/mainline",
+                    "--expected-source-head", head, "--expected-target-head", baseline,
+                    "--implementation-report", str(report), "--review-bundle", str(bundle), "--review-report", str(review),
+                    "--expected-marker", "P31_ARTIFACT_REVIEW_COMPLETE", "--out-dir", str(out_dir), "--run-id", out_dir.name,
+                    "--mkdirs", "--evidence-bundle-out", str(evidence), "--json", *extra,
+                ]
+
+            partial_auth_dir = export_root / "partial-auth"
+            origin_mismatch_dir = export_root / "origin-mismatch"
+            with patch.object(cli, "PROJECT_ROOT", root):
+                partial_auth = run_cli(args(partial_auth_dir, partial_auth_dir / "evidence.json", "--merge-authorized"))
+            git(root, "push", "origin", f"{head}:phase6/mainline")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                origin_mismatch = run_cli(args(origin_mismatch_dir, origin_mismatch_dir / "evidence.json"))
+
+        partial_auth_payload = json.loads(partial_auth[1])
+        origin_mismatch_payload = json.loads(origin_mismatch[1])
+        self.assertEqual(partial_auth[0], 2)
+        self.assertEqual(partial_auth_payload["error_code"], "reviewed_delivery_evidence_readiness_failed")
+        self.assertIn("authorized_merge_not_executed", partial_auth_payload["details"]["blocking_reasons"])
+        self.assertIn("authorized_push_not_executed", partial_auth_payload["details"]["blocking_reasons"])
+        self.assertFalse((Path(export_dir) / "partial-auth" / "evidence.json").exists())
+        self.assertEqual(origin_mismatch[0], 2)
+        self.assertEqual(origin_mismatch_payload["error_code"], "reviewed_delivery_evidence_readiness_failed")
+        self.assertIn("final_target_origin_mismatch", origin_mismatch_payload["details"]["blocking_reasons"])
+        self.assertFalse((Path(export_dir) / "origin-mismatch" / "evidence.json").exists())
+        self.assertNotIn("Traceback", partial_auth[1] + partial_auth[2] + origin_mismatch[1] + origin_mismatch[2])
+
     def test_reviewed_delivery_bad_or_missing_review_output_is_stable_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as export_dir:
             root = Path(tmpdir)
