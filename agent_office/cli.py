@@ -1192,6 +1192,27 @@ def cmd_review(args: argparse.Namespace) -> int:
                 allow_dirty=args.allow_dirty,
                 mkdirs=args.mkdirs,
             )
+        elif action == "reviewed-delivery":
+            payload = review_lifecycle.review_reviewed_delivery_payload(
+                source=args.source,
+                target=args.target,
+                expected_source_head=args.expected_source_head,
+                expected_target_head=args.expected_target_head,
+                implementation_report=args.implementation_report,
+                review_bundle=args.review_bundle,
+                review_report=args.review_report,
+                expected_marker=args.expected_marker,
+                expected_verdict=args.expected_verdict,
+                out_dir=args.out_dir,
+                project_root=PROJECT_ROOT,
+                merge_marker=args.merge_marker,
+                phase=args.phase,
+                run_id=args.run_id,
+                merge_authorized=args.merge_authorized,
+                push_authorized=args.push_authorized,
+                allow_dirty=args.allow_dirty,
+                mkdirs=args.mkdirs,
+            )
         elif action == "codex-deliver":
             payload = review_lifecycle.review_codex_deliver_payload(
                 source=args.source,
@@ -1632,6 +1653,27 @@ def build_parser() -> argparse.ArgumentParser:
     codex_gate.add_argument("--mkdirs", action="store_true", help="Create missing output parent directories.")
     codex_gate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     codex_gate.set_defaults(func=cmd_review)
+
+    reviewed_delivery = review_sub.add_parser("reviewed-delivery", help="Run static reviewed-delivery orchestration from review output to codex-deliver.")
+    reviewed_delivery.add_argument("--source", required=True, help="Source branch for the delivery run.")
+    reviewed_delivery.add_argument("--target", required=True, help="Target branch for the delivery run.")
+    reviewed_delivery.add_argument("--expected-source-head", required=True, help="Expected source branch head commit.")
+    reviewed_delivery.add_argument("--expected-target-head", required=True, help="Expected target branch head commit.")
+    reviewed_delivery.add_argument("--implementation-report", required=True, help="Implementation report Markdown path.")
+    reviewed_delivery.add_argument("--review-bundle", required=True, help="Review bundle Markdown path.")
+    reviewed_delivery.add_argument("--review-report", required=True, help="Claude review output Markdown/text path.")
+    reviewed_delivery.add_argument("--expected-marker", required=True, help="Required PASS marker in the review output.")
+    reviewed_delivery.add_argument("--expected-verdict", default="pass", help="Expected review verdict. Default: pass.")
+    reviewed_delivery.add_argument("--out-dir", required=True, help="Directory for generated attestation, merge-packet, and codex-deliver reports.")
+    reviewed_delivery.add_argument("--merge-marker", default="MERGE_GATE_PASS_MAINLINE_SYNCED", help="Suggested merge-gate completion marker.")
+    reviewed_delivery.add_argument("--phase", help="Phase id recorded in the delivery report.")
+    reviewed_delivery.add_argument("--run-id", help="Run id used for report naming and delivery identity.")
+    reviewed_delivery.add_argument("--merge-authorized", action="store_true", help="Authorize merge execution when all reviewed-delivery gates pass.")
+    reviewed_delivery.add_argument("--push-authorized", action="store_true", help="Authorize push execution after a successful authorized merge.")
+    reviewed_delivery.add_argument("--allow-dirty", action="store_true", help="Allow tracked dirty state and record it as readiness evidence.")
+    reviewed_delivery.add_argument("--mkdirs", action="store_true", help="Create missing output directories.")
+    reviewed_delivery.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    reviewed_delivery.set_defaults(func=cmd_review)
 
     codex_deliver = review_sub.add_parser("codex-deliver", help="Generate a one-click Codex delivery readiness report without merge or push by default.")
     codex_deliver.add_argument("--source", required=True, help="Source branch for the delivery run.")

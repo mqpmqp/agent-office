@@ -39,6 +39,7 @@ CODEX_ONLY_VALIDATION_CHECKLIST = (
     "python3 -m agent_office review attest --help",
     "python3 -m agent_office review merge-packet --help",
     "python3 -m agent_office review codex-gate --help",
+    "python3 -m agent_office review reviewed-delivery --help",
     "python3 -m agent_office review codex-deliver --help",
     "git diff --check",
 )
@@ -82,6 +83,7 @@ DEFAULT_VALIDATION_COMMANDS = (
     CaptureCommand("review attest --help", ("python3", "-m", "agent_office", "review", "attest", "--help")),
     CaptureCommand("review merge-packet --help", ("python3", "-m", "agent_office", "review", "merge-packet", "--help")),
     CaptureCommand("review codex-gate --help", ("python3", "-m", "agent_office", "review", "codex-gate", "--help")),
+    CaptureCommand("review reviewed-delivery --help", ("python3", "-m", "agent_office", "review", "reviewed-delivery", "--help")),
     CaptureCommand("review codex-deliver --help", ("python3", "-m", "agent_office", "review", "codex-deliver", "--help")),
     CaptureCommand("git diff --check", ("git", "diff", "--check")),
 )
@@ -510,7 +512,115 @@ def review_codex_deliver_payload(
     return payload
 
 
+def review_reviewed_delivery_payload(
+    *,
+    source: str,
+    target: str,
+    expected_source_head: str,
+    expected_target_head: str,
+    implementation_report: str | Path,
+    review_bundle: str | Path,
+    review_report: str | Path,
+    expected_marker: str,
+    out_dir: str | Path,
+    project_root: Path,
+    expected_verdict: str = "pass",
+    merge_marker: str = "MERGE_GATE_PASS_MAINLINE_SYNCED",
+    phase: str | None = None,
+    run_id: str | None = None,
+    merge_authorized: bool = False,
+    push_authorized: bool = False,
+    allow_dirty: bool = False,
+    mkdirs: bool = False,
+) -> dict[str, Any]:
+    command = "review reviewed-delivery"
+    run_label = run_id or phase or f"{source}-to-{target}"
+    prefix = _slug(run_label)
+    output_root = Path(out_dir)
+    attestation_out = output_root / f"{prefix}-attestation.md"
+    merge_packet_out = output_root / f"{prefix}-merge-packet.md"
+    delivery_out = output_root / f"{prefix}-codex-deliver.md"
+
+    attestation_payload = review_attest_payload(
+        review_report=review_report,
+        expected_marker=expected_marker,
+        expected_verdict=expected_verdict,
+        out=attestation_out,
+        mkdirs=mkdirs,
+    )
+    merge_packet_payload = review_merge_packet_payload(
+        baseline=expected_target_head,
+        source_branch=source,
+        source_commit=expected_source_head,
+        implementation_report=implementation_report,
+        review_bundle=review_bundle,
+        review_attestation=attestation_out,
+        out=merge_packet_out,
+        merge_marker=merge_marker,
+        project_root=project_root,
+        mkdirs=mkdirs,
+    )
+    delivery_payload = review_codex_deliver_payload(
+        source=source,
+        target=target,
+        expected_source_head=expected_source_head,
+        expected_target_head=expected_target_head,
+        out=delivery_out,
+        project_root=project_root,
+        phase=phase,
+        run_id=run_id,
+        merge_authorized=merge_authorized,
+        push_authorized=push_authorized,
+        allow_dirty=allow_dirty,
+        mkdirs=mkdirs,
+    )
+
+    if delivery_payload["merge_executed"] and delivery_payload["push_executed"]:
+        status = "delivered"
+    elif delivery_payload["execution_status"] == "safe_mode":
+        status = "preview"
+    else:
+        status = "blocked"
+
+    return _success_payload(
+        command,
+        branch=source,
+        baseline=delivery_payload["target_expected_head"],
+        head=delivery_payload["source_head"],
+        outputs={
+            "attestation": str(attestation_out),
+            "merge_packet": str(merge_packet_out),
+            "codex_delivery_report": str(delivery_out),
+        },
+        extra={
+            "status": status,
+            "phase": phase or "unspecified",
+            "run_id": run_id or f"{source}->{target}",
+            "source_branch": source,
+            "target_branch": target,
+            "expected_source_head": delivery_payload["expected_source_head"],
+            "expected_target_head": delivery_payload["target_expected_head"],
+            "attestation_status": attestation_payload["status"],
+            "merge_packet_status": merge_packet_payload["attestation_status"],
+            "delivery_readiness": delivery_payload["readiness"],
+            "delivery_execution_status": delivery_payload["execution_status"],
+            "merge_gate_ready": delivery_payload["merge_gate_ready"],
+            "blocking_reasons": delivery_payload["blocking_reasons"],
+            "readiness_blocking_reasons": delivery_payload["readiness_blocking_reasons"],
+            "merge_authorization_status": delivery_payload["merge_authorization_status"],
+            "push_authorization_status": delivery_payload["push_authorization_status"],
+            "merge_executed": delivery_payload["merge_executed"],
+            "push_executed": delivery_payload["push_executed"],
+            "final_target_head": delivery_payload["final_target_head"],
+            "final_origin_target_status": delivery_payload["final_origin_target_status"],
+            "marker": "REVIEWED_DELIVERY_WORKFLOW_COMPLETE",
+        },
+    )
+
+
 def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
+    if payload.get("command") == "review reviewed-delivery":
+        return _format_reviewed_delivery_success(payload)
     lines = ["AgentOffice review lifecycle command complete", f"command: {payload['command']}"]
     for key in ("marker", "review_marker", "merge_marker", "status"):
         if payload.get(key):
@@ -525,6 +635,37 @@ def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
         lines.append("next_action: run full validation, then use a separately authorized Codex merge gate")
     else:
         lines.append("next_action: hand artifacts to Claude for artifact-based review or run the next explicit lifecycle step")
+    return "\n".join(lines)
+
+
+def _format_reviewed_delivery_success(payload: dict[str, Any]) -> str:
+    lines = [
+        "AgentOffice reviewed delivery workflow complete",
+        f"status: {payload['status']}",
+        f"source_branch: {payload['source_branch']}",
+        f"target_branch: {payload['target_branch']}",
+        f"expected_source_head: {payload['expected_source_head']}",
+        f"expected_target_head: {payload['expected_target_head']}",
+        f"attestation_status: {payload['attestation_status']}",
+        f"merge_packet_status: {payload['merge_packet_status']}",
+        f"delivery_readiness: {payload['delivery_readiness']}",
+        f"delivery_execution_status: {payload['delivery_execution_status']}",
+        f"merge_gate_ready: {str(payload['merge_gate_ready']).lower()}",
+        f"merge_executed: {str(payload['merge_executed']).lower()}",
+        f"push_executed: {str(payload['push_executed']).lower()}",
+        f"final_target_head: {payload['final_target_head']}",
+        f"final_origin_target_status: {payload['final_origin_target_status']}",
+        "outputs:",
+    ]
+    outputs = payload.get("outputs") or {}
+    for key in ("attestation", "merge_packet", "codex_delivery_report"):
+        if outputs.get(key):
+            lines.append(f"  {key}: {outputs[key]}")
+    blockers = payload.get("blocking_reasons") or []
+    readiness_blockers = payload.get("readiness_blocking_reasons") or []
+    lines.append(f"blocking_reasons: {', '.join(blockers) if blockers else 'none'}")
+    lines.append(f"readiness_blocking_reasons: {', '.join(readiness_blockers) if readiness_blockers else 'none'}")
+    lines.append(f"marker: {payload['marker']}")
     return "\n".join(lines)
 
 
