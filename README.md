@@ -410,7 +410,7 @@ Standard phase sequence:
 4. Run full validation before commit and again inside the separately authorized merge gate.
 5. Execute merge and push only in a separately authorized Codex merge gate.
 
-`review codex-deliver` records phase/run identity, source and target heads, origin heads, tracked cleanliness, allowed untracked artifacts, changed files, diff stat, diff check, validation checklist, merge/push authorization, post-merge placeholders, final origin target status, blockers, and safety boundaries. Its default mode is safe and non-destructive; merge/push readiness requires explicit `--merge-authorized`, `--push-authorized`, `--expected-source-head`, and `--expected-target-head`.
+`review codex-deliver` records phase/run identity, source and target heads, origin heads, tracked cleanliness, allowed untracked artifacts, changed files, diff stat, diff check, validation checklist, merge/push authorization, executed states, final target/origin status, blockers, and safety boundaries. Its default mode is safe and non-destructive; actual merge/push execution requires explicit `--merge-authorized`, `--push-authorized`, `--expected-source-head`, and `--expected-target-head` with all readiness gates passing.
 
 `review codex-gate` remains a smaller static readiness report for a reviewed branch and commit range. It does not execute merge, push, tag, providers, runtimes, models, adapters, Claude output generation, Claude attestation generation, or Claude merge-packet generation. Codex-only does not mean skipping validation; merge gates remain explicit operator actions.
 
