@@ -11,6 +11,8 @@ SCHEMA_VERSION = 1
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 TASK_STATUSES = {"pending", "completed", "failed", "blocked"}
 JOB_STATES = {"created", "running", "completed", "failed", "cancelled"}
+WORKER_RESULT_STATUSES = {"completed", "failed", "skipped"}
+WORKER_REFUSAL_REASON = "external worker prototype is contract-only; execution refused"
 TERMINAL_WORKSPACE_STATUSES = {"completed", "failed", "blocked"}
 WORKER_ADAPTERS = {
     "local-static": {
@@ -47,7 +49,7 @@ WORKER_ADAPTERS = {
         "model_calls": False,
         "shell_calls": False,
         "browser_calls": False,
-        "reason": "prototype interface only",
+        "reason": WORKER_REFUSAL_REASON,
     },
 }
 ALLOWED_ADAPTERS = set(WORKER_ADAPTERS)
@@ -66,6 +68,16 @@ SAFETY_BOUNDARIES = {
     "concurrency": False,
     "database": False,
     "vector_store": False,
+}
+WORKER_SAFETY_BOUNDARIES = {
+    "external_execution_default": "refused",
+    "provider_calls": False,
+    "model_calls": False,
+    "browser_calls": False,
+    "shell_calls": False,
+    "real_worker_execution": "not_implemented",
+    "dotenv_read": False,
+    "env_vars_printed": False,
 }
 
 
@@ -549,6 +561,136 @@ def runtime_worker_adapter_payload(*, list_adapters: bool, name: str | None, des
     raise RuntimeFoundationError("runtime_worker_adapter_args_required", "runtime worker-adapter requires --list or --name with --describe.")
 
 
+def runtime_worker_gate_payload(*, workspace: str, adapter: str, project_root: Path) -> dict[str, Any]:
+    snapshot = _workspace_snapshot(workspace, project_root, allow_empty=True)
+    descriptor = _worker_adapter_descriptor(adapter)
+    return _worker_gate_contract(snapshot=snapshot, adapter=adapter, descriptor=descriptor)
+
+
+def runtime_worker_invocation_packet_payload(*, workspace: str, adapter: str, job_id: str, out: str, packet_format: str, project_root: Path) -> dict[str, Any]:
+    if packet_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_packet_format_invalid", f"Unsupported worker packet format: {packet_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_packet")
+    snapshot = _workspace_snapshot(workspace, project_root, allow_empty=False)
+    job = _load_job(snapshot["paths"]["job"], required=True)
+    required_job_id = _require_job_id(job_id)
+    if job and job.get("job_id") != required_job_id:
+        raise RuntimeFoundationError("runtime_worker_packet_job_mismatch", f"Runtime job id does not match: {job_id}")
+    descriptor = _worker_adapter_descriptor(adapter)
+    gate = _worker_gate_contract(snapshot=snapshot, adapter=adapter, descriptor=descriptor)
+    tasks = snapshot["tasks"]
+    packet = {
+        "ok": True,
+        "command": "runtime worker-packet",
+        "kind": "runtime_worker_invocation_packet",
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "worker_invocation",
+        "workspace": snapshot["workspace"],
+        "goal": str(snapshot["manifest"].get("goal", "")),
+        "job_id": required_job_id,
+        "adapter": adapter,
+        "task_ids": [task["id"] for task in tasks],
+        "pending_task_ids": _ids_with_status(tasks, "pending"),
+        "completed_task_ids": _ids_with_status(tasks, "completed"),
+        "failed_task_ids": _ids_with_status(tasks, "failed"),
+        "requested_capabilities": _worker_requested_capabilities(descriptor),
+        "external_execution_allowed": False,
+        "external_execution_enabled": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "worker_gate_ready": bool(gate["worker_gate_ready"]),
+        "invocation_ready": True,
+        "invocation_allowed": False,
+        "refusal_reason": WORKER_REFUSAL_REASON,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "created_by": "agent_office.runtime",
+        "output_path": _project_relative(output_path, project_root),
+        "packet_format": packet_format,
+        "written": True,
+    }
+    if packet_format == "json":
+        _write_json(output_path, packet)
+    else:
+        _write_text(output_path, _format_worker_packet_text(packet))
+    return packet
+
+
+def runtime_worker_result_intake_payload(*, workspace: str, packet: str, result: str, project_root: Path) -> dict[str, Any]:
+    snapshot = _workspace_snapshot(workspace, project_root, allow_empty=False)
+    packet_path = _safe_input_path(packet, project_root, "runtime_worker_result_packet")
+    result_path = _safe_input_path(result, project_root, "runtime_worker_result")
+    packet_payload = _load_input_json(packet_path, "runtime_worker_result_packet")
+    result_payload = _load_input_json(result_path, "runtime_worker_result")
+    _validate_worker_packet_for_intake(packet_payload, snapshot)
+    task_results = _validate_worker_result_for_intake(result_payload, packet_payload, snapshot)
+    paths = snapshot["paths"]
+    tasks = snapshot["tasks"]
+    task_by_id = {task["id"]: task for task in tasks}
+    updated_task_ids: list[str] = []
+    for task_result in task_results:
+        task = task_by_id[str(task_result["task_id"])]
+        status = str(task_result["status"])
+        if status != "skipped":
+            task["status"] = status
+            task["result"] = {
+                "schema_version": SCHEMA_VERSION,
+                "adapter": str(result_payload["adapter"]),
+                "task_id": task["id"],
+                "role": task["role"],
+                "status": status,
+                "summary": str(task_result.get("summary", "")),
+                "external_behavior": False,
+                "intake_marker": str(result_payload["marker"]),
+            }
+            updated_task_ids.append(task["id"])
+            _append_memory(paths["memory"], task, str(result_payload["adapter"]), _jsonl_count(paths["memory"]) + 1, task["result"])
+        _append_event(
+            paths["events"],
+            "worker_result_intake",
+            task,
+            str(result_payload["adapter"]),
+            _jsonl_count(paths["events"]) + 1,
+            {"result": task_result, "packet_path": _project_relative(packet_path, project_root), "result_path": _project_relative(result_path, project_root)},
+        )
+    graph = snapshot["graph"]
+    graph["tasks"] = tasks
+    graph["topological_order"] = _topological_order(tasks)
+    _write_json(paths["task_graph"], graph)
+    manifest = snapshot["manifest"]
+    manifest["status"] = _workspace_status(tasks)
+    _write_json(paths["manifest"], manifest)
+    job = _load_job(paths["job"], required=False)
+    if job:
+        state = "completed" if manifest["status"] == "completed" else "failed" if manifest["status"] in {"failed", "blocked"} else str(job.get("state", "running"))
+        job = _write_job_state(paths=paths, workspace_root=snapshot["workspace_root"], project_root=project_root, manifest=manifest, tasks=tasks, existing=job, state=state, failure_reason=None if state != "failed" else f"workspace_status={manifest['status']}")
+    return {
+        "ok": True,
+        "command": "runtime worker-result intake",
+        "kind": "runtime_worker_result_intake",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": snapshot["workspace"],
+        "job_id": str(result_payload["job_id"]),
+        "adapter": str(result_payload["adapter"]),
+        "packet_path": _project_relative(packet_path, project_root),
+        "result_path": _project_relative(result_path, project_root),
+        "intake_ready": True,
+        "intake_accepted": True,
+        "updated_task_ids": updated_task_ids,
+        "task_counts": _task_counts(tasks),
+        "memory_entry_count": _jsonl_count(paths["memory"]),
+        "event_entry_count": _jsonl_count(paths["events"]),
+        "job": _job_readback(job) if job else None,
+        "external_execution": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+    }
+
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -633,6 +775,29 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"adapter: {adapter['name']}")
         lines.append(f"external_execution_enabled: {str(adapter['external_execution_enabled']).lower()}")
         lines.append(f"reason: {adapter['reason']}")
+    if payload.get("kind") == "runtime_worker_safety_gate":
+        lines.append(f"adapter: {payload['adapter']}")
+        lines.append(f"worker_gate_ready: {str(payload['worker_gate_ready']).lower()}")
+        lines.append(f"external_execution_allowed: {str(payload['external_execution_allowed']).lower()}")
+        lines.append(f"external_execution_enabled: {str(payload['external_execution_enabled']).lower()}")
+        lines.append(f"provider_calls: {str(payload['provider_calls']).lower()}")
+        lines.append(f"model_calls: {str(payload['model_calls']).lower()}")
+        lines.append(f"browser_calls: {str(payload['browser_calls']).lower()}")
+        lines.append(f"shell_calls: {str(payload['shell_calls']).lower()}")
+        lines.append(f"reason: {payload['reason']}")
+    if payload.get("kind") == "runtime_worker_invocation_packet":
+        lines.append(f"adapter: {payload['adapter']}")
+        lines.append(f"job_id: {payload['job_id']}")
+        lines.append(f"worker_gate_ready: {str(payload['worker_gate_ready']).lower()}")
+        lines.append(f"invocation_ready: {str(payload['invocation_ready']).lower()}")
+        lines.append(f"invocation_allowed: {str(payload['invocation_allowed']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_result_intake":
+        lines.append(f"adapter: {payload['adapter']}")
+        lines.append(f"job_id: {payload['job_id']}")
+        lines.append(f"intake_accepted: {str(payload['intake_accepted']).lower()}")
+        lines.append(f"updated: {', '.join(payload['updated_task_ids']) or '-'}")
+        lines.append(f"event_entries: {payload['event_entry_count']}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
@@ -1368,6 +1533,109 @@ def _format_governance_text(payload: dict[str, Any]) -> str:
     ]
     lines.extend(f"- {item}" for item in payload["explicit_boundary"])
     lines.extend(["", "provider/runtime/adapter execution: not triggered"])
+    return "\n".join(lines)
+
+
+def _worker_gate_contract(*, snapshot: dict[str, Any], adapter: str, descriptor: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "command": "runtime worker-gate",
+        "kind": "runtime_worker_safety_gate",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": snapshot["workspace"],
+        "adapter": adapter,
+        "worker_gate_ready": True,
+        "external_execution_allowed": False,
+        "external_execution_enabled": bool(descriptor.get("external_execution_enabled", False)),
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "requires_explicit_future_authorization": True,
+        "reason": WORKER_REFUSAL_REASON if adapter == "external-prototype" else str(descriptor.get("reason", "local/static adapter")),
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "external_behavior": dict(SAFETY_BOUNDARIES),
+    }
+
+
+def _worker_requested_capabilities(descriptor: dict[str, Any]) -> dict[str, bool]:
+    return {
+        "dry_run": bool(descriptor.get("dry_run_supported", False)),
+        "execute_local": bool(descriptor.get("execute_local_supported", False)),
+        "external_execution": False,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+    }
+
+
+def _validate_worker_packet_for_intake(packet: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    if packet.get("schema_version") != SCHEMA_VERSION or packet.get("packet_type") != "worker_invocation":
+        raise RuntimeFoundationError("runtime_worker_result_packet_invalid", "Worker invocation packet schema is invalid.")
+    if packet.get("workspace") != snapshot["workspace"]:
+        raise RuntimeFoundationError("runtime_worker_result_workspace_mismatch", "Worker packet workspace does not match runtime workspace.")
+    if packet.get("external_execution_allowed") is not False or packet.get("invocation_allowed") is not False:
+        raise RuntimeFoundationError("runtime_worker_result_packet_invalid", "Worker packet must refuse external invocation.")
+    for key in ("provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if packet.get(key) is not False:
+            raise RuntimeFoundationError("runtime_worker_result_packet_invalid", f"Worker packet must report {key}=false.")
+    _require_job_id(str(packet.get("job_id", "")))
+    _worker_adapter_descriptor(str(packet.get("adapter", "")))
+
+
+def _validate_worker_result_for_intake(result: dict[str, Any], packet: dict[str, Any], snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    if result.get("schema_version") != SCHEMA_VERSION or result.get("artifact_type") != "worker_result":
+        raise RuntimeFoundationError("runtime_worker_result_invalid", "Worker result schema is invalid.")
+    if result.get("marker") != "AGENT_OFFICE_WORKER_RESULT":
+        raise RuntimeFoundationError("runtime_worker_result_marker_missing", "Worker result marker is missing.")
+    for key in ("external_execution", "provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if result.get(key) is not False:
+            raise RuntimeFoundationError(f"runtime_worker_result_{key}_refused", f"Worker result must report {key}=false.")
+    if result.get("workspace") != snapshot["workspace"] or result.get("workspace") != packet.get("workspace"):
+        raise RuntimeFoundationError("runtime_worker_result_workspace_mismatch", "Worker result workspace does not match packet/workspace.")
+    if result.get("job_id") != packet.get("job_id"):
+        raise RuntimeFoundationError("runtime_worker_result_job_mismatch", "Worker result job id does not match packet.")
+    if result.get("adapter") != packet.get("adapter"):
+        raise RuntimeFoundationError("runtime_worker_result_adapter_mismatch", "Worker result adapter does not match packet.")
+    task_results = result.get("task_results")
+    if not isinstance(task_results, list) or not task_results:
+        raise RuntimeFoundationError("runtime_worker_result_task_results_missing", "Worker result task_results must be a non-empty list.")
+    known_task_ids = {task["id"] for task in snapshot["tasks"]}
+    normalized: list[dict[str, Any]] = []
+    for entry in task_results:
+        if not isinstance(entry, dict):
+            raise RuntimeFoundationError("runtime_worker_result_task_invalid", "Worker result task entry must be an object.")
+        task_id = str(entry.get("task_id", ""))
+        _validate_task_id(task_id)
+        if task_id not in known_task_ids:
+            raise RuntimeFoundationError("runtime_worker_result_task_unknown", f"Worker result task does not exist: {task_id}")
+        status = str(entry.get("status", ""))
+        if status not in WORKER_RESULT_STATUSES:
+            raise RuntimeFoundationError("runtime_worker_result_status_invalid", f"Unsupported worker result status: {status}")
+        normalized.append({"task_id": task_id, "status": status, "summary": str(entry.get("summary", ""))})
+    return normalized
+
+
+def _format_worker_packet_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Worker Invocation Packet",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"workspace: {payload['workspace']}",
+        f"job_id: {payload['job_id']}",
+        f"adapter: {payload['adapter']}",
+        f"worker_gate_ready: {str(payload['worker_gate_ready']).lower()}",
+        f"invocation_ready: {str(payload['invocation_ready']).lower()}",
+        f"invocation_allowed: {str(payload['invocation_allowed']).lower()}",
+        f"external_execution_enabled: {str(payload['external_execution_enabled']).lower()}",
+        f"refusal_reason: {payload['refusal_reason']}",
+        "",
+        "## Tasks",
+    ]
+    lines.extend(f"- {task_id}" for task_id in payload["task_ids"])
+    lines.append("")
+    lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
 

@@ -67,6 +67,30 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout)["task_counts"]["completed"], 3)
         self.assertNotIn("Traceback", stdout + stderr)
 
+
+    def _worker_result(self, workspace: str = ".ai/workspaces/demo", job_id: str = "demo-job", adapter: str = "external-prototype", task_id: str = "inspect", status: str = "completed") -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "artifact_type": "worker_result",
+            "workspace": workspace,
+            "job_id": job_id,
+            "adapter": adapter,
+            "external_execution": False,
+            "provider_calls": False,
+            "model_calls": False,
+            "browser_calls": False,
+            "shell_calls": False,
+            "task_results": [{"task_id": task_id, "status": status, "summary": "static worker result accepted"}],
+            "marker": "AGENT_OFFICE_WORKER_RESULT",
+        }
+
+    def _prepare_worker_workspace(self, root: Path, workspace: str = ".ai/workspaces/demo", job_id: str = "demo-job") -> None:
+        self._init(root, workspace)
+        self._plan(root, workspace)
+        code, stdout, stderr = run_cli(["runtime", "job", "create", "--workspace", workspace, "--job-id", job_id, "--json"], root)
+        self.assertEqual(code, 0, stderr)
+        self.assertNotIn("Traceback", stdout + stderr)
+
     def test_init_json_positive_creates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -780,6 +804,195 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertIn("workspace_status=failed", failed_job["failure_reason"])
         self.assertNotIn("Traceback", complete_run[1] + complete_run[2] + complete_status[1] + complete_status[2] + plan_stdout + plan_stderr + failed_run[1] + failed_run[2] + failed_status[1] + failed_status[2])
 
+
+    def test_worker_gate_external_prototype_json_and_text_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init(root)
+            json_result = run_cli(["runtime", "worker-gate", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--json"], root)
+            text_result = run_cli(["runtime", "worker-gate", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype"], root)
+            unsupported = run_cli(["runtime", "worker-gate", "--workspace", ".ai/workspaces/demo", "--adapter", "missing", "--json"], root)
+
+        self.assertEqual(json_result[0], 0, json_result[2])
+        payload = json.loads(json_result[1])
+        self.assertTrue(payload["worker_gate_ready"])
+        self.assertFalse(payload["external_execution_allowed"])
+        self.assertFalse(payload["external_execution_enabled"])
+        self.assertFalse(payload["provider_calls"])
+        self.assertFalse(payload["model_calls"])
+        self.assertFalse(payload["browser_calls"])
+        self.assertFalse(payload["shell_calls"])
+        self.assertTrue(payload["requires_explicit_future_authorization"])
+        self.assertIn("execution refused", payload["reason"])
+        self.assertEqual(text_result[0], 0, text_result[2])
+        self.assertIn("worker_gate_ready: true", text_result[1])
+        self.assertIn("external_execution_allowed: false", text_result[1])
+        self.assertEqual(unsupported[0], 2)
+        self.assertEqual(json.loads(unsupported[1])["error_code"], "runtime_worker_adapter_unknown")
+        self.assertNotIn("Traceback", json_result[1] + json_result[2] + text_result[1] + text_result[2] + unsupported[1] + unsupported[2])
+
+    def test_worker_packet_json_text_positive_and_path_refusals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_worker_workspace(root)
+            json_result = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/worker-invocation-packet.json", "--json"
+            ], root)
+            text_result = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/worker-invocation-packet.txt", "--format", "text", "--json"
+            ], root)
+            traversal = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/../packet.json", "--json"
+            ], root)
+            dotenv = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".env", "--json"
+            ], root)
+            missing_workspace = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/missing", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/missing.json", "--json"
+            ], root)
+            missing_job_root = root / ".ai" / "workspaces" / "missing-job"
+            self._init(root, ".ai/workspaces/missing-job")
+            self._plan(root, ".ai/workspaces/missing-job")
+            missing_job = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/missing-job", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/missing-job/packet.json", "--json"
+            ], root)
+            link_target = root / ".ai" / "workspaces" / "demo" / "target.json"
+            link_target.write_text("keep\n", encoding="utf-8")
+            link = root / ".ai" / "workspaces" / "demo" / "link.json"
+            try:
+                link.symlink_to(link_target)
+            except (NotImplementedError, OSError):
+                link = None
+            symlink_result = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/link.json", "--json"
+            ], root) if link else None
+            written = json.loads((root / ".ai" / "workspaces" / "demo" / "worker-invocation-packet.json").read_text(encoding="utf-8"))
+            text_body = (root / ".ai" / "workspaces" / "demo" / "worker-invocation-packet.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(json_result[0], 0, json_result[2])
+        payload = json.loads(json_result[1])
+        self.assertTrue(payload["invocation_ready"])
+        self.assertFalse(payload["invocation_allowed"])
+        self.assertFalse(payload["external_execution_enabled"])
+        self.assertEqual(payload["job_id"], "demo-job")
+        self.assertEqual(payload["task_ids"], ["inspect", "implement", "review"])
+        self.assertEqual(written["created_by"], "agent_office.runtime")
+        self.assertEqual(text_result[0], 0, text_result[2])
+        self.assertIn("invocation_allowed: false", text_body)
+        self.assertEqual(json.loads(traversal[1])["error_code"], "runtime_worker_packet_path_traversal")
+        self.assertEqual(json.loads(dotenv[1])["error_code"], "runtime_worker_packet_dotenv_refused")
+        self.assertEqual(json.loads(missing_workspace[1])["error_code"], "runtime_workspace_missing")
+        self.assertEqual(json.loads(missing_job[1])["error_code"], "runtime_job_missing")
+        if symlink_result:
+            self.assertEqual(symlink_result[0], 2)
+            self.assertEqual(json.loads(symlink_result[1])["error_code"], "runtime_worker_packet_output_symlink")
+        combined = json_result[1] + json_result[2] + text_result[1] + text_result[2] + traversal[1] + traversal[2] + dotenv[1] + dotenv[2] + missing_workspace[1] + missing_workspace[2] + missing_job[1] + missing_job[2]
+        if symlink_result:
+            combined += symlink_result[1] + symlink_result[2]
+        self.assertNotIn("Traceback", combined)
+
+    def test_worker_result_intake_positive_updates_memory_events_and_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_worker_workspace(root)
+            packet = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/worker-invocation-packet.json", "--json"
+            ], root)
+            result_path = root / ".ai" / "workspaces" / "demo" / "worker-result.json"
+            result_payload = self._worker_result()
+            result_payload["task_results"] = [
+                {"task_id": "inspect", "status": "completed", "summary": "static worker result accepted"},
+                {"task_id": "implement", "status": "completed", "summary": "static worker result accepted"},
+                {"task_id": "review", "status": "completed", "summary": "static worker result accepted"},
+            ]
+            result_path.write_text(json.dumps(result_payload), encoding="utf-8")
+            intake = run_cli([
+                "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/worker-result.json", "--json"
+            ], root)
+            status = run_cli(["runtime", "status", "--workspace", ".ai/workspaces/demo", "--json"], root)
+            replay = run_cli(["runtime", "replay", "--workspace", ".ai/workspaces/demo", "--json"], root)
+
+        self.assertEqual(packet[0], 0, packet[2])
+        self.assertEqual(intake[0], 0, intake[2])
+        payload = json.loads(intake[1])
+        self.assertTrue(payload["intake_accepted"])
+        self.assertEqual(payload["updated_task_ids"], ["inspect", "implement", "review"])
+        self.assertEqual(payload["task_counts"]["completed"], 3)
+        self.assertEqual(payload["memory_entry_count"], 3)
+        self.assertEqual(payload["event_entry_count"], 3)
+        self.assertEqual(payload["job"]["state"], "completed")
+        self.assertEqual(json.loads(status[1])["workspace_status"], "completed")
+        self.assertTrue(json.loads(replay[1])["replay_valid"])
+        self.assertNotIn("Traceback", packet[1] + packet[2] + intake[1] + intake[2] + status[1] + status[2] + replay[1] + replay[2])
+
+    def test_worker_result_intake_refuses_external_claims_mismatches_and_bad_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_worker_workspace(root)
+            packet_result = run_cli([
+                "runtime", "worker-packet", "--workspace", ".ai/workspaces/demo", "--adapter", "external-prototype", "--job-id", "demo-job", "--out", ".ai/workspaces/demo/worker-invocation-packet.json", "--json"
+            ], root)
+            self.assertEqual(packet_result[0], 0, packet_result[2])
+            base = root / ".ai" / "workspaces" / "demo"
+            cases = []
+            for key, code in (
+                ("external_execution", "runtime_worker_result_external_execution_refused"),
+                ("provider_calls", "runtime_worker_result_provider_calls_refused"),
+                ("model_calls", "runtime_worker_result_model_calls_refused"),
+                ("browser_calls", "runtime_worker_result_browser_calls_refused"),
+                ("shell_calls", "runtime_worker_result_shell_calls_refused"),
+            ):
+                payload = self._worker_result()
+                payload[key] = True
+                cases.append((f"{key}.json", payload, code))
+            missing_marker = self._worker_result()
+            missing_marker.pop("marker")
+            cases.append(("missing-marker.json", missing_marker, "runtime_worker_result_marker_missing"))
+            unknown_task = self._worker_result(task_id="missing")
+            cases.append(("unknown-task.json", unknown_task, "runtime_worker_result_task_unknown"))
+            workspace_mismatch = self._worker_result(workspace=".ai/workspaces/other")
+            cases.append(("workspace-mismatch.json", workspace_mismatch, "runtime_worker_result_workspace_mismatch"))
+            job_mismatch = self._worker_result(job_id="other-job")
+            cases.append(("job-mismatch.json", job_mismatch, "runtime_worker_result_job_mismatch"))
+            adapter_mismatch = self._worker_result(adapter="noop")
+            cases.append(("adapter-mismatch.json", adapter_mismatch, "runtime_worker_result_adapter_mismatch"))
+            bad_status = self._worker_result(status="running")
+            cases.append(("bad-status.json", bad_status, "runtime_worker_result_status_invalid"))
+            for filename, payload, error_code in cases:
+                path = base / filename
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.subTest(error_code=error_code):
+                    result = run_cli([
+                        "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", f".ai/workspaces/demo/{filename}", "--json"
+                    ], root)
+                    self.assertEqual(result[0], 2)
+                    self.assertEqual(json.loads(result[1])["error_code"], error_code)
+                    self.assertNotIn("Traceback", result[1] + result[2])
+            malformed = base / "malformed.json"
+            malformed.write_text("{", encoding="utf-8")
+            malformed_result = run_cli([
+                "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/malformed.json", "--json"
+            ], root)
+            missing_packet = run_cli([
+                "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/missing-packet.json", "--result", ".ai/workspaces/demo/malformed.json", "--json"
+            ], root)
+            missing_result = run_cli([
+                "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/worker-invocation-packet.json", "--result", ".ai/workspaces/demo/missing-result.json", "--json"
+            ], root)
+            traversal = run_cli([
+                "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".ai/workspaces/demo/../worker-invocation-packet.json", "--result", ".ai/workspaces/demo/malformed.json", "--json"
+            ], root)
+            dotenv = run_cli([
+                "runtime", "worker-result", "intake", "--workspace", ".ai/workspaces/demo", "--packet", ".env", "--result", ".ai/workspaces/demo/malformed.json", "--json"
+            ], root)
+
+        self.assertEqual(json.loads(malformed_result[1])["error_code"], "runtime_worker_result_invalid")
+        self.assertEqual(json.loads(missing_packet[1])["error_code"], "runtime_worker_result_packet_missing")
+        self.assertEqual(json.loads(missing_result[1])["error_code"], "runtime_worker_result_missing")
+        self.assertEqual(json.loads(traversal[1])["error_code"], "runtime_worker_result_packet_path_traversal")
+        self.assertEqual(json.loads(dotenv[1])["error_code"], "runtime_worker_result_packet_dotenv_refused")
+        self.assertNotIn("Traceback", malformed_result[1] + malformed_result[2] + missing_packet[1] + missing_packet[2] + missing_result[1] + missing_result[2] + traversal[1] + traversal[2] + dotenv[1] + dotenv[2])
+
     def test_external_worker_adapter_prototype_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -804,7 +1017,7 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertFalse(adapter["model_calls"])
         self.assertFalse(adapter["shell_calls"])
         self.assertFalse(adapter["browser_calls"])
-        self.assertEqual(adapter["reason"], "prototype interface only")
+        self.assertEqual(adapter["reason"], "external worker prototype is contract-only; execution refused")
         self.assertEqual(dry_run[0], 0, dry_run[2])
         self.assertEqual(dry_payload["worker_adapter"]["name"], "external-prototype")
         self.assertEqual(dry_payload["would_execute_task_ids"], ["inspect", "implement", "review"])
