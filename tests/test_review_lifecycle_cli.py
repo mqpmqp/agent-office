@@ -309,6 +309,10 @@ class ReviewLifecycleCliTests(unittest.TestCase):
         self.assertEqual(second_result[0], 0, second_result[2])
         self.assertEqual(first_text, second_text)
 
+    def test_default_validation_commands_include_review_lifecycle_suite(self) -> None:
+        commands = [" ".join(command.argv) for command in review_lifecycle.DEFAULT_VALIDATION_COMMANDS]
+        self.assertIn("python3 -m unittest tests.test_review_lifecycle_cli", commands)
+
     def test_review_help_is_available(self) -> None:
         for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"]):
             with self.subTest(argv=argv):

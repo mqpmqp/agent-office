@@ -54,6 +54,7 @@ DEFAULT_VALIDATION_COMMANDS = (
     CaptureCommand("run-staged P6-PROFILES --dry-run --reset", ("python3", "-m", "agent_office", "run-staged", "P6-PROFILES", "--dry-run", "--reset")),
     CaptureCommand("orchestrate --help", ("python3", "-m", "agent_office", "orchestrate", "--help")),
     CaptureCommand("tests.test_orchestration_cli", ("python3", "-m", "unittest", "tests.test_orchestration_cli")),
+    CaptureCommand("tests.test_review_lifecycle_cli", ("python3", "-m", "unittest", "tests.test_review_lifecycle_cli")),
     CaptureCommand("git diff --check", ("git", "diff", "--check")),
 )
 
