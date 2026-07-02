@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -10,6 +11,7 @@ SCHEMA_VERSION = 1
 ALLOWED_ADAPTERS = {"local-static", "noop"}
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 TASK_STATUSES = {"pending", "completed", "failed", "blocked"}
+TERMINAL_WORKSPACE_STATUSES = {"completed", "failed", "blocked"}
 SAFETY_BOUNDARIES = {
     "mode": "local_static",
     "provider_calls": [],
@@ -240,6 +242,131 @@ def runtime_status_payload(*, workspace: str, project_root: Path) -> dict[str, A
     }
 
 
+def runtime_packet_payload(*, workspace: str, project_root: Path) -> dict[str, Any]:
+    snapshot = _workspace_snapshot(workspace, project_root, allow_empty=True)
+    tasks = snapshot["tasks"]
+    manifest = snapshot["manifest"]
+    graph = snapshot["graph"]
+    replay = _replay_contract(snapshot)
+    return {
+        "ok": True,
+        "command": "runtime packet",
+        "kind": "runtime_lifecycle_packet",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": snapshot["workspace"],
+        "lifecycle": {
+            "workspace_status": manifest.get("status", "unknown"),
+            "goal": manifest.get("goal", ""),
+            "terminal": manifest.get("status") in TERMINAL_WORKSPACE_STATUSES,
+            "task_counts": _task_counts(tasks),
+            "completed_task_ids": _ids_with_status(tasks, "completed"),
+            "pending_task_ids": _ids_with_status(tasks, "pending"),
+            "failed_task_ids": _ids_with_status(tasks, "failed"),
+            "blocked_task_ids": _ids_with_status(tasks, "blocked"),
+        },
+        "files": _runtime_file_statuses(snapshot["paths"], project_root),
+        "task_graph": {
+            "task_count": len(tasks),
+            "topological_order": list(graph.get("topological_order", [])),
+            "tasks": [_task_readback(task) for task in tasks],
+        },
+        "memory": {
+            "entry_count": len(snapshot["memory_entries"]),
+            "task_memory_ids": [entry.get("task_id") for entry in snapshot["memory_entries"] if entry.get("entry_type") == "task_memory"],
+        },
+        "events": {
+            "entry_count": len(snapshot["event_entries"]),
+            "latest_event_summary": _event_summary(snapshot["event_entries"][-1] if snapshot["event_entries"] else None),
+        },
+        "readback_contract": {
+            "replay_valid": replay["replay_valid"],
+            "graph_order_valid": replay["graph_order_valid"],
+            "workspace_status_matches_tasks": replay["workspace_status_matches_tasks"],
+            "mismatches": replay["mismatches"],
+        },
+        "external_behavior": dict(SAFETY_BOUNDARIES),
+    }
+
+
+def runtime_replay_payload(*, workspace: str, project_root: Path) -> dict[str, Any]:
+    snapshot = _workspace_snapshot(workspace, project_root, allow_empty=True)
+    replay = _replay_contract(snapshot)
+    return {
+        "ok": True,
+        "command": "runtime replay",
+        "kind": "runtime_replay_readback",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": snapshot["workspace"],
+        **replay,
+        "external_behavior": dict(SAFETY_BOUNDARIES),
+    }
+
+
+def runtime_evidence_payload(*, workspace: str, out: str, evidence_format: str, project_root: Path) -> dict[str, Any]:
+    if evidence_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_evidence_format_invalid", f"Unsupported evidence format: {evidence_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_evidence")
+    packet = runtime_packet_payload(workspace=workspace, project_root=project_root)
+    replay = runtime_replay_payload(workspace=workspace, project_root=project_root)
+    snapshot = _workspace_snapshot(workspace, project_root, allow_empty=True)
+    evidence = {
+        "ok": True,
+        "command": "runtime evidence",
+        "kind": "runtime_workspace_evidence",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": snapshot["workspace"],
+        "evidence_path": _project_relative(output_path, project_root),
+        "evidence_format": evidence_format,
+        "packet": packet,
+        "replay": replay,
+        "file_digests": _runtime_file_digests(snapshot["paths"], project_root),
+        "safety_boundaries": dict(SAFETY_BOUNDARIES),
+        "written": True,
+    }
+    if evidence_format == "json":
+        _write_json(output_path, evidence)
+    else:
+        _write_text(output_path, _format_evidence_text(evidence))
+    return evidence
+
+
+def runtime_close_payload(*, workspace: str, out: str | None, project_root: Path) -> dict[str, Any]:
+    packet = runtime_packet_payload(workspace=workspace, project_root=project_root)
+    replay = runtime_replay_payload(workspace=workspace, project_root=project_root)
+    workspace_status = packet["lifecycle"]["workspace_status"]
+    terminal = workspace_status in TERMINAL_WORKSPACE_STATUSES
+    blocking_reasons: list[str] = []
+    if not replay["replay_valid"]:
+        blocking_reasons.append("replay_readback_invalid")
+    if not terminal:
+        blocking_reasons.append("workspace_not_terminal")
+    closure_packet_valid = replay["replay_valid"] and terminal
+    closure_ready = closure_packet_valid and workspace_status == "completed"
+    payload = {
+        "ok": True,
+        "command": "runtime close",
+        "kind": "runtime_closure_packet",
+        "schema_version": SCHEMA_VERSION,
+        "workspace": packet["workspace"],
+        "workspace_status": workspace_status,
+        "closure_packet_valid": closure_packet_valid,
+        "closure_ready": closure_ready,
+        "readiness": "ready" if closure_ready else "not_ready",
+        "blocking_reasons": blocking_reasons,
+        "packet": packet,
+        "replay": replay,
+        "output_path": None,
+        "written": False,
+        "external_behavior": dict(SAFETY_BOUNDARIES),
+    }
+    if out:
+        output_path = _safe_output_path(out, project_root, "runtime_close")
+        payload["output_path"] = _project_relative(output_path, project_root)
+        payload["written"] = True
+        _write_json(output_path, payload)
+    return payload
+
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -291,6 +418,21 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"memory_entries: {payload['memory_entry_count']}")
     if "latest_event_summary" in payload:
         lines.append(f"latest_event: {payload['latest_event_summary'] or '-'}")
+    if payload.get("kind") == "runtime_lifecycle_packet":
+        lifecycle = payload["lifecycle"]
+        lines.append(f"lifecycle_status: {lifecycle['workspace_status']}")
+        lines.append(f"terminal: {str(lifecycle['terminal']).lower()}")
+    if payload.get("kind") == "runtime_replay_readback":
+        lines.append(f"replay_valid: {str(payload['replay_valid']).lower()}")
+        lines.append(f"mismatches: {len(payload['mismatches'])}")
+    if payload.get("kind") == "runtime_workspace_evidence":
+        lines.append(f"evidence_path: {payload['evidence_path']}")
+        lines.append(f"evidence_format: {payload['evidence_format']}")
+    if payload.get("kind") == "runtime_closure_packet":
+        lines.append(f"closure_packet_valid: {str(payload['closure_packet_valid']).lower()}")
+        lines.append(f"closure_ready: {str(payload['closure_ready']).lower()}")
+        lines.append(f"readiness: {payload['readiness']}")
+        lines.append(f"blocking_reasons: {', '.join(payload['blocking_reasons']) or 'none'}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
@@ -568,6 +710,16 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _write_text(path: Path, text: str) -> None:
+    if path.exists() and path.is_symlink():
+        raise RuntimeFoundationError("runtime_workspace_file_symlink_refused", f"Refusing symlink file: {path.name}")
+    tmp = path.with_name(f"{path.name}.tmp")
+    if tmp.exists() and tmp.is_symlink():
+        raise RuntimeFoundationError("runtime_workspace_file_symlink_refused", f"Refusing symlink temp file: {tmp.name}")
+    tmp.write_text(text.rstrip() + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 def _touch_jsonl(path: Path) -> None:
     if path.exists() and path.is_symlink():
         raise RuntimeFoundationError("runtime_workspace_file_symlink_refused", f"Refusing symlink file: {path.name}")
@@ -635,6 +787,208 @@ def _latest_jsonl(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeFoundationError("runtime_jsonl_unreadable", f"Unable to read runtime JSONL: {path.name}") from exc
     return latest
+
+
+def _workspace_snapshot(workspace: str, project_root: Path, *, allow_empty: bool) -> dict[str, Any]:
+    workspace_root = _existing_workspace_path(workspace, project_root)
+    paths = _workspace_files(workspace_root, project_root)
+    manifest = _load_manifest(paths["manifest"])
+    graph = _load_task_graph(paths["task_graph"], allow_empty=allow_empty)
+    tasks = _graph_tasks(graph, allow_empty=allow_empty)
+    return {
+        "workspace_root": workspace_root,
+        "workspace": _project_relative(workspace_root, project_root),
+        "paths": paths,
+        "manifest": manifest,
+        "graph": graph,
+        "tasks": tasks,
+        "memory_entries": _load_jsonl(paths["memory"]),
+        "event_entries": _load_jsonl(paths["events"]),
+    }
+
+
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    if path.is_symlink():
+        raise RuntimeFoundationError("runtime_workspace_file_symlink_refused", f"Refusing symlink file: {path.name}")
+    entries: list[dict[str, Any]] = []
+    try:
+        for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            if not isinstance(data, dict):
+                raise RuntimeFoundationError("runtime_jsonl_invalid", f"Runtime JSONL entry must be an object: {path.name}:{index}")
+            entry = dict(data)
+            entry["_line"] = index
+            entries.append(entry)
+    except json.JSONDecodeError as exc:
+        raise RuntimeFoundationError("runtime_jsonl_unreadable", f"Unable to read runtime JSONL: {path.name}") from exc
+    return entries
+
+
+def _replay_contract(snapshot: dict[str, Any]) -> dict[str, Any]:
+    tasks = snapshot["tasks"]
+    graph = snapshot["graph"]
+    topological_order = _topological_order(tasks) if tasks else []
+    graph_order = list(graph.get("topological_order", []))
+    graph_order_valid = graph_order == topological_order
+    manifest_status = snapshot["manifest"].get("status")
+    expected_workspace_status = "initialized" if not tasks else _workspace_status(tasks)
+    workspace_status_matches_tasks = manifest_status == expected_workspace_status
+    event_status_by_task: dict[str, str] = {}
+    for entry in snapshot["event_entries"]:
+        task_id = entry.get("task_id")
+        status = entry.get("status")
+        if isinstance(task_id, str) and isinstance(status, str):
+            event_status_by_task[task_id] = status
+    memory_status_by_task: dict[str, str] = {}
+    for entry in snapshot["memory_entries"]:
+        task_id = entry.get("task_id")
+        status = entry.get("status")
+        if entry.get("entry_type") == "task_memory" and isinstance(task_id, str) and isinstance(status, str):
+            memory_status_by_task[task_id] = status
+
+    mismatches: list[dict[str, Any]] = []
+    if not graph_order_valid:
+        mismatches.append({"kind": "topological_order", "graph": graph_order, "expected": topological_order})
+    if not workspace_status_matches_tasks:
+        mismatches.append({"kind": "workspace_status", "manifest": manifest_status, "expected": expected_workspace_status})
+    for task in tasks:
+        task_id = task["id"]
+        graph_status = task["status"]
+        event_status = event_status_by_task.get(task_id)
+        memory_status = memory_status_by_task.get(task_id)
+        if graph_status == "pending":
+            if event_status is not None:
+                mismatches.append({"kind": "pending_task_has_event", "task_id": task_id, "event_status": event_status})
+            if memory_status is not None:
+                mismatches.append({"kind": "pending_task_has_memory", "task_id": task_id, "memory_status": memory_status})
+        elif graph_status in {"completed", "failed", "blocked"}:
+            if event_status != graph_status:
+                mismatches.append({"kind": "event_status", "task_id": task_id, "graph_status": graph_status, "event_status": event_status})
+            if graph_status in {"completed", "failed"} and memory_status != graph_status:
+                mismatches.append({"kind": "memory_status", "task_id": task_id, "graph_status": graph_status, "memory_status": memory_status})
+            if graph_status == "blocked" and memory_status is not None:
+                mismatches.append({"kind": "blocked_task_has_memory", "task_id": task_id, "memory_status": memory_status})
+
+    task_statuses = [
+        {
+            "task_id": task["id"],
+            "graph_status": task["status"],
+            "event_status": event_status_by_task.get(task["id"]),
+            "memory_status": memory_status_by_task.get(task["id"]),
+        }
+        for task in tasks
+    ]
+    return {
+        "replay_valid": not mismatches,
+        "graph_order_valid": graph_order_valid,
+        "workspace_status_matches_tasks": workspace_status_matches_tasks,
+        "workspace_status": manifest_status,
+        "expected_workspace_status": expected_workspace_status,
+        "topological_order": topological_order,
+        "memory_entry_count": len(snapshot["memory_entries"]),
+        "event_entry_count": len(snapshot["event_entries"]),
+        "task_statuses": task_statuses,
+        "mismatches": mismatches,
+    }
+
+
+def _task_readback(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": task["id"],
+        "title": task["title"],
+        "role": task["role"],
+        "status": task["status"],
+        "dependencies": list(task["dependencies"]),
+        "result_status": task.get("result", {}).get("status") if isinstance(task.get("result"), dict) else None,
+    }
+
+
+def _runtime_file_statuses(paths: dict[str, Path], project_root: Path) -> dict[str, dict[str, Any]]:
+    return {
+        name: {
+            "path": _project_relative(path, project_root),
+            "exists": path.exists(),
+            "is_file": path.is_file(),
+            "is_symlink": path.is_symlink(),
+        }
+        for name, path in paths.items()
+    }
+
+
+def _runtime_file_digests(paths: dict[str, Path], project_root: Path) -> dict[str, dict[str, Any]]:
+    digests: dict[str, dict[str, Any]] = {}
+    for name, path in paths.items():
+        if path.exists() and path.is_symlink():
+            raise RuntimeFoundationError("runtime_workspace_file_symlink_refused", f"Refusing symlink file: {path.name}")
+        data = path.read_bytes() if path.exists() else b""
+        digests[name] = {
+            "path": _project_relative(path, project_root),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "lines": len(data.decode("utf-8").splitlines()) if data else 0,
+        }
+    return digests
+
+
+def _safe_output_path(path: str, project_root: Path, code_prefix: str) -> Path:
+    if not str(path).strip():
+        raise RuntimeFoundationError(f"{code_prefix}_output_required", "Output path is required.")
+    raw = Path(path)
+    if any(part == ".." for part in raw.parts):
+        raise RuntimeFoundationError(f"{code_prefix}_path_traversal", f"Refusing output path traversal: {path}")
+    if any(part == ".env" for part in raw.parts):
+        raise RuntimeFoundationError(f"{code_prefix}_dotenv_refused", f"Refusing .env output path: {path}")
+    root = project_root.resolve(strict=True)
+    candidate = raw if raw.is_absolute() else root / raw
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeFoundationError(f"{code_prefix}_outside_project", f"Output path must stay inside project root: {path}") from exc
+    parent = candidate.parent.resolve(strict=False)
+    if parent != root and root not in parent.parents:
+        raise RuntimeFoundationError(f"{code_prefix}_outside_project", f"Output path must stay inside project root: {path}")
+    if not candidate.parent.exists():
+        raise RuntimeFoundationError(f"{code_prefix}_parent_missing", f"Output parent does not exist: {candidate.parent}")
+    if candidate.parent.is_symlink():
+        raise RuntimeFoundationError(f"{code_prefix}_parent_symlink", f"Refusing symlink output parent: {candidate.parent}")
+    if candidate.exists() and candidate.is_symlink():
+        raise RuntimeFoundationError(f"{code_prefix}_output_symlink", f"Refusing symlink output path: {candidate}")
+    if candidate.exists() and candidate.is_dir():
+        raise RuntimeFoundationError(f"{code_prefix}_output_directory", f"Output path is a directory: {candidate}")
+    return candidate.resolve(strict=False)
+
+
+def _format_evidence_text(payload: dict[str, Any]) -> str:
+    packet = payload["packet"]
+    replay = payload["replay"]
+    lifecycle = packet["lifecycle"]
+    lines = [
+        "# AgentOffice Runtime Workspace Evidence",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"workspace: {payload['workspace']}",
+        f"workspace_status: {lifecycle['workspace_status']}",
+        f"terminal: {str(lifecycle['terminal']).lower()}",
+        f"replay_valid: {str(replay['replay_valid']).lower()}",
+        f"memory_entry_count: {replay['memory_entry_count']}",
+        f"event_entry_count: {replay['event_entry_count']}",
+        "",
+        "## Completed Tasks",
+        "",
+    ]
+    completed = lifecycle["completed_task_ids"]
+    lines.extend(f"- {task_id}" for task_id in completed)
+    if not completed:
+        lines.append("- none")
+    lines.extend(["", "## File Digests", ""])
+    for name, digest in payload["file_digests"].items():
+        lines.append(f"- {name}: {digest['sha256']} ({digest['bytes']} bytes)")
+    lines.extend(["", "provider/runtime/adapter execution: not triggered"])
+    return "\n".join(lines)
 
 
 def _event_summary(event: dict[str, Any] | None) -> str:

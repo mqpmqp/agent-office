@@ -48,9 +48,13 @@ from .orchestration import (
 from .runtime_foundation import (
     RuntimeFoundationError,
     format_runtime_payload,
+    runtime_close_payload,
+    runtime_evidence_payload,
     runtime_error_payload,
     runtime_init_payload,
+    runtime_packet_payload,
     runtime_plan_payload,
+    runtime_replay_payload,
     runtime_run_payload,
     runtime_status_payload,
 )
@@ -1405,6 +1409,14 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             )
         elif action == "status":
             payload = runtime_status_payload(workspace=args.workspace, project_root=PROJECT_ROOT)
+        elif action == "packet":
+            payload = runtime_packet_payload(workspace=args.workspace, project_root=PROJECT_ROOT)
+        elif action == "replay":
+            payload = runtime_replay_payload(workspace=args.workspace, project_root=PROJECT_ROOT)
+        elif action == "evidence":
+            payload = runtime_evidence_payload(workspace=args.workspace, out=args.out, evidence_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "close":
+            payload = runtime_close_payload(workspace=args.workspace, out=args.out, project_root=PROJECT_ROOT)
         else:
             raise RuntimeFoundationError("runtime_unknown_action", "unknown runtime action")
     except RuntimeFoundationError as exc:
@@ -1415,6 +1427,10 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             raise AgentOfficeError(str(exc)) from exc
         return 2
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runtime_payload(payload))
+    if action == "replay":
+        return 0 if payload["replay_valid"] else 2
+    if action == "close":
+        return 0 if payload["closure_packet_valid"] else 2
     return 0
 
 
@@ -1644,6 +1660,25 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_status.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
     runtime_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_status.set_defaults(func=cmd_runtime)
+    runtime_packet = runtime_sub.add_parser("packet", help="Build a static runtime lifecycle packet.")
+    runtime_packet.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_packet.set_defaults(func=cmd_runtime)
+    runtime_replay = runtime_sub.add_parser("replay", help="Replay-read runtime graph, memory, and event logs.")
+    runtime_replay.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_replay.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_replay.set_defaults(func=cmd_runtime)
+    runtime_evidence = runtime_sub.add_parser("evidence", help="Write a local runtime workspace evidence bundle.")
+    runtime_evidence.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_evidence.add_argument("--out", required=True, help="Project-local evidence output path.")
+    runtime_evidence.add_argument("--format", choices=["json", "text"], default="json", help="Evidence output format. Default: json.")
+    runtime_evidence.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_evidence.set_defaults(func=cmd_runtime)
+    runtime_close = runtime_sub.add_parser("close", help="Build a runtime closure packet from local readback evidence.")
+    runtime_close.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_close.add_argument("--out", help="Optional project-local closure packet JSON output path.")
+    runtime_close.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_close.set_defaults(func=cmd_runtime)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
