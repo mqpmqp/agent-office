@@ -16,7 +16,7 @@ VERIFY_PASS_MARKER = "AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_PASS"
 VERIFY_FAIL_MARKER = "AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_FAIL"
 SOURCE_BRANCH = "phase49/agentoffice-v1-final-delivery-batch"
 TARGET_BRANCH = "phase6/mainline"
-REVIEW_OUTPUT = "P49_CLAUDE_ARTIFACT_REVIEW_OUTPUT.md"
+SELF_REVIEW_OUTPUT = "P49_CODEX_SELF_REVIEW_OUTPUT.md"
 
 REQUIRED_TOP_LEVEL_KEYS = (
     "schema_version",
@@ -143,22 +143,21 @@ def build_final_delivery_packet(project_root: Path) -> dict[str, Any]:
         },
         "artifacts": {
             "tracked_report": "P49_AGENTOFFICE_V1_FINAL_DELIVERY_BATCH_REPORT.md",
-            "review_bundle": "P49_REVIEW_ARTIFACT_BUNDLE.md",
-            "review_bundle_sha256": "P49_REVIEW_ARTIFACT_BUNDLE.md.sha256",
-            "claude_artifact_review_output": REVIEW_OUTPUT,
-            "review_fix_delta_output": "P49_CLAUDE_REVIEW_FIX_DELTA_REVIEW_OUTPUT.md",
-            "merge_gate_review_output": "P49_CLAUDE_MERGE_GATE_REVIEW_OUTPUT.md",
-            "merge_gate_packet": "P49_MERGE_GATE_PACKET.md",
-            "archive_index": "P49_V1_FINAL_DELIVERY_ARCHIVE_INDEX.md",
+            "historical_review_bundle": "P49_REVIEW_ARTIFACT_BUNDLE.md",
+            "historical_review_bundle_sha256": "P49_REVIEW_ARTIFACT_BUNDLE.md.sha256",
+            "codex_self_review_output": SELF_REVIEW_OUTPUT,
+            "codex_review_fix_report": "P49_CODEX_REVIEW_FIX_REPORT.md",
+            "codex_merge_gate_report": "P49_CODEX_MERGE_GATE_REPORT.md",
+            "final_release_declaration": "P49_V1_FINAL_RELEASE_DECLARATION.md",
         },
         "review": {
-            "reviewer": "Claude",
-            "mode": "artifact_based",
-            "expected_output": REVIEW_OUTPUT,
-            "required_marker": "P49_ARTIFACT_REVIEW_COMPLETE",
+            "reviewer": "Codex",
+            "mode": "self_review",
+            "expected_output": SELF_REVIEW_OUTPUT,
+            "required_marker": "P49_CODEX_SELF_REVIEW_COMPLETE",
             "rules": [
-                "review P49_REVIEW_ARTIFACT_BUNDLE.md and .sha256 as uploaded artifacts",
-                "do not claim Claude personally executed VPS commands unless the source report proves it",
+                "review the full baseline diff and touched P49 files",
+                "do not claim any external reviewer was used unless that review actually occurred",
                 "report blockers against CLI contract, deterministic schema, safety, tests, and README accuracy",
             ],
         },
@@ -166,9 +165,9 @@ def build_final_delivery_packet(project_root: Path) -> dict[str, Any]:
             "target_branch": TARGET_BRANCH,
             "allowed_after": [
                 "P49 source branch pushed",
-                "P49 artifact-based review complete",
-                "review-fix delta complete if required",
-                "merge gate explicitly authorized",
+                "P49 Codex self-review complete",
+                "P49 Codex review-fix delta complete if required",
+                "P49 Codex merge gate pass",
             ],
             "forbidden_in_p49": [
                 "merge phase6/mainline",
@@ -198,10 +197,10 @@ def build_final_delivery_packet(project_root: Path) -> dict[str, Any]:
             "tag or release creation",
         ],
         "next_actions": [
-            "P49 Claude artifact-based review",
-            "P49 review-fix delta only if review requires changes",
-            "P49 merge gate",
-            "v1 tag/release declaration only after merge gate",
+            "P49 Codex self-review",
+            "P49 Codex review-fix delta only if self-review requires changes",
+            "P49 Codex merge gate",
+            "v1 final release declaration only after merge gate",
         ],
     }
 
@@ -272,6 +271,8 @@ def validate_final_delivery_packet(packet: dict[str, Any]) -> list[str]:
         for key in REQUIRED_SAFETY_KEYS:
             if key not in safety:
                 errors.append(f"missing_safety_key:{key}")
+            elif safety[key] is not False:
+                errors.append(f"unsafe_safety_value:{key}")
 
     validation = packet.get("validation")
     commands = validation.get("release_blocking_commands") if isinstance(validation, dict) else None
@@ -282,12 +283,28 @@ def validate_final_delivery_packet(packet: dict[str, Any]) -> list[str]:
             if command not in commands:
                 errors.append(f"missing_validation_command:{command}")
 
+    review = packet.get("review")
+    if not isinstance(review, dict):
+        errors.append("missing_review_object")
+    else:
+        expected_review = {
+            "reviewer": "Codex",
+            "mode": "self_review",
+            "expected_output": SELF_REVIEW_OUTPUT,
+            "required_marker": "P49_CODEX_SELF_REVIEW_COMPLETE",
+        }
+        for key, expected in expected_review.items():
+            if review.get(key) != expected:
+                errors.append(f"wrong_review_{key}")
+
     next_actions = packet.get("next_actions")
     if not isinstance(next_actions, list):
         errors.append("missing_next_actions")
     else:
         if any("P50" in str(action) for action in next_actions):
             errors.append("next_actions_must_not_reference_P50")
+        if any("claude" in str(action).lower() for action in next_actions):
+            errors.append("next_actions_must_not_reference_claude_review")
     return errors
 
 
@@ -309,7 +326,7 @@ def format_final_delivery_packet(packet: dict[str, Any]) -> str:
         lines.append(f"  - {command}")
     lines.extend(
         [
-            f"expected_review_output: {artifacts['claude_artifact_review_output']}",
+            f"expected_self_review_output: {artifacts['codex_self_review_output']}",
             f"expected_merge_gate_next_step: {merge_gate['allowed_after'][-1]}",
             "safety_constraints:",
             "  - .env not read",
@@ -381,7 +398,7 @@ def _safe_input_path(path: str, project_root: Path, code_prefix: str) -> Path:
     candidate, resolved, allowed_root = _safe_candidate(path, project_root, code_prefix, kind="input")
     if not candidate.exists():
         raise V1FinalDeliveryError(f"{code_prefix}_missing", f"Input file does not exist: {candidate}")
-    _reject_symlink_components(resolved, allowed_root, code_prefix)
+    _reject_symlink_components(candidate, allowed_root, code_prefix)
     if candidate.is_symlink():
         raise V1FinalDeliveryError(f"{code_prefix}_symlink", f"Refusing symlink input path: {candidate}")
     if candidate.is_dir():
@@ -393,7 +410,7 @@ def _safe_input_path(path: str, project_root: Path, code_prefix: str) -> Path:
 
 def _safe_output_path(path: str, project_root: Path, code_prefix: str) -> Path:
     candidate, resolved, allowed_root = _safe_candidate(path, project_root, code_prefix, kind="output")
-    _reject_symlink_components(candidate.parent.resolve(strict=False), allowed_root, code_prefix)
+    _reject_symlink_components(candidate.parent, allowed_root, code_prefix)
     if candidate.exists() and candidate.is_symlink():
         raise V1FinalDeliveryError(f"{code_prefix}_symlink", f"Refusing symlink output path: {candidate}")
     if candidate.exists() and candidate.is_dir():
@@ -436,7 +453,7 @@ def _reject_symlink_components(path: Path, allowed_root: Path, code_prefix: str)
     current = allowed_root
     for part in path.relative_to(allowed_root).parts:
         current = current / part
-        if current.exists() and current.is_symlink():
+        if current.is_symlink():
             raise V1FinalDeliveryError(f"{code_prefix}_symlink", f"Refusing symlink path component: {current}")
 
 

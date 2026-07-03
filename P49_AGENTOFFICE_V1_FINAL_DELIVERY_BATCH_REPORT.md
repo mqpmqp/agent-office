@@ -1,14 +1,15 @@
 # P49 AgentOffice v1 Final Delivery Batch Report
 
-Status: ready_for_v1_final_review
+Status: codex_only_closure_ready
 Marker: P49_AGENTOFFICE_V1_FINAL_DELIVERY_BATCH_COMPLETE_READY_FOR_REVIEW
 
 Baseline:
 - origin/phase6/mainline before branch: ad2ebe5a78267e0bedf8f5c09e047b72231c0aaa
 - source branch: phase49/agentoffice-v1-final-delivery-batch
-- source HEAD: commit containing this report after `git commit`; exact pushed HEAD is recorded in final response and review artifact metadata
-- pushed: pending at report authoring; source branch push is required before review bundle generation
-- merged: no
+- source implementation head before Codex-only closure: b4cb33c09e64d756ed16e0aadabb02af1421a6e7
+- final source head: recorded in P49_CODEX_MERGE_GATE_REPORT.md
+- pushed: yes
+- merged: pending Codex-only closure
 - tag: no
 
 What changed:
@@ -16,7 +17,7 @@ What changed:
 - Added `python3 -m agent_office v1 final-delivery` JSON/text CLI output.
 - Added `python3 -m agent_office v1 verify-final-delivery` JSON/text verification output.
 - Added focused tests for positive JSON/text/output-path flows and negative missing path, bad JSON, wrong packet type, missing key, directory, symlink, non-UTF-8, `.env`, and output directory cases.
-- Documented the v1 final delivery packet, artifact review caveat, merge gate prerequisites, and safety constraints in README.
+- Documented the v1 final delivery packet, Codex-only closure caveat, merge gate prerequisites, and safety constraints in README.
 
 Public CLI contract:
 - `python3 -m agent_office v1 final-delivery --json`
@@ -30,7 +31,7 @@ Deterministic packet schema:
 - Exact values: `packet_type=agentoffice_v1_final_delivery`, `phase=P49`, `status=ready_for_v1_final_review`.
 - Text marker: `AGENTOFFICE_V1_FINAL_DELIVERY_PACKET`.
 - Verify markers: `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_PASS` and `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_FAIL`.
-- `next_actions` is limited to P49 artifact review, review-fix delta if required, merge gate, and v1 tag/release declaration only after merge gate. It does not suggest P50.
+- `next_actions` is limited to Codex self-review, review-fix delta if required, Codex merge gate, and v1 final release declaration only after merge gate. It does not suggest P50.
 - No wall-clock timestamp is embedded.
 
 Safety constraints observed:
@@ -71,20 +72,26 @@ Files changed:
 - `tests/test_v1_final_delivery_cli.py`
 - `P49_AGENTOFFICE_V1_FINAL_DELIVERY_BATCH_REPORT.md`
 
-Review artifact:
-- path: `/opt/agent-office/P49_REVIEW_ARTIFACT_BUNDLE.md`
-- sha256: generated post-commit/push in `/opt/agent-office/P49_REVIEW_ARTIFACT_BUNDLE.md.sha256`
+Codex-only closure artifacts:
+- self-review: `P49_CODEX_SELF_REVIEW_OUTPUT.md`
+- review-fix report if needed: `P49_CODEX_REVIEW_FIX_REPORT.md`
+- merge gate: `P49_CODEX_MERGE_GATE_REPORT.md`
+- final release declaration after merge: `P49_V1_FINAL_RELEASE_DECLARATION.md`
 
 Known caveats:
 - The review artifact bundle is intentionally untracked and generated only after commit/push, so the committed report records its expected path and sidecar location rather than a precomputed self-referential bundle hash.
 - The v1 packet records git branch/head/baseline metadata from the current repo state. It does not perform release, merge, tag, provider, runtime, adapter, model, worker, or scheduler execution.
 
+Codex-only closure update:
+- External artifact review was skipped by explicit user decision.
+- No external reviewer output is created or claimed by this closure path.
+
 Next steps:
-1. Claude artifact-based review using P49_REVIEW_ARTIFACT_BUNDLE.md
-2. Save full review output as P49_CLAUDE_ARTIFACT_REVIEW_OUTPUT.md
-3. Only if needed: review-fix delta
-4. Merge gate
-5. v1 tag/release declaration only after merge gate
+1. Codex self-review.
+2. Only if needed: Codex review-fix delta.
+3. Codex merge gate.
+4. Merge into `phase6/mainline` only after the merge gate passes.
+5. v1 final release declaration only after merge and post-merge validation.
 
 Final marker:
 P49_AGENTOFFICE_V1_FINAL_DELIVERY_BATCH_COMPLETE_READY_FOR_REVIEW

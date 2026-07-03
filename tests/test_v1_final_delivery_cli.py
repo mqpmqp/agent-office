@@ -63,13 +63,19 @@ class V1FinalDeliveryCliTests(unittest.TestCase):
         self.assertFalse(packet["safety"]["dotenv_read"])
         self.assertFalse(packet["safety"]["env_vars_printed"])
         self.assertFalse(packet["safety"]["provider_runtime_adapter_external_behavior"])
+        packet_text = json.dumps(packet, ensure_ascii=False)
         self.assertTrue(all("P50" not in str(action) for action in packet["next_actions"]))
+        self.assertEqual(packet["review"]["reviewer"], "Codex")
+        self.assertEqual(packet["review"]["mode"], "self_review")
+        self.assertEqual(packet["review"]["expected_output"], "P49_CODEX_SELF_REVIEW_OUTPUT.md")
+        self.assertNotIn("Claude", packet_text)
         self.assertIn("python3 -m agent_office v1 final-delivery --json", packet["validation"]["release_blocking_commands"])
         self.assertEqual(text_code, 0, text_stderr)
         self.assertIn("AGENTOFFICE_V1_FINAL_DELIVERY_PACKET", text_stdout)
         self.assertIn("phase: P49", text_stdout)
-        self.assertIn("expected_review_output: P49_CLAUDE_ARTIFACT_REVIEW_OUTPUT.md", text_stdout)
+        self.assertIn("expected_self_review_output: P49_CODEX_SELF_REVIEW_OUTPUT.md", text_stdout)
         self.assertNotIn("P50", text_stdout)
+        self.assertNotIn("Claude", text_stdout)
         self.assertNotIn("Traceback", text_stdout + text_stderr)
 
     def test_out_writes_json_and_verify_passes_json_and_text(self) -> None:
@@ -110,6 +116,20 @@ class V1FinalDeliveryCliTests(unittest.TestCase):
             missing_packet = dict(packet)
             missing_packet.pop("safety")
             missing_key.write_text(json.dumps(missing_packet), encoding="utf-8")
+            unsafe_safety = root / "unsafe-safety.json"
+            unsafe_packet = dict(packet)
+            unsafe_packet["safety"] = dict(packet["safety"])
+            unsafe_packet["safety"]["dotenv_read"] = True
+            unsafe_safety.write_text(json.dumps(unsafe_packet), encoding="utf-8")
+            wrong_review = root / "wrong-review.json"
+            wrong_review_packet = dict(packet)
+            wrong_review_packet["review"] = dict(packet["review"])
+            wrong_review_packet["review"]["reviewer"] = "Claude"
+            wrong_review.write_text(json.dumps(wrong_review_packet), encoding="utf-8")
+            stale_next_actions = root / "stale-next-actions.json"
+            stale_next_actions_packet = dict(packet)
+            stale_next_actions_packet["next_actions"] = ["P49 Claude artifact-based review"]
+            stale_next_actions.write_text(json.dumps(stale_next_actions_packet), encoding="utf-8")
             non_utf8 = root / "non-utf8.json"
             non_utf8.write_bytes(b"\xff\xfe")
             directory = root / "packet-dir"
@@ -119,6 +139,9 @@ class V1FinalDeliveryCliTests(unittest.TestCase):
                 (bad_json, "v1_final_delivery_verify_bad_json"),
                 (wrong_type, "wrong_packet_type"),
                 (missing_key, "missing_required_key:safety"),
+                (unsafe_safety, "unsafe_safety_value:dotenv_read"),
+                (wrong_review, "wrong_review_reviewer"),
+                (stale_next_actions, "next_actions_must_not_reference_claude_review"),
                 (directory, "v1_final_delivery_verify_directory"),
                 (non_utf8, "v1_final_delivery_verify_non_utf8"),
             ]
@@ -128,6 +151,13 @@ class V1FinalDeliveryCliTests(unittest.TestCase):
                 link = root / "link.json"
                 link.symlink_to(target)
                 cases.append((link, "v1_final_delivery_verify_symlink"))
+                real_parent = root / "real-parent"
+                real_parent.mkdir()
+                parent_link = root / "parent-link"
+                parent_link.symlink_to(real_parent, target_is_directory=True)
+                parent_link_packet = parent_link / "packet.json"
+                parent_link_packet.write_text(json.dumps(packet), encoding="utf-8")
+                cases.append((parent_link_packet, "v1_final_delivery_verify_symlink"))
             except OSError as exc:
                 link = None
                 symlink_error = exc
@@ -166,6 +196,11 @@ class V1FinalDeliveryCliTests(unittest.TestCase):
                 link = root / "out-link.json"
                 link.symlink_to(target)
                 cases.append((link, "v1_final_delivery_output_symlink"))
+                real_parent = root / "real-out-parent"
+                real_parent.mkdir()
+                parent_link = root / "out-parent-link"
+                parent_link.symlink_to(real_parent, target_is_directory=True)
+                cases.append((parent_link / "packet.json", "v1_final_delivery_output_symlink"))
             except OSError as exc:
                 link = None
                 symlink_error = exc

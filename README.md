@@ -141,34 +141,24 @@ python3 -m agent_office v1 verify-final-delivery --path /tmp/agentoffice-v1-fina
 
 The packet top-level contract includes `schema_version`, `packet_type`, `phase`, `status`, `repo`, `delivery`, `contracts`, `validation`, `artifacts`, `review`, `merge_gate`, `safety`, `non_goals`, and `next_actions`. Text output contains `AGENTOFFICE_V1_FINAL_DELIVERY_PACKET`; verifier text emits `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_PASS` or `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_FAIL`.
 
-Generate the P49 review artifact bundle after the source branch is committed and pushed:
+Codex-only closure output files for the user-approved P49 path:
 
-```bash
-BASELINE="$(cat /tmp/agentoffice_p49_baseline.txt)"
-HEAD="$(git rev-parse HEAD)"
-OUT="/opt/agent-office/P49_REVIEW_ARTIFACT_BUNDLE.md"
-SHA="/opt/agent-office/P49_REVIEW_ARTIFACT_BUNDLE.md.sha256"
-# Write the Markdown artifact from the P49 report, git status, diff stat, name-status, full diff, and changed-file snapshots.
-sha256sum "$OUT" > "$SHA"
-```
+- `P49_CODEX_SELF_REVIEW_OUTPUT.md`
+- `P49_CODEX_REVIEW_FIX_REPORT.md` only if the self-review requires a fix
+- `P49_CODEX_MERGE_GATE_REPORT.md`
+- `P49_V1_FINAL_RELEASE_DECLARATION.md` after mainline merge validation
 
-Expected reviewer output files:
-
-- `P49_CLAUDE_ARTIFACT_REVIEW_OUTPUT.md`
-- `P49_CLAUDE_REVIEW_FIX_DELTA_REVIEW_OUTPUT.md` only if a fix is needed
-- `P49_CLAUDE_MERGE_GATE_REVIEW_OUTPUT.md` only for merge gate review if used
-
-Claude review is artifact-based. Claude must review the uploaded bundle and `.sha256` sidecar and must not claim it personally executed VPS commands unless that is true and recorded in the source report.
+External artifact review is not a prerequisite when the operator explicitly chooses Codex-only closure. Do not create, cite, or imply external reviewer output unless that review actually occurred and is saved as evidence.
 
 Merge gate prerequisites:
 
 1. P49 source branch is pushed.
-2. P49 artifact-based review is complete.
-3. Any required review-fix delta is complete.
-4. Merge gate is explicitly authorized.
-5. v1 tag or release declaration happens only after the merge gate.
+2. P49 Codex self-review is complete.
+3. Any required Codex review-fix delta is complete and validated.
+4. Codex merge gate passes under explicit operator authorization.
+5. v1 final release declaration happens only after merge and post-merge validation.
 
-Safety constraints: do not read `.env`, do not print environment variable values, do not trigger provider/runtime/adapter external behavior, do not merge `phase6/mainline`, do not tag, do not force push, and do not mutate the default branch during P49.
+Safety constraints: the packet and verifier do not read `.env`, do not print environment variable values, do not trigger provider/runtime/adapter external behavior, do not tag, do not force push, and do not mutate the default branch.
 
 ## Claude Token Rule
 
