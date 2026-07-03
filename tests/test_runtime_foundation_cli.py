@@ -181,6 +181,36 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertEqual(manifest[0], 0, manifest[2])
         return base
 
+    def _prepare_archive_index(self, root: Path) -> Path:
+        base = self._prepare_provenance_manifest(root)
+        package = run_cli([
+            "runtime", "worker-result", "release-candidate",
+            "--provenance-manifest", ".ai/workspaces/demo/provenance-manifest.json",
+            "--out", ".ai/workspaces/demo/release-candidate.json",
+            "--review-target", "AgentOffice R29-R31 release candidate",
+            "--json",
+        ], root)
+        self.assertEqual(package[0], 0, package[2])
+        handoff = run_cli([
+            "runtime", "worker-result", "external-review-handoff",
+            "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+            "--out", ".ai/workspaces/demo/external-review-handoff.json",
+            "--review-target", "AgentOffice R29-R31 release candidate",
+            "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+            "--attestation-import-path", ".ai/workspaces/demo/imported-reviewer-attestation.json",
+            "--json",
+        ], root)
+        self.assertEqual(handoff[0], 0, handoff[2])
+        index = run_cli([
+            "runtime", "worker-result", "archive-index",
+            "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+            "--external-review-handoff", ".ai/workspaces/demo/external-review-handoff.json",
+            "--out", ".ai/workspaces/demo/archive-index.json",
+            "--json",
+        ], root)
+        self.assertEqual(index[0], 0, index[2])
+        return base
+
     def test_init_json_positive_creates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1799,6 +1829,207 @@ class RuntimeFoundationCliTests(unittest.TestCase):
                 self.assertIn("worker-result", stdout.getvalue())
                 self.assertEqual(stderr.getvalue(), "")
         combined = malformed_result[1] + malformed_result[2] + empty_result[1] + empty_result[2] + replay_empty[1] + replay_empty[2]
+        self.assertNotIn("Traceback", combined)
+
+
+    def test_worker_result_release_candidate_handoff_archive_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_archive_index(root)
+            package_text = run_cli([
+                "runtime", "worker-result", "release-candidate",
+                "--provenance-manifest", ".ai/workspaces/demo/provenance-manifest.json",
+                "--out", ".ai/workspaces/demo/release-candidate.txt",
+                "--format", "text",
+                "--review-target", "AgentOffice R29-R31 release candidate",
+                "--json",
+            ], root)
+            handoff_text = run_cli([
+                "runtime", "worker-result", "external-review-handoff",
+                "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+                "--out", ".ai/workspaces/demo/external-review-handoff.txt",
+                "--format", "text",
+                "--review-target", "AgentOffice R29-R31 release candidate",
+                "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+                "--attestation-import-path", ".ai/workspaces/demo/imported-reviewer-attestation.json",
+                "--json",
+            ], root)
+            index_text = run_cli([
+                "runtime", "worker-result", "archive-index",
+                "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+                "--external-review-handoff", ".ai/workspaces/demo/external-review-handoff.json",
+                "--out", ".ai/workspaces/demo/archive-index.txt",
+                "--format", "text",
+                "--json",
+            ], root)
+            verify_json = run_cli([
+                "runtime", "worker-result", "archive-verify", "--index", ".ai/workspaces/demo/archive-index.json", "--json"
+            ], root)
+            verify_text = run_cli([
+                "runtime", "worker-result", "archive-verify", "--index", ".ai/workspaces/demo/archive-index.json"
+            ], root)
+            package = json.loads((base / "release-candidate.json").read_text(encoding="utf-8"))
+            handoff = json.loads((base / "external-review-handoff.json").read_text(encoding="utf-8"))
+            index = json.loads((base / "archive-index.json").read_text(encoding="utf-8"))
+            package_text_body = (base / "release-candidate.txt").read_text(encoding="utf-8")
+            handoff_text_body = (base / "external-review-handoff.txt").read_text(encoding="utf-8")
+            index_text_body = (base / "archive-index.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(package["kind"], "runtime_worker_release_candidate_package")
+        self.assertEqual(package["generated_at"], "deterministic-static-v1")
+        self.assertEqual(package["artifact_count"], 7)
+        self.assertTrue(package["archive_ready"])
+        self.assertTrue(package["replay_ready"])
+        self.assertEqual(handoff["kind"], "runtime_worker_external_review_handoff")
+        self.assertEqual(handoff["expected_reviewer_output_marker"], "R29_EXTERNAL_REVIEW_COMPLETE")
+        self.assertIn("must not claim VPS validation", handoff["known_safety_caveat"])
+        self.assertEqual(index["kind"], "runtime_worker_evidence_archive_index")
+        self.assertTrue(index["archive_ready"])
+        self.assertTrue(index["replay_ready"])
+        self.assertEqual({record["role"] for record in index["records"]}, {
+            "release_candidate",
+            "provenance_manifest",
+            "delivery_gate",
+            "reviewer_attestation",
+            "closure_evidence",
+            "merge_readiness",
+            "rejection_recovery",
+            "audit_replay",
+            "external_review_handoff",
+        })
+        self.assertEqual(package_text[0], 0, package_text[2])
+        self.assertIn("archive_ready: true", package_text_body)
+        self.assertEqual(handoff_text[0], 0, handoff_text[2])
+        self.assertIn("R29_EXTERNAL_REVIEW_COMPLETE", handoff_text_body)
+        self.assertEqual(index_text[0], 0, index_text[2])
+        self.assertIn("archive_ready: true", index_text_body)
+        self.assertEqual(verify_json[0], 0, verify_json[2])
+        verify = json.loads(verify_json[1])
+        self.assertTrue(verify["archive_valid"])
+        self.assertTrue(verify["archive_ready"])
+        self.assertTrue(verify["replay_ready"])
+        self.assertEqual(verify["rejection_reasons"], [])
+        self.assertEqual(verify_text[0], 0, verify_text[2])
+        self.assertIn("archive_valid: true", verify_text[1])
+        combined = package_text[1] + package_text[2] + handoff_text[1] + handoff_text[2] + index_text[1] + index_text[2] + verify_json[1] + verify_json[2] + verify_text[1] + verify_text[2]
+        self.assertNotIn("Traceback", combined)
+
+    def test_worker_result_archive_verify_rejects_bad_indexes_cleanly(self) -> None:
+        def run_case(mutator, expected_reason: str) -> dict[str, object]:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                base = self._prepare_archive_index(root)
+                index = json.loads((base / "archive-index.json").read_text(encoding="utf-8"))
+                mutator(root, base, index)
+                (base / "case-index.json").write_text(json.dumps(index), encoding="utf-8")
+                result = run_cli([
+                    "runtime", "worker-result", "archive-verify", "--index", ".ai/workspaces/demo/case-index.json", "--json"
+                ], root)
+            self.assertEqual(result[0], 2, result[2])
+            payload = json.loads(result[1])
+            self.assertFalse(payload["archive_valid"])
+            self.assertIn(expected_reason, payload["rejection_reasons"])
+            self.assertTrue(payload["recovery_guidance"])
+            self.assertNotIn("Traceback", result[1] + result[2])
+            return payload
+
+        def record(index: dict[str, object], record_id: str) -> dict[str, object]:
+            for entry in index["records"]:
+                if entry["record_id"] == record_id:
+                    return entry
+            raise AssertionError(record_id)
+
+        run_case(lambda root, base, index: record(index, "release_candidate").update({"path": ".ai/workspaces/demo/missing-release-candidate.json"}), "artifact_missing:release_candidate")
+        run_case(lambda root, base, index: record(index, "external_review_handoff").update({"path": ".ai/workspaces/demo/missing-handoff.json"}), "artifact_missing:external_review_handoff")
+        run_case(lambda root, base, index: index.update({"records": [entry for entry in index["records"] if entry["record_id"] != "external_review_handoff"]}), "required_role_missing:external_review_handoff")
+        run_case(lambda root, base, index: index["records"].append(dict(index["records"][0])), "duplicate_record_id:provenance_manifest")
+        run_case(lambda root, base, index: record(index, "release_candidate").update({"parents": ["missing_parent"]}), "parent_missing:release_candidate:missing_parent")
+        run_case(lambda root, base, index: record(index, "release_candidate").update({"sha256": "0" * 64}), "sha256_mismatch:release_candidate")
+        run_case(lambda root, base, index: record(index, "release_candidate").update({"byte_count": 1}), "byte_count_mismatch:release_candidate")
+        run_case(lambda root, base, index: record(index, "release_candidate").update({"archive_ready": False}), "archive_ready_false:release_candidate")
+        run_case(lambda root, base, index: record(index, "release_candidate").update({"replay_ready": False}), "replay_ready_false:release_candidate")
+        run_case(lambda root, base, index: index.update({"invocation_allowed": True}), "invocation_not_refused:archive_index")
+        run_case(lambda root, base, index: index.update({"external_execution_refused": False}), "external_execution_not_refused:archive_index")
+        run_case(lambda root, base, index: index.update({"provider_calls": True}), "provider_calls_not_false:archive_index")
+        run_case(lambda root, base, index: index.update({"model_calls": True}), "model_calls_not_false:archive_index")
+        run_case(lambda root, base, index: index.update({"browser_calls": True}), "browser_calls_not_false:archive_index")
+        run_case(lambda root, base, index: index.update({"shell_calls": True}), "shell_calls_not_false:archive_index")
+
+        def stale_package(root: Path, base: Path, index: dict[str, object]) -> None:
+            path = base / "delivery-gate.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["gate_status"] = "tampered"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+        run_case(stale_package, "stale_package:delivery_gate")
+
+        def empty_artifact(root: Path, base: Path, index: dict[str, object]) -> None:
+            (base / "release-candidate.json").write_text("", encoding="utf-8")
+
+        run_case(empty_artifact, "artifact_json_invalid:release_candidate")
+
+        def traversal(root: Path, base: Path, index: dict[str, object]) -> None:
+            record(index, "release_candidate")["path"] = ".ai/workspaces/demo/../release-candidate.json"
+
+        run_case(traversal, "artifact_path_traversal:release_candidate")
+
+        def symlink(root: Path, base: Path, index: dict[str, object]) -> None:
+            link = base / "release-candidate-link.json"
+            try:
+                link.symlink_to(base / "release-candidate.json")
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+            record(index, "release_candidate")["path"] = ".ai/workspaces/demo/release-candidate-link.json"
+
+        run_case(symlink, "artifact_symlink:release_candidate")
+
+    def test_worker_result_archive_index_errors_and_help_are_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_archive_index(root)
+            malformed = base / "malformed-index.json"
+            malformed.write_text("{", encoding="utf-8")
+            empty = base / "empty-index.json"
+            empty.write_text(json.dumps({
+                "kind": "runtime_worker_evidence_archive_index",
+                "schema_version": 1,
+                "marker": "AGENT_OFFICE_EVIDENCE_ARCHIVE_INDEX",
+                "record_count": 0,
+                "records": [],
+                "archive_ready": True,
+                "replay_ready": True,
+                "invocation_allowed": False,
+                "external_execution_refused": True,
+                "provider_calls": False,
+                "model_calls": False,
+                "browser_calls": False,
+                "shell_calls": False,
+            }), encoding="utf-8")
+            malformed_result = run_cli([
+                "runtime", "worker-result", "archive-verify", "--index", ".ai/workspaces/demo/malformed-index.json", "--json"
+            ], root)
+            empty_result = run_cli([
+                "runtime", "worker-result", "archive-verify", "--index", ".ai/workspaces/demo/empty-index.json", "--json"
+            ], root)
+
+        self.assertEqual(json.loads(malformed_result[1])["error_code"], "runtime_worker_archive_index_invalid")
+        self.assertEqual(empty_result[0], 2, empty_result[2])
+        self.assertIn("archive_index_empty", json.loads(empty_result[1])["rejection_reasons"])
+        for argv in (
+            ["runtime", "worker-result", "release-candidate", "--help"],
+            ["runtime", "worker-result", "external-review-handoff", "--help"],
+            ["runtime", "worker-result", "archive-index", "--help"],
+            ["runtime", "worker-result", "archive-verify", "--help"],
+        ):
+            with self.subTest(argv=argv):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+                    cli.main(argv)
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn("worker-result", stdout.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
+        combined = malformed_result[1] + malformed_result[2] + empty_result[1] + empty_result[2]
         self.assertNotIn("Traceback", combined)
 
     def test_external_worker_adapter_prototype_contract(self) -> None:
