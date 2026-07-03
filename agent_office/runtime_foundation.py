@@ -18,6 +18,33 @@ MERGE_READINESS_PACKET_MARKER = "AGENT_OFFICE_MERGE_READINESS_PACKET"
 DELIVERY_GATE_PACKET_MARKER = "AGENT_OFFICE_DELIVERY_GATE_PACKET"
 REJECTION_RECOVERY_PACKET_MARKER = "AGENT_OFFICE_REJECTION_RECOVERY_PACKET"
 AUDIT_PACKET_REPLAY_MARKER = "AGENT_OFFICE_AUDIT_PACKET_REPLAY"
+PROVENANCE_MANIFEST_MARKER = "AGENT_OFFICE_ARTIFACT_CHAIN_PROVENANCE_MANIFEST"
+PROVENANCE_VERIFY_MARKER = "AGENT_OFFICE_ARTIFACT_CHAIN_PROVENANCE_VERIFY"
+PROVENANCE_REPLAY_MARKER = "AGENT_OFFICE_ARTIFACT_CHAIN_TAMPER_REPLAY"
+PROVENANCE_REQUIRED_ROLE_ORDER = (
+    "reviewer_attestation",
+    "closure_evidence",
+    "merge_readiness",
+    "delivery_gate",
+    "rejection_recovery",
+    "audit_replay",
+)
+PROVENANCE_ROLE_KINDS = {
+    "reviewer_attestation": "runtime_worker_reviewer_attestation_packet",
+    "closure_evidence": "runtime_worker_closure_evidence",
+    "merge_readiness": "runtime_worker_merge_readiness_packet",
+    "delivery_gate": "runtime_worker_delivery_gate_summary",
+    "rejection_recovery": "runtime_worker_rejection_recovery_packet",
+    "audit_replay": "runtime_worker_audit_packet_replay",
+}
+PROVENANCE_PARENT_IDS = {
+    "reviewer_attestation": (),
+    "closure_evidence": ("reviewer_attestation",),
+    "merge_readiness": ("reviewer_attestation", "closure_evidence"),
+    "delivery_gate": ("merge_readiness",),
+    "rejection_recovery": ("delivery_gate",),
+    "audit_replay": ("rejection_recovery",),
+}
 REVIEWER_ARTIFACT_SAFETY_CAVEAT = "artifact-based static review only; no provider/model/browser/shell execution is implied"
 WORKER_REFUSAL_REASON = "external worker prototype is contract-only; execution refused"
 TERMINAL_WORKSPACE_STATUSES = {"completed", "failed", "blocked"}
@@ -1133,11 +1160,13 @@ def runtime_worker_rejection_packet_payload(*, delivery_gate: str, out: str, rej
     return packet
 
 
-def runtime_worker_audit_replay_payload(*, packet: str, project_root: Path) -> dict[str, Any]:
+def runtime_worker_audit_replay_payload(*, packet: str, out: str | None = None, replay_format: str = "json", project_root: Path) -> dict[str, Any]:
+    if replay_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_audit_replay_format_invalid", f"Unsupported audit replay format: {replay_format}")
     packet_path = _safe_input_path(packet, project_root, "runtime_worker_audit_replay_packet")
     source = _load_input_json(packet_path, "runtime_worker_audit_replay_packet")
     summary = _audit_replay_summary(source)
-    return {
+    payload = {
         "ok": True,
         "command": "runtime worker-result audit-replay",
         "kind": "runtime_worker_audit_packet_replay",
@@ -1150,6 +1179,131 @@ def runtime_worker_audit_replay_payload(*, packet: str, project_root: Path) -> d
         "recovery_status": summary["recovery_status"],
         "replay_ready": summary["replay_ready"],
         "governance_ready": summary["governance_ready"],
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "written": False,
+    }
+    if out:
+        output_path = _safe_output_path(out, project_root, "runtime_worker_audit_replay")
+        payload["output_path"] = _project_relative(output_path, project_root)
+        payload["replay_format"] = replay_format
+        payload["written"] = True
+        if replay_format == "json":
+            _write_json(output_path, payload)
+        else:
+            _write_text(output_path, format_runtime_payload(payload))
+    return payload
+
+
+def runtime_worker_provenance_manifest_payload(
+    *,
+    reviewer_attestation: str,
+    closure_evidence: str,
+    merge_readiness: str,
+    delivery_gate: str,
+    rejection_packet: str,
+    audit_replay: str,
+    out: str,
+    manifest_format: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if manifest_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_provenance_manifest_format_invalid", f"Unsupported provenance manifest format: {manifest_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_provenance_manifest")
+    inputs = {
+        "reviewer_attestation": reviewer_attestation,
+        "closure_evidence": closure_evidence,
+        "merge_readiness": merge_readiness,
+        "delivery_gate": delivery_gate,
+        "rejection_recovery": rejection_packet,
+        "audit_replay": audit_replay,
+    }
+    payloads: dict[str, dict[str, Any]] = {}
+    artifacts: list[dict[str, Any]] = []
+    for role in PROVENANCE_REQUIRED_ROLE_ORDER:
+        source_path = _safe_input_path(inputs[role], project_root, f"runtime_worker_provenance_{role}")
+        payload = _load_input_json(source_path, f"runtime_worker_provenance_{role}")
+        _validate_provenance_payload_shape(role, payload, f"runtime_worker_provenance_{role}")
+        payloads[role] = payload
+        artifacts.append(_provenance_artifact_entry(role, source_path, payload, project_root))
+    linkage_reasons = _provenance_source_linkage_reasons(payloads, artifacts)
+    if linkage_reasons:
+        raise RuntimeFoundationError("runtime_worker_provenance_manifest_parent_linkage_invalid", "; ".join(linkage_reasons))
+    readiness_summary = _provenance_readiness_summary(payloads)
+    manifest = {
+        "ok": True,
+        "command": "runtime worker-result provenance-manifest",
+        "kind": "runtime_worker_provenance_manifest",
+        "schema_version": SCHEMA_VERSION,
+        "marker": PROVENANCE_MANIFEST_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "chain_root": PROVENANCE_REQUIRED_ROLE_ORDER[0],
+        "terminal_artifact": PROVENANCE_REQUIRED_ROLE_ORDER[-1],
+        "terminal_readiness_required": True,
+        "required_role_order": list(PROVENANCE_REQUIRED_ROLE_ORDER),
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts,
+        "readiness_summary": readiness_summary,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "validation_commands": _worker_validation_commands(),
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "manifest_format": manifest_format,
+        "written": True,
+    }
+    if manifest_format == "json":
+        _write_json(output_path, manifest)
+    else:
+        _write_text(output_path, _format_provenance_manifest_text(manifest))
+    return manifest
+
+
+def runtime_worker_provenance_verify_payload(*, manifest: str, project_root: Path) -> dict[str, Any]:
+    manifest_path = _safe_input_path(manifest, project_root, "runtime_worker_provenance_manifest")
+    manifest_payload = _load_input_json(manifest_path, "runtime_worker_provenance_manifest")
+    return _verify_provenance_manifest(manifest_payload, manifest_path, project_root, command="runtime worker-result provenance-verify")
+
+
+def runtime_worker_provenance_replay_payload(*, manifest: str, project_root: Path) -> dict[str, Any]:
+    manifest_path = _safe_input_path(manifest, project_root, "runtime_worker_provenance_manifest")
+    manifest_payload = _load_input_json(manifest_path, "runtime_worker_provenance_manifest")
+    verification = _verify_provenance_manifest(manifest_payload, manifest_path, project_root, command="runtime worker-result provenance-verify")
+    summary = verification["readiness_summary"]
+    chain_ready = bool(verification["chain_valid"])
+    return {
+        "ok": True,
+        "command": "runtime worker-result provenance-replay",
+        "kind": "runtime_worker_provenance_replay",
+        "schema_version": SCHEMA_VERSION,
+        "marker": PROVENANCE_REPLAY_MARKER,
+        "manifest_source": _artifact_source(manifest_path, project_root),
+        "chain_replay_ready": chain_ready,
+        "artifact_integrity_valid": bool(verification["artifact_integrity_valid"]),
+        "parent_linkage_valid": bool(verification["parent_linkage_valid"]),
+        "role_order_valid": bool(verification["role_order_valid"]),
+        "readiness_predicates_valid": bool(verification["readiness_predicates_valid"]),
+        "original_readiness": bool(summary.get("terminal_readiness")) if chain_ready else False,
+        "delivery_gate_pass": bool(summary.get("delivery_gate_pass")),
+        "rejection_reasons": list(summary.get("rejection_reasons") or verification["rejection_reasons"]),
+        "recovery_status": str(summary.get("recovery_status", "unknown")) if chain_ready else "blocked_until_chain_fixed",
+        "replay_ready": bool(summary.get("audit_replay_ready")) if chain_ready else False,
+        "governance_ready": bool(summary.get("governance_ready")) if chain_ready else False,
+        "chain_verification": {
+            "chain_valid": verification["chain_valid"],
+            "rejection_reasons": verification["rejection_reasons"],
+            "recovery_guidance": verification["recovery_guidance"],
+        },
+        "recovery_guidance": verification["recovery_guidance"],
         "invocation_allowed": False,
         "external_execution_refused": True,
         "provider_calls": False,
@@ -1338,6 +1492,31 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"recovery_status: {payload['recovery_status']}")
         lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
         lines.append(f"governance_ready: {str(payload['governance_ready']).lower()}")
+        if payload.get("output_path"):
+            lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_provenance_manifest":
+        lines.append(f"chain_root: {payload['chain_root']}")
+        lines.append(f"terminal_artifact: {payload['terminal_artifact']}")
+        lines.append(f"artifact_count: {payload['artifact_count']}")
+        lines.append(f"terminal_readiness: {str(payload['readiness_summary']['terminal_readiness']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_provenance_verification":
+        lines.append(f"chain_valid: {str(payload['chain_valid']).lower()}")
+        lines.append(f"artifact_integrity_valid: {str(payload['artifact_integrity_valid']).lower()}")
+        lines.append(f"parent_linkage_valid: {str(payload['parent_linkage_valid']).lower()}")
+        lines.append(f"role_order_valid: {str(payload['role_order_valid']).lower()}")
+        lines.append(f"readiness_predicates_valid: {str(payload['readiness_predicates_valid']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"next_action: {payload['next_action']}")
+        lines.append("recovery_guidance:")
+        lines.extend(f"  - {item}" for item in payload["recovery_guidance"])
+    if payload.get("kind") == "runtime_worker_provenance_replay":
+        lines.append(f"chain_replay_ready: {str(payload['chain_replay_ready']).lower()}")
+        lines.append(f"artifact_integrity_valid: {str(payload['artifact_integrity_valid']).lower()}")
+        lines.append(f"original_readiness: {str(payload['original_readiness']).lower()}")
+        lines.append(f"delivery_gate_pass: {str(payload['delivery_gate_pass']).lower()}")
+        lines.append(f"recovery_status: {payload['recovery_status']}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
@@ -2528,6 +2707,379 @@ def _format_worker_delivery_bundle_text(payload: dict[str, Any]) -> str:
     ]
     return "\n".join(lines)
 
+
+
+
+def _provenance_artifact_entry(role: str, path: Path, payload: dict[str, Any], project_root: Path) -> dict[str, Any]:
+    source = _artifact_source(path, project_root)
+    return {
+        "artifact_id": role,
+        "role": role,
+        "path": source["path"],
+        "sha256": source["sha256"],
+        "byte_count": source["bytes"],
+        "parent_artifact_ids": list(PROVENANCE_PARENT_IDS[role]),
+        "replay_status": _provenance_role_replay_status(role, payload),
+        "readiness": _provenance_role_readiness(role, payload),
+    }
+
+
+def _validate_provenance_payload_shape(role: str, payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != PROVENANCE_ROLE_KINDS[role]:
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", f"Provenance artifact schema is invalid for role: {role}")
+    marker_expectations = {
+        "reviewer_attestation": REVIEWER_ATTESTATION_PACKET_MARKER,
+        "closure_evidence": CLOSURE_EVIDENCE_IMPORTED_MARKER,
+        "merge_readiness": MERGE_READINESS_PACKET_MARKER,
+        "delivery_gate": DELIVERY_GATE_PACKET_MARKER,
+        "rejection_recovery": REJECTION_RECOVERY_PACKET_MARKER,
+        "audit_replay": AUDIT_PACKET_REPLAY_MARKER,
+    }
+    marker_key = "packet_marker" if role == "reviewer_attestation" else "marker"
+    if payload.get(marker_key) != marker_expectations[role]:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", f"Provenance artifact marker is missing for role: {role}")
+
+
+def _provenance_role_replay_status(role: str, payload: dict[str, Any]) -> bool:
+    readiness = _provenance_role_readiness(role, payload)
+    return all(value is True for value in readiness.values() if isinstance(value, bool))
+
+
+def _provenance_role_readiness(role: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if role == "reviewer_attestation":
+        return {
+            "reviewer_attestation_present": payload.get("reviewer_attestation_present") is True,
+            "reviewer_verdict_pass": str(payload.get("verdict", "")).lower() == "pass",
+        }
+    if role == "closure_evidence":
+        return {
+            "closure_evidence_imported": payload.get("closure_evidence_imported") is True,
+            "gate_readable": payload.get("gate_readable") is True,
+            "audit_replayable": payload.get("audit_replayable") is True,
+            "reviewer_attestation_present": payload.get("reviewer_attestation_present") is True,
+        }
+    if role == "merge_readiness":
+        return {
+            "merge_readiness_ready": payload.get("merge_readiness_ready") is True,
+            "external_worker_replay_ready": payload.get("external_worker_replay_ready") is True,
+            "audit_closure_ready": payload.get("audit_closure_ready") is True,
+            "delivery_bundle_ready": payload.get("delivery_bundle_ready") is True,
+        }
+    if role == "delivery_gate":
+        return {"delivery_gate_pass": payload.get("delivery_gate_pass") is True}
+    if role == "rejection_recovery":
+        return {
+            "replay_ready": payload.get("replay_ready") is True,
+            "governance_ready": payload.get("governance_ready") is True,
+            "recovery_not_required": str(payload.get("recovery_status", "")) == "not_required",
+        }
+    if role == "audit_replay":
+        return {
+            "audit_replay_ready": payload.get("replay_ready") is True,
+            "governance_ready": payload.get("governance_ready") is True,
+            "original_readiness": payload.get("original_readiness") is True,
+        }
+    return {"unknown_role": False}
+
+
+def _provenance_readiness_summary(payloads: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    delivery_gate = payloads.get("delivery_gate", {})
+    rejection = payloads.get("rejection_recovery", {})
+    audit = payloads.get("audit_replay", {})
+    role_statuses = {role: _provenance_role_replay_status(role, payloads[role]) for role in PROVENANCE_REQUIRED_ROLE_ORDER if role in payloads}
+    terminal_readiness = all(role_statuses.get(role) is True for role in PROVENANCE_REQUIRED_ROLE_ORDER)
+    return {
+        "terminal_readiness": terminal_readiness,
+        "role_replay_statuses": role_statuses,
+        "delivery_gate_pass": delivery_gate.get("delivery_gate_pass") is True,
+        "rejection_reasons": list(delivery_gate.get("rejection_reasons") or rejection.get("rejection_reasons") or audit.get("rejection_reasons") or []),
+        "recovery_status": str(rejection.get("recovery_status", audit.get("recovery_status", "unknown"))),
+        "audit_replay_ready": audit.get("replay_ready") is True,
+        "governance_ready": audit.get("governance_ready") is True,
+    }
+
+
+def _verify_provenance_manifest(manifest: dict[str, Any], manifest_path: Path, project_root: Path, *, command: str) -> dict[str, Any]:
+    reasons: list[str] = []
+    if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("kind") != "runtime_worker_provenance_manifest":
+        reasons.append("manifest_schema_invalid")
+    if manifest.get("marker") != PROVENANCE_MANIFEST_MARKER:
+        reasons.append("manifest_marker_missing")
+    if manifest.get("chain_root") != PROVENANCE_REQUIRED_ROLE_ORDER[0]:
+        reasons.append("chain_root_invalid")
+    if manifest.get("terminal_artifact") != PROVENANCE_REQUIRED_ROLE_ORDER[-1]:
+        reasons.append("terminal_artifact_invalid")
+    if manifest.get("required_role_order") != list(PROVENANCE_REQUIRED_ROLE_ORDER):
+        reasons.append("required_role_order_invalid")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        artifacts = []
+        reasons.append("manifest_empty")
+
+    entries: list[dict[str, Any]] = [entry for entry in artifacts if isinstance(entry, dict)]
+    if manifest.get("artifact_count") != len(entries):
+        reasons.append("artifact_count_mismatch")
+    if len(entries) != len(artifacts):
+        reasons.append("artifact_entry_invalid")
+    artifact_ids = [str(entry.get("artifact_id", "")) for entry in entries]
+    roles = [str(entry.get("role", "")) for entry in entries]
+    for artifact_id in sorted({artifact_id for artifact_id in artifact_ids if artifact_ids.count(artifact_id) > 1}):
+        reasons.append(f"duplicate_artifact_id:{artifact_id}")
+    for role in sorted({role for role in roles if roles.count(role) > 1}):
+        reasons.append(f"duplicate_role:{role}")
+    for role in PROVENANCE_REQUIRED_ROLE_ORDER:
+        if role not in roles:
+            reasons.append(f"required_role_missing:{role}")
+    if roles != list(PROVENANCE_REQUIRED_ROLE_ORDER):
+        reasons.append("role_order_invalid")
+
+    by_id = {str(entry.get("artifact_id", "")): entry for entry in entries}
+    for entry in entries:
+        role = str(entry.get("role", ""))
+        artifact_id = str(entry.get("artifact_id", ""))
+        if role not in PROVENANCE_ROLE_KINDS:
+            reasons.append(f"unknown_role:{role or artifact_id}")
+            continue
+        expected_parents = list(PROVENANCE_PARENT_IDS[role])
+        parents = entry.get("parent_artifact_ids")
+        if parents != expected_parents:
+            reasons.append(f"parent_linkage_invalid:{role}")
+        if not isinstance(parents, list):
+            parents = []
+        for parent_id in parents:
+            parent_key = str(parent_id)
+            if parent_key not in by_id:
+                reasons.append(f"parent_missing:{role}:{parent_key}")
+                continue
+            if artifact_id in artifact_ids and artifact_ids.index(parent_key) >= artifact_ids.index(artifact_id):
+                reasons.append(f"parent_order_invalid:{role}:{parent_key}")
+    graph = {
+        str(entry.get("artifact_id", "")): [str(parent) for parent in entry.get("parent_artifact_ids", [])]
+        for entry in entries
+        if isinstance(entry.get("parent_artifact_ids", []), list)
+    }
+    if _provenance_has_cycle(graph):
+        reasons.append("parent_cycle_detected")
+
+    payloads: dict[str, dict[str, Any]] = {}
+    loaded_entries: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        role = str(entry.get("role", ""))
+        if role not in PROVENANCE_ROLE_KINDS:
+            continue
+        artifact_path, path_reasons = _provenance_entry_path(entry, project_root)
+        reasons.extend(path_reasons)
+        if artifact_path is None:
+            continue
+        current = _artifact_source(artifact_path, project_root)
+        if entry.get("sha256") != current["sha256"]:
+            reasons.append(f"sha256_mismatch:{role}")
+        if entry.get("byte_count") != current["bytes"]:
+            reasons.append(f"byte_count_mismatch:{role}")
+        try:
+            payload = _load_input_json(artifact_path, f"runtime_worker_provenance_{role}")
+        except RuntimeFoundationError:
+            reasons.append(f"artifact_json_invalid:{role}")
+            continue
+        payloads[role] = payload
+        loaded_entries[role] = entry
+        try:
+            _validate_provenance_payload_shape(role, payload, f"runtime_worker_provenance_{role}")
+        except RuntimeFoundationError:
+            reasons.append(f"artifact_schema_invalid:{role}")
+        reasons.extend(_provenance_payload_predicate_reasons(role, payload))
+
+    if all(role in payloads and role in loaded_entries for role in PROVENANCE_REQUIRED_ROLE_ORDER):
+        reasons.extend(_provenance_source_linkage_reasons(payloads, [loaded_entries[role] for role in PROVENANCE_REQUIRED_ROLE_ORDER]))
+    readiness_summary = _provenance_readiness_summary(payloads) if payloads else {"terminal_readiness": False, "role_replay_statuses": {}, "rejection_reasons": [], "recovery_status": "unknown", "delivery_gate_pass": False, "audit_replay_ready": False, "governance_ready": False}
+    if manifest.get("terminal_readiness_required") is not True:
+        reasons.append("terminal_readiness_required_missing")
+    if not readiness_summary.get("terminal_readiness"):
+        for role, ready in readiness_summary.get("role_replay_statuses", {}).items():
+            if ready is not True:
+                reasons.append(f"replay_status_not_ready:{role}")
+        reasons.append("terminal_readiness_not_ready")
+
+    unique_reasons = _dedupe_text(reasons)
+    artifact_integrity_valid = not any(reason.startswith(("artifact_missing:", "artifact_path_", "artifact_symlink:", "artifact_not_file:", "sha256_mismatch:", "byte_count_mismatch:", "artifact_json_invalid:")) for reason in unique_reasons)
+    parent_linkage_valid = not any(reason.startswith(("parent_", "duplicate_artifact_id", "duplicate_role", "parent_cycle")) for reason in unique_reasons)
+    role_order_valid = "role_order_invalid" not in unique_reasons
+    required_roles_present = not any(reason.startswith("required_role_missing:") for reason in unique_reasons)
+    readiness_predicates_valid = not any(reason.startswith(("invocation_not_refused:", "external_execution_not_refused:", "provider_calls_not_false:", "model_calls_not_false:", "browser_calls_not_false:", "shell_calls_not_false:", "readiness_predicate_not_ready:", "replay_status_not_ready:", "terminal_readiness_not_ready")) for reason in unique_reasons)
+    chain_valid = not unique_reasons
+    return {
+        "ok": True,
+        "command": command,
+        "kind": "runtime_worker_provenance_verification",
+        "schema_version": SCHEMA_VERSION,
+        "marker": PROVENANCE_VERIFY_MARKER,
+        "manifest_source": _artifact_source(manifest_path, project_root),
+        "chain_valid": chain_valid,
+        "artifact_integrity_valid": artifact_integrity_valid,
+        "parent_linkage_valid": parent_linkage_valid,
+        "role_order_valid": role_order_valid,
+        "required_roles_present": required_roles_present,
+        "readiness_predicates_valid": readiness_predicates_valid,
+        "readiness_summary": readiness_summary,
+        "rejection_reasons": unique_reasons,
+        "recovery_guidance": _provenance_recovery_guidance(unique_reasons),
+        "next_action": "tamper-evident replay allowed" if chain_valid else "recover required evidence",
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+    }
+
+
+def _provenance_entry_path(entry: dict[str, Any], project_root: Path) -> tuple[Path | None, list[str]]:
+    role = str(entry.get("role", "unknown"))
+    raw_path = str(entry.get("path", ""))
+    if not raw_path.strip():
+        return None, [f"artifact_path_missing:{role}"]
+    raw = Path(raw_path)
+    if any(part == ".." for part in raw.parts):
+        return None, [f"artifact_path_traversal:{role}"]
+    if any(part == ".env" for part in raw.parts):
+        return None, [f"artifact_dotenv_refused:{role}"]
+    root = project_root.resolve(strict=True)
+    candidate = raw if raw.is_absolute() else root / raw
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None, [f"artifact_outside_project:{role}"]
+    parent = candidate.parent.resolve(strict=False)
+    if parent != root and root not in parent.parents:
+        return None, [f"artifact_outside_project:{role}"]
+    if candidate.parent.exists() and candidate.parent.is_symlink():
+        return None, [f"artifact_parent_symlink:{role}"]
+    if not candidate.exists():
+        return None, [f"artifact_missing:{role}"]
+    if candidate.is_symlink():
+        return None, [f"artifact_symlink:{role}"]
+    if not candidate.is_file():
+        return None, [f"artifact_not_file:{role}"]
+    return candidate.resolve(strict=False), []
+
+
+def _provenance_payload_predicate_reasons(role: str, payload: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if payload.get("invocation_allowed") is not False:
+        reasons.append(f"invocation_not_refused:{role}")
+    if payload.get("external_execution_refused") is not True:
+        reasons.append(f"external_execution_not_refused:{role}")
+    for key in ("provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if payload.get(key) is not False:
+            reasons.append(f"{key}_not_false:{role}")
+    for name, ready in _provenance_role_readiness(role, payload).items():
+        if ready is not True:
+            reasons.append(f"readiness_predicate_not_ready:{role}:{name}")
+    return reasons
+
+
+def _provenance_source_linkage_reasons(payloads: dict[str, dict[str, Any]], artifacts: list[dict[str, Any]]) -> list[str]:
+    by_role = {artifact["role"]: artifact for artifact in artifacts}
+    checks = (
+        ("closure_evidence", "reviewer_attestation", "reviewer_attestation_source"),
+        ("merge_readiness", "reviewer_attestation", "reviewer_attestation_source"),
+        ("merge_readiness", "closure_evidence", "closure_evidence_source"),
+        ("delivery_gate", "merge_readiness", "merge_readiness_source"),
+        ("rejection_recovery", "delivery_gate", "delivery_gate_source"),
+        ("audit_replay", "rejection_recovery", "packet_source"),
+    )
+    reasons: list[str] = []
+    for role, parent_role, source_key in checks:
+        source = payloads.get(role, {}).get(source_key)
+        parent = by_role.get(parent_role)
+        if not isinstance(source, dict) or parent is None:
+            reasons.append(f"parent_source_missing:{role}:{parent_role}")
+            continue
+        if not _provenance_source_matches(source, parent):
+            reasons.append(f"parent_source_mismatch:{role}:{parent_role}")
+    return reasons
+
+
+def _provenance_source_matches(source: dict[str, Any], parent: dict[str, Any]) -> bool:
+    return source.get("path") == parent.get("path") and source.get("sha256") == parent.get("sha256") and source.get("bytes") == parent.get("byte_count")
+
+
+def _provenance_has_cycle(graph: dict[str, list[str]]) -> bool:
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str) -> bool:
+        if node in visiting:
+            return True
+        if node in visited:
+            return False
+        visiting.add(node)
+        for parent in graph.get(node, []):
+            if parent in graph and visit(parent):
+                return True
+        visiting.remove(node)
+        visited.add(node)
+        return False
+
+    return any(visit(node) for node in graph)
+
+
+def _dedupe_text(items: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for item in items:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def _provenance_recovery_guidance(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No recovery required; provenance chain is intact and replay-ready."]
+    guidance: list[str] = []
+    if any("missing" in reason for reason in reasons):
+        guidance.append("Regenerate or restore the missing static artifact, then regenerate the provenance manifest.")
+    if any(reason.startswith(("sha256_mismatch:", "byte_count_mismatch:")) for reason in reasons):
+        guidance.append("Restore the artifact bytes recorded by the manifest or regenerate the manifest from the current artifacts.")
+    if any(reason.startswith(("parent_", "role_order_invalid", "duplicate_artifact_id", "duplicate_role", "parent_cycle")) for reason in reasons):
+        guidance.append("Regenerate the manifest with the canonical role order and parent links.")
+    if any(reason.startswith(("invocation_not_refused:", "external_execution_not_refused:", "provider_calls_not_false:", "model_calls_not_false:", "browser_calls_not_false:", "shell_calls_not_false:")) for reason in reasons):
+        guidance.append("Restore static refusal predicates before regenerating downstream artifacts.")
+    if any(reason.startswith(("readiness_predicate_not_ready:", "replay_status_not_ready:", "terminal_readiness_not_ready")) for reason in reasons):
+        guidance.append("Regenerate readiness, delivery gate, rejection recovery, and audit replay from fixed evidence.")
+    if not guidance:
+        guidance.append("Regenerate the provenance manifest from verified static artifacts.")
+    guidance.append("Rerun runtime worker-result provenance-verify and provenance-replay after recovery.")
+    return _dedupe_text(guidance)
+
+
+def _format_provenance_manifest_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Artifact Chain Provenance Manifest",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"marker: {payload['marker']}",
+        f"generated_at: {payload['generated_at']}",
+        f"chain_root: {payload['chain_root']}",
+        f"terminal_artifact: {payload['terminal_artifact']}",
+        f"terminal_readiness: {str(payload['readiness_summary']['terminal_readiness']).lower()}",
+        f"artifact_count: {payload['artifact_count']}",
+        "",
+        "## Artifacts",
+    ]
+    for artifact in payload["artifacts"]:
+        lines.append(f"- {artifact['artifact_id']} ({artifact['role']}): {artifact['path']} sha256={artifact['sha256']} bytes={artifact['byte_count']} replay_status={str(artifact['replay_status']).lower()}")
+    lines.extend([
+        "",
+        "## Safety",
+        f"invocation_allowed: {str(payload['invocation_allowed']).lower()}",
+        f"external_execution_refused: {str(payload['external_execution_refused']).lower()}",
+        f"provider_calls: {str(payload['provider_calls']).lower()}",
+        f"model_calls: {str(payload['model_calls']).lower()}",
+        f"browser_calls: {str(payload['browser_calls']).lower()}",
+        f"shell_calls: {str(payload['shell_calls']).lower()}",
+    ])
+    return "\n".join(lines)
 
 
 def _validate_reviewer_attestation_packet(payload: dict[str, Any], code_prefix: str) -> None:

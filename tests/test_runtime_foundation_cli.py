@@ -153,6 +153,34 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertEqual(merge[0], 0, merge[2])
         return base
 
+    def _prepare_provenance_manifest(self, root: Path) -> Path:
+        base = self._prepare_merge_readiness(root)
+        gate = run_cli([
+            "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/merge-readiness.json", "--out", ".ai/workspaces/demo/delivery-gate.json", "--json"
+        ], root)
+        self.assertEqual(gate[0], 0, gate[2])
+        rejection = run_cli([
+            "runtime", "worker-result", "rejection-packet", "--delivery-gate", ".ai/workspaces/demo/delivery-gate.json", "--out", ".ai/workspaces/demo/rejection-packet.json", "--json"
+        ], root)
+        self.assertEqual(rejection[0], 0, rejection[2])
+        audit = run_cli([
+            "runtime", "worker-result", "audit-replay", "--packet", ".ai/workspaces/demo/rejection-packet.json", "--out", ".ai/workspaces/demo/audit-replay.json", "--json"
+        ], root)
+        self.assertEqual(audit[0], 0, audit[2])
+        manifest = run_cli([
+            "runtime", "worker-result", "provenance-manifest",
+            "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json",
+            "--closure-evidence", ".ai/workspaces/demo/closure-evidence.json",
+            "--merge-readiness", ".ai/workspaces/demo/merge-readiness.json",
+            "--delivery-gate", ".ai/workspaces/demo/delivery-gate.json",
+            "--rejection-packet", ".ai/workspaces/demo/rejection-packet.json",
+            "--audit-replay", ".ai/workspaces/demo/audit-replay.json",
+            "--out", ".ai/workspaces/demo/provenance-manifest.json",
+            "--json",
+        ], root)
+        self.assertEqual(manifest[0], 0, manifest[2])
+        return base
+
     def test_init_json_positive_creates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1564,6 +1592,213 @@ class RuntimeFoundationCliTests(unittest.TestCase):
                 self.assertIn("worker-result", stdout.getvalue())
                 self.assertEqual(stderr.getvalue(), "")
         combined = missing[1] + missing[2] + malformed[1] + malformed[2] + empty_result[1] + empty_result[2] + missing_marker[1] + missing_marker[2] + traversal[1] + traversal[2] + bad_replay[1] + bad_replay[2]
+        self.assertNotIn("Traceback", combined)
+
+
+    def test_worker_result_provenance_manifest_verify_and_replay_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_provenance_manifest(root)
+            manifest_text = run_cli([
+                "runtime", "worker-result", "provenance-manifest",
+                "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json",
+                "--closure-evidence", ".ai/workspaces/demo/closure-evidence.json",
+                "--merge-readiness", ".ai/workspaces/demo/merge-readiness.json",
+                "--delivery-gate", ".ai/workspaces/demo/delivery-gate.json",
+                "--rejection-packet", ".ai/workspaces/demo/rejection-packet.json",
+                "--audit-replay", ".ai/workspaces/demo/audit-replay.json",
+                "--out", ".ai/workspaces/demo/provenance-manifest.txt",
+                "--format", "text",
+                "--json",
+            ], root)
+            verify_json = run_cli([
+                "runtime", "worker-result", "provenance-verify", "--manifest", ".ai/workspaces/demo/provenance-manifest.json", "--json"
+            ], root)
+            verify_text = run_cli([
+                "runtime", "worker-result", "provenance-verify", "--manifest", ".ai/workspaces/demo/provenance-manifest.json"
+            ], root)
+            replay_json = run_cli([
+                "runtime", "worker-result", "provenance-replay", "--manifest", ".ai/workspaces/demo/provenance-manifest.json", "--json"
+            ], root)
+            replay_text = run_cli([
+                "runtime", "worker-result", "provenance-replay", "--manifest", ".ai/workspaces/demo/provenance-manifest.json"
+            ], root)
+            manifest = json.loads((base / "provenance-manifest.json").read_text(encoding="utf-8"))
+            manifest_text_body = (base / "provenance-manifest.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(manifest["kind"], "runtime_worker_provenance_manifest")
+        self.assertEqual(manifest["generated_at"], "deterministic-static-v1")
+        self.assertEqual(manifest["chain_root"], "reviewer_attestation")
+        self.assertEqual(manifest["terminal_artifact"], "audit_replay")
+        self.assertTrue(manifest["readiness_summary"]["terminal_readiness"])
+        self.assertEqual([artifact["role"] for artifact in manifest["artifacts"]], [
+            "reviewer_attestation",
+            "closure_evidence",
+            "merge_readiness",
+            "delivery_gate",
+            "rejection_recovery",
+            "audit_replay",
+        ])
+        self.assertTrue(all(artifact["sha256"] and artifact["byte_count"] > 0 for artifact in manifest["artifacts"]))
+        self.assertEqual(manifest_text[0], 0, manifest_text[2])
+        self.assertIn("terminal_readiness: true", manifest_text_body)
+        self.assertEqual(verify_json[0], 0, verify_json[2])
+        verify = json.loads(verify_json[1])
+        self.assertTrue(verify["chain_valid"])
+        self.assertTrue(verify["artifact_integrity_valid"])
+        self.assertTrue(verify["parent_linkage_valid"])
+        self.assertTrue(verify["role_order_valid"])
+        self.assertTrue(verify["required_roles_present"])
+        self.assertTrue(verify["readiness_predicates_valid"])
+        self.assertEqual(verify["rejection_reasons"], [])
+        self.assertEqual(verify_text[0], 0, verify_text[2])
+        self.assertIn("chain_valid: true", verify_text[1])
+        self.assertEqual(replay_json[0], 0, replay_json[2])
+        replay = json.loads(replay_json[1])
+        self.assertTrue(replay["chain_replay_ready"])
+        self.assertTrue(replay["artifact_integrity_valid"])
+        self.assertTrue(replay["original_readiness"])
+        self.assertTrue(replay["delivery_gate_pass"])
+        self.assertEqual(replay["recovery_status"], "not_required")
+        self.assertEqual(replay_text[0], 0, replay_text[2])
+        self.assertIn("chain_replay_ready: true", replay_text[1])
+        combined = manifest_text[1] + manifest_text[2] + verify_json[1] + verify_json[2] + verify_text[1] + verify_text[2] + replay_json[1] + replay_json[2] + replay_text[1] + replay_text[2]
+        self.assertNotIn("Traceback", combined)
+
+    def test_worker_result_provenance_verify_rejects_tampering_cleanly(self) -> None:
+        def run_case(mutator, expected_reason: str) -> dict[str, object]:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                base = self._prepare_provenance_manifest(root)
+                manifest = json.loads((base / "provenance-manifest.json").read_text(encoding="utf-8"))
+                mutator(root, base, manifest)
+                (base / "case-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                result = run_cli([
+                    "runtime", "worker-result", "provenance-verify", "--manifest", ".ai/workspaces/demo/case-manifest.json", "--json"
+                ], root)
+            self.assertEqual(result[0], 2, result[2])
+            payload = json.loads(result[1])
+            self.assertFalse(payload["chain_valid"])
+            self.assertIn(expected_reason, payload["rejection_reasons"])
+            self.assertTrue(payload["recovery_guidance"])
+            self.assertNotIn("Traceback", result[1] + result[2])
+            return payload
+
+        def artifact(manifest: dict[str, object], role: str) -> dict[str, object]:
+            for entry in manifest["artifacts"]:
+                if entry["role"] == role:
+                    return entry
+            raise AssertionError(role)
+
+        run_case(lambda root, base, manifest: artifact(manifest, "delivery_gate").update({"sha256": "0" * 64}), "sha256_mismatch:delivery_gate")
+        run_case(lambda root, base, manifest: artifact(manifest, "delivery_gate").update({"byte_count": 1}), "byte_count_mismatch:delivery_gate")
+        run_case(lambda root, base, manifest: manifest.update({"terminal_artifact": "delivery_gate"}), "terminal_artifact_invalid")
+
+        def missing_artifact(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            (base / "delivery-gate.json").unlink()
+
+        run_case(missing_artifact, "artifact_missing:delivery_gate")
+
+        def wrong_parent(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            artifact(manifest, "delivery_gate")["parent_artifact_ids"] = ["missing_parent"]
+
+        run_case(wrong_parent, "parent_missing:delivery_gate:missing_parent")
+
+        def wrong_order(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            artifacts = manifest["artifacts"]
+            artifacts[2], artifacts[3] = artifacts[3], artifacts[2]
+
+        run_case(wrong_order, "parent_order_invalid:delivery_gate:merge_readiness")
+
+        def duplicate_id(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            artifact(manifest, "closure_evidence")["artifact_id"] = "reviewer_attestation"
+
+        run_case(duplicate_id, "duplicate_artifact_id:reviewer_attestation")
+
+        def cycle(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            artifact(manifest, "reviewer_attestation")["parent_artifact_ids"] = ["audit_replay"]
+
+        run_case(cycle, "parent_cycle_detected")
+
+        def missing_role(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            manifest["artifacts"] = [entry for entry in manifest["artifacts"] if entry["role"] != "audit_replay"]
+
+        run_case(missing_role, "required_role_missing:audit_replay")
+
+        def bad_predicate(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            path = base / "merge-readiness.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["provider_calls"] = True
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+        run_case(bad_predicate, "provider_calls_not_false:merge_readiness")
+
+        def bad_invocation(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            path = base / "merge-readiness.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["invocation_allowed"] = True
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+        run_case(bad_invocation, "invocation_not_refused:merge_readiness")
+
+        def traversal(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            artifact(manifest, "delivery_gate")["path"] = ".ai/workspaces/demo/../delivery-gate.json"
+
+        run_case(traversal, "artifact_path_traversal:delivery_gate")
+
+        def symlink(root: Path, base: Path, manifest: dict[str, object]) -> None:
+            link = base / "delivery-gate-link.json"
+            try:
+                link.symlink_to(base / "delivery-gate.json")
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+            artifact(manifest, "delivery_gate")["path"] = ".ai/workspaces/demo/delivery-gate-link.json"
+
+        run_case(symlink, "artifact_symlink:delivery_gate")
+
+    def test_worker_result_provenance_manifest_errors_and_help_are_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_provenance_manifest(root)
+            malformed = base / "malformed-manifest.json"
+            malformed.write_text("{", encoding="utf-8")
+            empty = base / "empty-manifest.json"
+            empty.write_text(json.dumps({
+                "kind": "runtime_worker_provenance_manifest",
+                "schema_version": 1,
+                "marker": "AGENT_OFFICE_ARTIFACT_CHAIN_PROVENANCE_MANIFEST",
+                "terminal_readiness_required": True,
+                "artifacts": [],
+            }), encoding="utf-8")
+            malformed_result = run_cli([
+                "runtime", "worker-result", "provenance-verify", "--manifest", ".ai/workspaces/demo/malformed-manifest.json", "--json"
+            ], root)
+            empty_result = run_cli([
+                "runtime", "worker-result", "provenance-verify", "--manifest", ".ai/workspaces/demo/empty-manifest.json", "--json"
+            ], root)
+            replay_empty = run_cli([
+                "runtime", "worker-result", "provenance-replay", "--manifest", ".ai/workspaces/demo/empty-manifest.json", "--json"
+            ], root)
+
+        self.assertEqual(json.loads(malformed_result[1])["error_code"], "runtime_worker_provenance_manifest_invalid")
+        self.assertEqual(empty_result[0], 2, empty_result[2])
+        self.assertIn("manifest_empty", json.loads(empty_result[1])["rejection_reasons"])
+        self.assertEqual(replay_empty[0], 2, replay_empty[2])
+        self.assertFalse(json.loads(replay_empty[1])["chain_replay_ready"])
+        for argv in (
+            ["runtime", "worker-result", "provenance-manifest", "--help"],
+            ["runtime", "worker-result", "provenance-verify", "--help"],
+            ["runtime", "worker-result", "provenance-replay", "--help"],
+        ):
+            with self.subTest(argv=argv):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+                    cli.main(argv)
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn("worker-result", stdout.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
+        combined = malformed_result[1] + malformed_result[2] + empty_result[1] + empty_result[2] + replay_empty[1] + replay_empty[2]
         self.assertNotIn("Traceback", combined)
 
     def test_external_worker_adapter_prototype_contract(self) -> None:

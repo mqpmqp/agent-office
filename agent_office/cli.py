@@ -68,6 +68,9 @@ from .runtime_foundation import (
     runtime_worker_gate_payload,
     runtime_worker_invocation_packet_payload,
     runtime_worker_merge_readiness_payload,
+    runtime_worker_provenance_manifest_payload,
+    runtime_worker_provenance_replay_payload,
+    runtime_worker_provenance_verify_payload,
     runtime_worker_rejection_packet_payload,
     runtime_worker_result_intake_payload,
     runtime_worker_result_replay_payload,
@@ -1476,7 +1479,23 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         elif action == "worker-result" and args.worker_result_action == "rejection-packet":
             payload = runtime_worker_rejection_packet_payload(delivery_gate=args.delivery_gate, out=args.out, rejection_format=args.format, project_root=PROJECT_ROOT)
         elif action == "worker-result" and args.worker_result_action == "audit-replay":
-            payload = runtime_worker_audit_replay_payload(packet=args.packet, project_root=PROJECT_ROOT)
+            payload = runtime_worker_audit_replay_payload(packet=args.packet, out=args.out, replay_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "provenance-manifest":
+            payload = runtime_worker_provenance_manifest_payload(
+                reviewer_attestation=args.reviewer_attestation,
+                closure_evidence=args.closure_evidence,
+                merge_readiness=args.merge_readiness,
+                delivery_gate=args.delivery_gate,
+                rejection_packet=args.rejection_packet,
+                audit_replay=args.audit_replay,
+                out=args.out,
+                manifest_format=args.format,
+                project_root=PROJECT_ROOT,
+            )
+        elif action == "worker-result" and args.worker_result_action == "provenance-verify":
+            payload = runtime_worker_provenance_verify_payload(manifest=args.manifest, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "provenance-replay":
+            payload = runtime_worker_provenance_replay_payload(manifest=args.manifest, project_root=PROJECT_ROOT)
         else:
             raise RuntimeFoundationError("runtime_unknown_action", "unknown runtime action")
     except RuntimeFoundationError as exc:
@@ -1493,6 +1512,10 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         return 0 if payload["closure_packet_valid"] else 2
     if action == "governance":
         return 0 if payload["runtime_governance_ready"] else 2
+    if action == "worker-result" and getattr(args, "worker_result_action", None) == "provenance-verify":
+        return 0 if payload["chain_valid"] else 2
+    if action == "worker-result" and getattr(args, "worker_result_action", None) == "provenance-replay":
+        return 0 if payload["chain_replay_ready"] else 2
     return 0
 
 
@@ -1871,8 +1894,29 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_worker_rejection_packet.set_defaults(func=cmd_runtime)
     runtime_worker_audit_replay = runtime_worker_result_sub.add_parser("audit-replay", help="Replay static audit, merge-readiness, delivery-gate, or rejection packets.")
     runtime_worker_audit_replay.add_argument("--packet", required=True, help="Project-local audit packet JSON path.")
+    runtime_worker_audit_replay.add_argument("--out", help="Optional project-local audit replay artifact output path.")
+    runtime_worker_audit_replay.add_argument("--format", choices=["json", "text"], default="json", help="Audit replay artifact output format when --out is used. Default: json.")
     runtime_worker_audit_replay.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_worker_audit_replay.set_defaults(func=cmd_runtime)
+    runtime_worker_provenance_manifest = runtime_worker_result_sub.add_parser("provenance-manifest", help="Write a deterministic artifact-chain provenance manifest.")
+    runtime_worker_provenance_manifest.add_argument("--reviewer-attestation", required=True, help="Project-local reviewer attestation JSON path.")
+    runtime_worker_provenance_manifest.add_argument("--closure-evidence", required=True, help="Project-local closure evidence JSON path.")
+    runtime_worker_provenance_manifest.add_argument("--merge-readiness", required=True, help="Project-local merge-readiness JSON path.")
+    runtime_worker_provenance_manifest.add_argument("--delivery-gate", required=True, help="Project-local delivery gate JSON path.")
+    runtime_worker_provenance_manifest.add_argument("--rejection-packet", required=True, help="Project-local rejection recovery JSON path.")
+    runtime_worker_provenance_manifest.add_argument("--audit-replay", required=True, help="Project-local audit replay JSON path.")
+    runtime_worker_provenance_manifest.add_argument("--out", required=True, help="Project-local provenance manifest output path.")
+    runtime_worker_provenance_manifest.add_argument("--format", choices=["json", "text"], default="json", help="Provenance manifest output format. Default: json.")
+    runtime_worker_provenance_manifest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_provenance_manifest.set_defaults(func=cmd_runtime)
+    runtime_worker_provenance_verify = runtime_worker_result_sub.add_parser("provenance-verify", help="Verify provenance manifest integrity, parent links, role order, and static predicates.")
+    runtime_worker_provenance_verify.add_argument("--manifest", required=True, help="Project-local provenance manifest JSON path.")
+    runtime_worker_provenance_verify.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_provenance_verify.set_defaults(func=cmd_runtime)
+    runtime_worker_provenance_replay = runtime_worker_result_sub.add_parser("provenance-replay", help="Replay a tamper-evident artifact chain from a provenance manifest.")
+    runtime_worker_provenance_replay.add_argument("--manifest", required=True, help="Project-local provenance manifest JSON path.")
+    runtime_worker_provenance_replay.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_provenance_replay.set_defaults(func=cmd_runtime)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
