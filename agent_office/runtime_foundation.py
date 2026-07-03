@@ -21,6 +21,21 @@ AUDIT_PACKET_REPLAY_MARKER = "AGENT_OFFICE_AUDIT_PACKET_REPLAY"
 PROVENANCE_MANIFEST_MARKER = "AGENT_OFFICE_ARTIFACT_CHAIN_PROVENANCE_MANIFEST"
 PROVENANCE_VERIFY_MARKER = "AGENT_OFFICE_ARTIFACT_CHAIN_PROVENANCE_VERIFY"
 PROVENANCE_REPLAY_MARKER = "AGENT_OFFICE_ARTIFACT_CHAIN_TAMPER_REPLAY"
+RELEASE_CANDIDATE_PACKAGE_MARKER = "AGENT_OFFICE_RELEASE_CANDIDATE_PACKAGE"
+EXTERNAL_REVIEW_HANDOFF_MARKER = "AGENT_OFFICE_EXTERNAL_REVIEW_HANDOFF"
+EVIDENCE_ARCHIVE_INDEX_MARKER = "AGENT_OFFICE_EVIDENCE_ARCHIVE_INDEX"
+EVIDENCE_ARCHIVE_VERIFY_MARKER = "AGENT_OFFICE_EVIDENCE_ARCHIVE_VERIFY"
+ARCHIVE_REQUIRED_ROLES = (
+    "release_candidate",
+    "provenance_manifest",
+    "delivery_gate",
+    "reviewer_attestation",
+    "closure_evidence",
+    "merge_readiness",
+    "rejection_recovery",
+    "audit_replay",
+    "external_review_handoff",
+)
 PROVENANCE_REQUIRED_ROLE_ORDER = (
     "reviewer_attestation",
     "closure_evidence",
@@ -1315,6 +1330,168 @@ def runtime_worker_provenance_replay_payload(*, manifest: str, project_root: Pat
 
 
 
+def runtime_worker_release_candidate_payload(*, provenance_manifest: str, out: str, package_format: str, review_target: str, project_root: Path) -> dict[str, Any]:
+    if package_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_release_candidate_format_invalid", f"Unsupported release candidate format: {package_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_release_candidate")
+    manifest_path = _safe_input_path(provenance_manifest, project_root, "runtime_worker_release_candidate_provenance_manifest")
+    manifest = _load_input_json(manifest_path, "runtime_worker_release_candidate_provenance_manifest")
+    verification = _verify_provenance_manifest(manifest, manifest_path, project_root, command="runtime worker-result provenance-verify")
+    if not verification["chain_valid"]:
+        raise RuntimeFoundationError("runtime_worker_release_candidate_provenance_not_ready", "Provenance manifest is not release-candidate ready: " + ", ".join(verification["rejection_reasons"]))
+    replay = runtime_worker_provenance_replay_payload(manifest=provenance_manifest, project_root=project_root)
+    included_artifacts = _release_candidate_included_artifacts(manifest, manifest_path, project_root)
+    package = {
+        "ok": True,
+        "command": "runtime worker-result release-candidate",
+        "kind": "runtime_worker_release_candidate_package",
+        "schema_version": SCHEMA_VERSION,
+        "marker": RELEASE_CANDIDATE_PACKAGE_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "review_target": str(review_target).strip() or "AgentOffice static release candidate",
+        "chain_root": manifest["chain_root"],
+        "terminal_artifact": manifest["terminal_artifact"],
+        "provenance_manifest_source": _artifact_source(manifest_path, project_root),
+        "included_artifacts": included_artifacts,
+        "artifact_count": len(included_artifacts),
+        "tamper_evident_replay_summary": _release_candidate_replay_summary(replay),
+        "archive_ready": bool(replay["chain_replay_ready"]),
+        "replay_ready": bool(replay["replay_ready"]),
+        "governance_ready": bool(replay["governance_ready"]),
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "validation_commands": _worker_validation_commands(),
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "package_format": package_format,
+        "written": True,
+    }
+    if package_format == "json":
+        _write_json(output_path, package)
+    else:
+        _write_text(output_path, _format_release_candidate_text(package))
+    return package
+
+
+def runtime_worker_external_review_handoff_payload(
+    *,
+    release_candidate: str,
+    out: str,
+    handoff_format: str,
+    review_target: str,
+    expected_marker: str,
+    attestation_import_path: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if handoff_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_external_review_handoff_format_invalid", f"Unsupported external review handoff format: {handoff_format}")
+    marker = str(expected_marker).strip()
+    if not marker:
+        raise RuntimeFoundationError("runtime_worker_external_review_handoff_marker_required", "Expected reviewer output marker is required.")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_external_review_handoff")
+    attestation_path = _safe_output_path(attestation_import_path, project_root, "runtime_worker_external_review_handoff_attestation")
+    package_path = _safe_input_path(release_candidate, project_root, "runtime_worker_external_review_handoff_release_candidate")
+    package = _load_input_json(package_path, "runtime_worker_external_review_handoff_release_candidate")
+    _validate_release_candidate_package(package, "runtime_worker_external_review_handoff_release_candidate")
+    target = str(review_target).strip() or str(package.get("review_target", "AgentOffice static release candidate"))
+    handoff = {
+        "ok": True,
+        "command": "runtime worker-result external-review-handoff",
+        "kind": "runtime_worker_external_review_handoff",
+        "schema_version": SCHEMA_VERSION,
+        "marker": EXTERNAL_REVIEW_HANDOFF_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "review_target": target,
+        "release_candidate_source": _artifact_source(package_path, project_root),
+        "artifact_chain_root": package["chain_root"],
+        "terminal_artifact": package["terminal_artifact"],
+        "included_evidence": list(package["included_artifacts"]),
+        "integrity_verification_instructions": [
+            f"Run: python3 -m agent_office runtime worker-result archive-verify --index <archive-index.json> --json",
+            f"Run: python3 -m agent_office runtime worker-result provenance-verify --manifest {package['provenance_manifest_source']['path']} --json",
+        ],
+        "replay_instructions": [
+            f"Run: python3 -m agent_office runtime worker-result provenance-replay --manifest {package['provenance_manifest_source']['path']} --json",
+            "Do not claim VPS command execution unless you actually ran those commands.",
+        ],
+        "known_safety_caveat": "External reviewer handoff is artifact-only; reviewer must not claim VPS validation unless they actually executed it.",
+        "expected_reviewer_output_marker": marker,
+        "attestation_import_path": _project_relative(attestation_path, project_root),
+        "archive_ready": bool(package["archive_ready"]),
+        "replay_ready": bool(package["replay_ready"]),
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "handoff_format": handoff_format,
+        "written": True,
+    }
+    if handoff_format == "json":
+        _write_json(output_path, handoff)
+    else:
+        _write_text(output_path, _format_external_review_handoff_text(handoff))
+    return handoff
+
+
+def runtime_worker_archive_index_payload(*, release_candidate: str, external_review_handoff: str, out: str, index_format: str, project_root: Path) -> dict[str, Any]:
+    if index_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_archive_index_format_invalid", f"Unsupported archive index format: {index_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_archive_index")
+    package_path = _safe_input_path(release_candidate, project_root, "runtime_worker_archive_index_release_candidate")
+    handoff_path = _safe_input_path(external_review_handoff, project_root, "runtime_worker_archive_index_external_review_handoff")
+    package = _load_input_json(package_path, "runtime_worker_archive_index_release_candidate")
+    handoff = _load_input_json(handoff_path, "runtime_worker_archive_index_external_review_handoff")
+    _validate_release_candidate_package(package, "runtime_worker_archive_index_release_candidate")
+    _validate_external_review_handoff(handoff, package, "runtime_worker_archive_index_external_review_handoff")
+    records = _archive_index_records(package_path, package, handoff_path, handoff, project_root)
+    archive_ready = all(record["archive_ready"] for record in records)
+    replay_ready = all(record["replay_ready"] for record in records)
+    index = {
+        "ok": True,
+        "command": "runtime worker-result archive-index",
+        "kind": "runtime_worker_evidence_archive_index",
+        "schema_version": SCHEMA_VERSION,
+        "marker": EVIDENCE_ARCHIVE_INDEX_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "required_roles": list(ARCHIVE_REQUIRED_ROLES),
+        "record_count": len(records),
+        "records": records,
+        "release_candidate_source": _artifact_source(package_path, project_root),
+        "external_review_handoff_source": _artifact_source(handoff_path, project_root),
+        "archive_ready": archive_ready,
+        "replay_ready": replay_ready,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "index_format": index_format,
+        "written": True,
+    }
+    if index_format == "json":
+        _write_json(output_path, index)
+    else:
+        _write_text(output_path, _format_archive_index_text(index))
+    return index
+
+
+def runtime_worker_archive_verify_payload(*, index: str, project_root: Path) -> dict[str, Any]:
+    index_path = _safe_input_path(index, project_root, "runtime_worker_archive_index")
+    index_payload = _load_input_json(index_path, "runtime_worker_archive_index")
+    return _verify_archive_index(index_payload, index_path, project_root)
+
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -1517,6 +1694,33 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"delivery_gate_pass: {str(payload['delivery_gate_pass']).lower()}")
         lines.append(f"recovery_status: {payload['recovery_status']}")
         lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+    if payload.get("kind") == "runtime_worker_release_candidate_package":
+        lines.append(f"review_target: {payload['review_target']}")
+        lines.append(f"chain_root: {payload['chain_root']}")
+        lines.append(f"terminal_artifact: {payload['terminal_artifact']}")
+        lines.append(f"artifact_count: {payload['artifact_count']}")
+        lines.append(f"archive_ready: {str(payload['archive_ready']).lower()}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_external_review_handoff":
+        lines.append(f"review_target: {payload['review_target']}")
+        lines.append(f"artifact_chain_root: {payload['artifact_chain_root']}")
+        lines.append(f"terminal_artifact: {payload['terminal_artifact']}")
+        lines.append(f"expected_reviewer_output_marker: {payload['expected_reviewer_output_marker']}")
+        lines.append(f"attestation_import_path: {payload['attestation_import_path']}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_evidence_archive_index":
+        lines.append(f"record_count: {payload['record_count']}")
+        lines.append(f"archive_ready: {str(payload['archive_ready']).lower()}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_evidence_archive_verification":
+        lines.append(f"archive_valid: {str(payload['archive_valid']).lower()}")
+        lines.append(f"archive_ready: {str(payload['archive_ready']).lower()}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append("recovery_guidance:")
+        lines.extend(f"  - {item}" for item in payload["recovery_guidance"])
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
@@ -2707,6 +2911,378 @@ def _format_worker_delivery_bundle_text(payload: dict[str, Any]) -> str:
     ]
     return "\n".join(lines)
 
+
+
+
+
+def _release_candidate_included_artifacts(manifest: dict[str, Any], manifest_path: Path, project_root: Path) -> list[dict[str, Any]]:
+    included: list[dict[str, Any]] = []
+    manifest_source = _artifact_source(manifest_path, project_root)
+    included.append({
+        "artifact_id": "provenance_manifest",
+        "role": "provenance_manifest",
+        "path": manifest_source["path"],
+        "sha256": manifest_source["sha256"],
+        "byte_count": manifest_source["bytes"],
+        "parent_artifact_ids": [],
+        "source_marker": PROVENANCE_MANIFEST_MARKER,
+        "archive_ready": True,
+        "replay_ready": True,
+    })
+    for artifact in manifest["artifacts"]:
+        artifact_path, reasons = _provenance_entry_path(artifact, project_root)
+        if artifact_path is None:
+            raise RuntimeFoundationError("runtime_worker_release_candidate_artifact_invalid", ", ".join(reasons))
+        payload = _load_input_json(artifact_path, f"runtime_worker_release_candidate_{artifact['role']}")
+        included.append({
+            "artifact_id": artifact["artifact_id"],
+            "role": artifact["role"],
+            "path": artifact["path"],
+            "sha256": artifact["sha256"],
+            "byte_count": artifact["byte_count"],
+            "parent_artifact_ids": list(artifact["parent_artifact_ids"]),
+            "source_marker": _payload_marker(payload),
+            "archive_ready": True,
+            "replay_ready": bool(artifact["replay_status"]),
+        })
+    return included
+
+
+def _release_candidate_replay_summary(replay: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "chain_replay_ready": bool(replay["chain_replay_ready"]),
+        "artifact_integrity_valid": bool(replay["artifact_integrity_valid"]),
+        "original_readiness": bool(replay["original_readiness"]),
+        "delivery_gate_pass": bool(replay["delivery_gate_pass"]),
+        "recovery_status": str(replay["recovery_status"]),
+        "rejection_reasons": list(replay["rejection_reasons"]),
+        "replay_ready": bool(replay["replay_ready"]),
+        "governance_ready": bool(replay["governance_ready"]),
+    }
+
+
+def _validate_release_candidate_package(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_release_candidate_package":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Release candidate package schema is invalid.")
+    if payload.get("marker") != RELEASE_CANDIDATE_PACKAGE_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "Release candidate package marker is missing.")
+    if payload.get("archive_ready") is not True or payload.get("replay_ready") is not True:
+        raise RuntimeFoundationError(f"{code_prefix}_not_ready", "Release candidate package is not archive/replay ready.")
+    _validate_static_refusal_predicates(payload, f"{code_prefix}")
+    if not isinstance(payload.get("included_artifacts"), list) or not payload["included_artifacts"]:
+        raise RuntimeFoundationError(f"{code_prefix}_artifacts_missing", "Release candidate package included artifacts are missing.")
+
+
+def _validate_external_review_handoff(payload: dict[str, Any], package: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_external_review_handoff":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "External review handoff schema is invalid.")
+    if payload.get("marker") != EXTERNAL_REVIEW_HANDOFF_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "External review handoff marker is missing.")
+    if payload.get("artifact_chain_root") != package.get("chain_root") or payload.get("terminal_artifact") != package.get("terminal_artifact"):
+        raise RuntimeFoundationError(f"{code_prefix}_chain_mismatch", "External review handoff does not match release candidate chain.")
+    if payload.get("archive_ready") is not True or payload.get("replay_ready") is not True:
+        raise RuntimeFoundationError(f"{code_prefix}_not_ready", "External review handoff is not archive/replay ready.")
+    _validate_static_refusal_predicates(payload, f"{code_prefix}")
+
+
+def _archive_index_records(package_path: Path, package: dict[str, Any], handoff_path: Path, handoff: dict[str, Any], project_root: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for artifact in package["included_artifacts"]:
+        if artifact["role"] == "provenance_manifest":
+            parents: list[str] = []
+        else:
+            parents = list(artifact.get("parent_artifact_ids", []))
+        records.append(_archive_record(
+            record_id=str(artifact["artifact_id"]),
+            role=str(artifact["role"]),
+            path=str(artifact["path"]),
+            sha256=str(artifact["sha256"]),
+            byte_count=int(artifact["byte_count"]),
+            parents=parents,
+            source_marker=str(artifact["source_marker"]),
+            archive_ready=bool(artifact["archive_ready"]),
+            replay_ready=bool(artifact["replay_ready"]),
+        ))
+    package_source = _artifact_source(package_path, project_root)
+    records.append(_archive_record(
+        record_id="release_candidate",
+        role="release_candidate",
+        path=package_source["path"],
+        sha256=package_source["sha256"],
+        byte_count=package_source["bytes"],
+        parents=["provenance_manifest", str(package["terminal_artifact"])],
+        source_marker=RELEASE_CANDIDATE_PACKAGE_MARKER,
+        archive_ready=bool(package["archive_ready"]),
+        replay_ready=bool(package["replay_ready"]),
+    ))
+    handoff_source = _artifact_source(handoff_path, project_root)
+    records.append(_archive_record(
+        record_id="external_review_handoff",
+        role="external_review_handoff",
+        path=handoff_source["path"],
+        sha256=handoff_source["sha256"],
+        byte_count=handoff_source["bytes"],
+        parents=["release_candidate"],
+        source_marker=EXTERNAL_REVIEW_HANDOFF_MARKER,
+        archive_ready=bool(handoff["archive_ready"]),
+        replay_ready=bool(handoff["replay_ready"]),
+    ))
+    return records
+
+
+def _archive_record(*, record_id: str, role: str, path: str, sha256: str, byte_count: int, parents: list[str], source_marker: str, archive_ready: bool, replay_ready: bool) -> dict[str, Any]:
+    return {
+        "record_id": record_id,
+        "role": role,
+        "path": path,
+        "sha256": sha256,
+        "byte_count": byte_count,
+        "parents": parents,
+        "source_marker": source_marker,
+        "archive_ready": archive_ready,
+        "replay_ready": replay_ready,
+    }
+
+
+def _verify_archive_index(index: dict[str, Any], index_path: Path, project_root: Path) -> dict[str, Any]:
+    reasons: list[str] = []
+    if index.get("schema_version") != SCHEMA_VERSION or index.get("kind") != "runtime_worker_evidence_archive_index":
+        reasons.append("archive_index_schema_invalid")
+    if index.get("marker") != EVIDENCE_ARCHIVE_INDEX_MARKER:
+        reasons.append("archive_index_marker_missing")
+    _append_static_refusal_reasons(index, "archive_index", reasons)
+    records = index.get("records")
+    if not isinstance(records, list) or not records:
+        records = []
+        reasons.append("archive_index_empty")
+    entries = [record for record in records if isinstance(record, dict)]
+    if len(entries) != len(records):
+        reasons.append("archive_record_invalid")
+    if index.get("record_count") != len(entries):
+        reasons.append("archive_record_count_mismatch")
+    record_ids = [str(record.get("record_id", "")) for record in entries]
+    roles = [str(record.get("role", "")) for record in entries]
+    for record_id in sorted({record_id for record_id in record_ids if record_ids.count(record_id) > 1}):
+        reasons.append(f"duplicate_record_id:{record_id}")
+    for role in ARCHIVE_REQUIRED_ROLES:
+        if role not in roles:
+            reasons.append(f"required_role_missing:{role}")
+    by_id = {str(record.get("record_id", "")): record for record in entries}
+    payloads: dict[str, dict[str, Any]] = {}
+    for record in entries:
+        record_id = str(record.get("record_id", ""))
+        role = str(record.get("role", "unknown"))
+        parents = record.get("parents")
+        if not isinstance(parents, list):
+            reasons.append(f"parents_invalid:{record_id or role}")
+            parents = []
+        for parent in parents:
+            if str(parent) not in by_id:
+                reasons.append(f"parent_missing:{record_id or role}:{parent}")
+        if record.get("archive_ready") is not True:
+            reasons.append(f"archive_ready_false:{record_id or role}")
+        if record.get("replay_ready") is not True:
+            reasons.append(f"replay_ready_false:{record_id or role}")
+        artifact_path, path_reasons = _archive_record_path(record, project_root)
+        reasons.extend(path_reasons)
+        if artifact_path is None:
+            continue
+        current = _artifact_source(artifact_path, project_root)
+        if record.get("sha256") != current["sha256"]:
+            reasons.append(f"sha256_mismatch:{record_id or role}")
+        if record.get("byte_count") != current["bytes"]:
+            reasons.append(f"byte_count_mismatch:{record_id or role}")
+        try:
+            payload = _load_input_json(artifact_path, f"runtime_worker_archive_{role}")
+        except RuntimeFoundationError:
+            reasons.append(f"artifact_json_invalid:{record_id or role}")
+            continue
+        payloads[record_id] = payload
+        if record.get("source_marker") != _payload_marker(payload):
+            reasons.append(f"source_marker_mismatch:{record_id or role}")
+        _append_static_refusal_reasons(payload, record_id or role, reasons)
+
+    package = payloads.get("release_candidate")
+    handoff = payloads.get("external_review_handoff")
+    if package:
+        _append_stale_package_reasons(package, by_id, project_root, reasons)
+    if package and handoff:
+        try:
+            _validate_release_candidate_package(package, "runtime_worker_archive_release_candidate")
+            _validate_external_review_handoff(handoff, package, "runtime_worker_archive_external_review_handoff")
+        except RuntimeFoundationError as exc:
+            reasons.append(exc.error_code)
+
+    unique_reasons = _dedupe_text(reasons)
+    archive_valid = not unique_reasons
+    archive_ready = archive_valid and bool(index.get("archive_ready")) and all(record.get("archive_ready") is True for record in entries)
+    replay_ready = archive_valid and bool(index.get("replay_ready")) and all(record.get("replay_ready") is True for record in entries)
+    return {
+        "ok": True,
+        "command": "runtime worker-result archive-verify",
+        "kind": "runtime_worker_evidence_archive_verification",
+        "schema_version": SCHEMA_VERSION,
+        "marker": EVIDENCE_ARCHIVE_VERIFY_MARKER,
+        "index_source": _artifact_source(index_path, project_root),
+        "archive_valid": archive_valid,
+        "archive_ready": archive_ready,
+        "replay_ready": replay_ready,
+        "record_count": len(entries),
+        "rejection_reasons": unique_reasons,
+        "recovery_guidance": _archive_recovery_guidance(unique_reasons),
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+    }
+
+
+def _archive_record_path(record: dict[str, Any], project_root: Path) -> tuple[Path | None, list[str]]:
+    role = str(record.get("record_id") or record.get("role") or "unknown")
+    raw_path = str(record.get("path", ""))
+    if not raw_path.strip():
+        return None, [f"artifact_path_missing:{role}"]
+    raw = Path(raw_path)
+    if any(part == ".." for part in raw.parts):
+        return None, [f"artifact_path_traversal:{role}"]
+    if any(part == ".env" for part in raw.parts):
+        return None, [f"artifact_dotenv_refused:{role}"]
+    root = project_root.resolve(strict=True)
+    candidate = raw if raw.is_absolute() else root / raw
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None, [f"artifact_outside_project:{role}"]
+    parent = candidate.parent.resolve(strict=False)
+    if parent != root and root not in parent.parents:
+        return None, [f"artifact_outside_project:{role}"]
+    if candidate.parent.exists() and candidate.parent.is_symlink():
+        return None, [f"artifact_parent_symlink:{role}"]
+    if not candidate.exists():
+        return None, [f"artifact_missing:{role}"]
+    if candidate.is_symlink():
+        return None, [f"artifact_symlink:{role}"]
+    if not candidate.is_file():
+        return None, [f"artifact_not_file:{role}"]
+    return candidate.resolve(strict=False), []
+
+
+def _append_stale_package_reasons(package: dict[str, Any], records_by_id: dict[str, dict[str, Any]], project_root: Path, reasons: list[str]) -> None:
+    for artifact in package.get("included_artifacts", []):
+        if not isinstance(artifact, dict):
+            reasons.append("stale_package:artifact_entry_invalid")
+            continue
+        record_id = str(artifact.get("artifact_id", ""))
+        record = records_by_id.get(record_id)
+        if not record:
+            reasons.append(f"stale_package:record_missing:{record_id}")
+            continue
+        artifact_path, path_reasons = _archive_record_path(record, project_root)
+        if artifact_path is None:
+            continue
+        current = _artifact_source(artifact_path, project_root)
+        if artifact.get("sha256") != current["sha256"] or artifact.get("byte_count") != current["bytes"]:
+            reasons.append(f"stale_package:{record_id}")
+
+
+def _payload_marker(payload: dict[str, Any]) -> str:
+    marker = payload.get("marker", payload.get("packet_marker", ""))
+    return str(marker)
+
+
+def _validate_static_refusal_predicates(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("invocation_allowed") is not False or payload.get("external_execution_refused") is not True:
+        raise RuntimeFoundationError(f"{code_prefix}_static_refusal_invalid", "Static refusal predicates are invalid.")
+    for key in ("provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if payload.get(key) is not False:
+            raise RuntimeFoundationError(f"{code_prefix}_{key}_not_false", f"{key} must be false.")
+
+
+def _append_static_refusal_reasons(payload: dict[str, Any], label: str, reasons: list[str]) -> None:
+    if payload.get("invocation_allowed") is not False:
+        reasons.append(f"invocation_not_refused:{label}")
+    if payload.get("external_execution_refused") is not True:
+        reasons.append(f"external_execution_not_refused:{label}")
+    for key in ("provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if payload.get(key) is not False:
+            reasons.append(f"{key}_not_false:{label}")
+
+
+def _archive_recovery_guidance(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No recovery required; evidence archive index is intact and replay-ready."]
+    guidance: list[str] = []
+    if any("missing" in reason for reason in reasons):
+        guidance.append("Restore or regenerate the missing package, handoff, or chain artifact, then regenerate the archive index.")
+    if any(reason.startswith(("sha256_mismatch:", "byte_count_mismatch:", "stale_package:")) for reason in reasons):
+        guidance.append("Regenerate the release candidate package and archive index from the current provenance manifest artifacts.")
+    if any(reason.startswith(("duplicate_record_id:", "parent_missing:", "required_role_missing:", "parents_invalid:")) for reason in reasons):
+        guidance.append("Regenerate the archive index with canonical record ids, required roles, and parent links.")
+    if any(reason.startswith(("archive_ready_false:", "replay_ready_false:", "invocation_not_refused:", "external_execution_not_refused:", "provider_calls_not_false:", "model_calls_not_false:", "browser_calls_not_false:", "shell_calls_not_false:")) for reason in reasons):
+        guidance.append("Restore archive/replay readiness and static refusal predicates before re-indexing.")
+    if not guidance:
+        guidance.append("Regenerate the archive index from verified release candidate and handoff artifacts.")
+    guidance.append("Rerun runtime worker-result archive-verify after recovery.")
+    return _dedupe_text(guidance)
+
+
+def _format_release_candidate_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Release Candidate Package",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"marker: {payload['marker']}",
+        f"generated_at: {payload['generated_at']}",
+        f"review_target: {payload['review_target']}",
+        f"chain_root: {payload['chain_root']}",
+        f"terminal_artifact: {payload['terminal_artifact']}",
+        f"archive_ready: {str(payload['archive_ready']).lower()}",
+        f"replay_ready: {str(payload['replay_ready']).lower()}",
+        "",
+        "## Included Artifacts",
+    ]
+    lines.extend(f"- {artifact['role']}: {artifact['path']} sha256={artifact['sha256']} bytes={artifact['byte_count']}" for artifact in payload["included_artifacts"])
+    return "\n".join(lines)
+
+
+def _format_external_review_handoff_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice External Review Handoff",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"marker: {payload['marker']}",
+        f"review_target: {payload['review_target']}",
+        f"artifact_chain_root: {payload['artifact_chain_root']}",
+        f"terminal_artifact: {payload['terminal_artifact']}",
+        f"expected_reviewer_output_marker: {payload['expected_reviewer_output_marker']}",
+        f"attestation_import_path: {payload['attestation_import_path']}",
+        "",
+        "## Integrity Verification Instructions",
+    ]
+    lines.extend(f"- {item}" for item in payload["integrity_verification_instructions"])
+    lines.extend(["", "## Replay Instructions"])
+    lines.extend(f"- {item}" for item in payload["replay_instructions"])
+    lines.extend(["", f"known_safety_caveat: {payload['known_safety_caveat']}"])
+    return "\n".join(lines)
+
+
+def _format_archive_index_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Evidence Archive Index",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"marker: {payload['marker']}",
+        f"record_count: {payload['record_count']}",
+        f"archive_ready: {str(payload['archive_ready']).lower()}",
+        f"replay_ready: {str(payload['replay_ready']).lower()}",
+        "",
+        "## Records",
+    ]
+    lines.extend(f"- {record['record_id']} ({record['role']}): {record['path']} sha256={record['sha256']} bytes={record['byte_count']} parents={','.join(record['parents']) or '-'}" for record in payload["records"])
+    return "\n".join(lines)
 
 
 

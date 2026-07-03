@@ -61,8 +61,11 @@ from .runtime_foundation import (
     runtime_status_payload,
     runtime_worker_adapter_payload,
     runtime_worker_audit_closure_payload,
+    runtime_worker_archive_index_payload,
+    runtime_worker_archive_verify_payload,
     runtime_worker_audit_replay_payload,
     runtime_worker_closure_evidence_payload,
+    runtime_worker_external_review_handoff_payload,
     runtime_worker_delivery_bundle_payload,
     runtime_worker_delivery_gate_payload,
     runtime_worker_gate_payload,
@@ -72,6 +75,7 @@ from .runtime_foundation import (
     runtime_worker_provenance_replay_payload,
     runtime_worker_provenance_verify_payload,
     runtime_worker_rejection_packet_payload,
+    runtime_worker_release_candidate_payload,
     runtime_worker_result_intake_payload,
     runtime_worker_result_replay_payload,
     runtime_worker_reviewer_attestation_payload,
@@ -1496,6 +1500,22 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             payload = runtime_worker_provenance_verify_payload(manifest=args.manifest, project_root=PROJECT_ROOT)
         elif action == "worker-result" and args.worker_result_action == "provenance-replay":
             payload = runtime_worker_provenance_replay_payload(manifest=args.manifest, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "release-candidate":
+            payload = runtime_worker_release_candidate_payload(provenance_manifest=args.provenance_manifest, out=args.out, package_format=args.format, review_target=args.review_target, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "external-review-handoff":
+            payload = runtime_worker_external_review_handoff_payload(
+                release_candidate=args.release_candidate,
+                out=args.out,
+                handoff_format=args.format,
+                review_target=args.review_target,
+                expected_marker=args.expected_marker,
+                attestation_import_path=args.attestation_import_path,
+                project_root=PROJECT_ROOT,
+            )
+        elif action == "worker-result" and args.worker_result_action == "archive-index":
+            payload = runtime_worker_archive_index_payload(release_candidate=args.release_candidate, external_review_handoff=args.external_review_handoff, out=args.out, index_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "archive-verify":
+            payload = runtime_worker_archive_verify_payload(index=args.index, project_root=PROJECT_ROOT)
         else:
             raise RuntimeFoundationError("runtime_unknown_action", "unknown runtime action")
     except RuntimeFoundationError as exc:
@@ -1516,6 +1536,8 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         return 0 if payload["chain_valid"] else 2
     if action == "worker-result" and getattr(args, "worker_result_action", None) == "provenance-replay":
         return 0 if payload["chain_replay_ready"] else 2
+    if action == "worker-result" and getattr(args, "worker_result_action", None) == "archive-verify":
+        return 0 if payload["archive_valid"] else 2
     return 0
 
 
@@ -1917,6 +1939,33 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_worker_provenance_replay.add_argument("--manifest", required=True, help="Project-local provenance manifest JSON path.")
     runtime_worker_provenance_replay.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_worker_provenance_replay.set_defaults(func=cmd_runtime)
+    runtime_worker_release_candidate = runtime_worker_result_sub.add_parser("release-candidate", help="Write a deterministic release candidate export package from a provenance manifest.")
+    runtime_worker_release_candidate.add_argument("--provenance-manifest", required=True, help="Project-local provenance manifest JSON path.")
+    runtime_worker_release_candidate.add_argument("--out", required=True, help="Project-local release candidate package output path.")
+    runtime_worker_release_candidate.add_argument("--format", choices=["json", "text"], default="json", help="Release candidate package output format. Default: json.")
+    runtime_worker_release_candidate.add_argument("--review-target", default="AgentOffice static release candidate", help="Review target recorded in the package.")
+    runtime_worker_release_candidate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_release_candidate.set_defaults(func=cmd_runtime)
+    runtime_worker_external_review_handoff = runtime_worker_result_sub.add_parser("external-review-handoff", help="Write a deterministic external reviewer handoff packet.")
+    runtime_worker_external_review_handoff.add_argument("--release-candidate", required=True, help="Project-local release candidate package JSON path.")
+    runtime_worker_external_review_handoff.add_argument("--out", required=True, help="Project-local external review handoff output path.")
+    runtime_worker_external_review_handoff.add_argument("--format", choices=["json", "text"], default="json", help="External review handoff output format. Default: json.")
+    runtime_worker_external_review_handoff.add_argument("--review-target", default="AgentOffice static release candidate", help="Review target recorded in the handoff.")
+    runtime_worker_external_review_handoff.add_argument("--expected-marker", required=True, help="Expected marker in the external reviewer output.")
+    runtime_worker_external_review_handoff.add_argument("--attestation-import-path", required=True, help="Project-local path where reviewer attestation import should be written later.")
+    runtime_worker_external_review_handoff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_external_review_handoff.set_defaults(func=cmd_runtime)
+    runtime_worker_archive_index = runtime_worker_result_sub.add_parser("archive-index", help="Write a deterministic evidence archive index.")
+    runtime_worker_archive_index.add_argument("--release-candidate", required=True, help="Project-local release candidate package JSON path.")
+    runtime_worker_archive_index.add_argument("--external-review-handoff", required=True, help="Project-local external review handoff JSON path.")
+    runtime_worker_archive_index.add_argument("--out", required=True, help="Project-local evidence archive index output path.")
+    runtime_worker_archive_index.add_argument("--format", choices=["json", "text"], default="json", help="Evidence archive index output format. Default: json.")
+    runtime_worker_archive_index.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_archive_index.set_defaults(func=cmd_runtime)
+    runtime_worker_archive_verify = runtime_worker_result_sub.add_parser("archive-verify", help="Verify an evidence archive index and referenced artifacts.")
+    runtime_worker_archive_verify.add_argument("--index", required=True, help="Project-local evidence archive index JSON path.")
+    runtime_worker_archive_verify.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_archive_verify.set_defaults(func=cmd_runtime)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
