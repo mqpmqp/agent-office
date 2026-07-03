@@ -15,6 +15,9 @@ WORKER_RESULT_STATUSES = {"completed", "failed", "skipped"}
 REVIEWER_ATTESTATION_PACKET_MARKER = "AGENT_OFFICE_REVIEWER_ATTESTATION_PACKET"
 CLOSURE_EVIDENCE_IMPORTED_MARKER = "AGENT_OFFICE_CLOSURE_EVIDENCE_IMPORTED"
 MERGE_READINESS_PACKET_MARKER = "AGENT_OFFICE_MERGE_READINESS_PACKET"
+DELIVERY_GATE_PACKET_MARKER = "AGENT_OFFICE_DELIVERY_GATE_PACKET"
+REJECTION_RECOVERY_PACKET_MARKER = "AGENT_OFFICE_REJECTION_RECOVERY_PACKET"
+AUDIT_PACKET_REPLAY_MARKER = "AGENT_OFFICE_AUDIT_PACKET_REPLAY"
 REVIEWER_ARTIFACT_SAFETY_CAVEAT = "artifact-based static review only; no provider/model/browser/shell execution is implied"
 WORKER_REFUSAL_REASON = "external worker prototype is contract-only; execution refused"
 TERMINAL_WORKSPACE_STATUSES = {"completed", "failed", "blocked"}
@@ -948,6 +951,8 @@ def runtime_worker_merge_readiness_payload(
     delivery_bundle_ready = bool(delivery.get("delivery_ready")) and bool(delivery.get("reviewer_ready"))
     reviewer_attestation_present = bool(attestation.get("reviewer_attestation_present"))
     closure_evidence_imported = bool(evidence.get("closure_evidence_imported"))
+    closure_evidence_gate_readable = bool(evidence.get("gate_readable"))
+    closure_evidence_audit_replayable = bool(evidence.get("audit_replayable"))
     safety_false = all(
         item is False
         for item in (
@@ -976,6 +981,8 @@ def runtime_worker_merge_readiness_payload(
         blockers.append("reviewer_verdict_not_pass")
     if not closure_evidence_imported:
         blockers.append("closure_evidence_not_imported")
+    if not closure_evidence_gate_readable:
+        blockers.append("closure_evidence_not_gate_readable")
     if not delivery_bundle_ready:
         blockers.append("delivery_bundle_not_ready")
     if delivery.get("invocation_packet_summary", {}).get("invocation_allowed") is not False:
@@ -1001,6 +1008,8 @@ def runtime_worker_merge_readiness_payload(
         "audit_closure_ready": audit_closure_ready,
         "reviewer_attestation_present": reviewer_attestation_present,
         "closure_evidence_imported": closure_evidence_imported,
+        "closure_evidence_gate_readable": closure_evidence_gate_readable,
+        "closure_evidence_audit_replayable": closure_evidence_audit_replayable,
         "delivery_bundle_ready": delivery_bundle_ready,
         "merge_readiness_ready": ready,
         "readiness_blocking_reasons": blockers,
@@ -1024,6 +1033,131 @@ def runtime_worker_merge_readiness_payload(
     else:
         _write_text(output_path, _format_merge_readiness_text(packet))
     return packet
+
+
+
+
+def runtime_worker_delivery_gate_payload(*, merge_readiness: str, out: str, gate_format: str, project_root: Path) -> dict[str, Any]:
+    if gate_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_delivery_gate_format_invalid", f"Unsupported delivery gate format: {gate_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_delivery_gate")
+    readiness_path = _safe_input_path(merge_readiness, project_root, "runtime_worker_delivery_gate_merge_readiness")
+    readiness = _load_input_json(readiness_path, "runtime_worker_delivery_gate_merge_readiness")
+    _validate_merge_readiness_packet(readiness, "runtime_worker_delivery_gate_merge_readiness")
+    reasons = _delivery_gate_rejection_reasons(readiness)
+    gate_pass = not reasons
+    packet = {
+        "ok": True,
+        "command": "runtime worker-result delivery-gate",
+        "kind": "runtime_worker_delivery_gate_summary",
+        "schema_version": SCHEMA_VERSION,
+        "marker": DELIVERY_GATE_PACKET_MARKER,
+        "merge_readiness_source": _artifact_source(readiness_path, project_root),
+        "baseline": str(readiness.get("baseline", "")),
+        "source_branch": str(readiness.get("source_branch", "")),
+        "source_head": str(readiness.get("source_head", "")),
+        "target_branch": str(readiness.get("target_branch", "")),
+        "reviewer_attestation_present": bool(readiness.get("reviewer_attestation_present")),
+        "closure_evidence_imported": bool(readiness.get("closure_evidence_imported")),
+        "closure_evidence_gate_readable": bool(readiness.get("closure_evidence_gate_readable")),
+        "external_worker_replay_ready": bool(readiness.get("external_worker_replay_ready")),
+        "audit_closure_ready": bool(readiness.get("audit_closure_ready")),
+        "delivery_bundle_ready": bool(readiness.get("delivery_bundle_ready")),
+        "merge_readiness_ready": bool(readiness.get("merge_readiness_ready")),
+        "invocation_allowed": bool(readiness.get("invocation_allowed")),
+        "external_execution_refused": bool(readiness.get("external_execution_refused")),
+        "provider_calls": bool(readiness.get("provider_calls")),
+        "model_calls": bool(readiness.get("model_calls")),
+        "browser_calls": bool(readiness.get("browser_calls")),
+        "shell_calls": bool(readiness.get("shell_calls")),
+        "delivery_gate_pass": gate_pass,
+        "gate_status": "pass" if gate_pass else "rejected",
+        "rejection_reasons": reasons,
+        "next_required_evidence": _next_required_evidence(reasons),
+        "recovery_guidance": _recovery_guidance(reasons),
+        "next_action": "safe delivery" if gate_pass else "recover required evidence",
+        "validation_commands": _worker_validation_commands(),
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "gate_format": gate_format,
+        "written": True,
+    }
+    if gate_format == "json":
+        _write_json(output_path, packet)
+    else:
+        _write_text(output_path, _format_delivery_gate_text(packet))
+    return packet
+
+
+def runtime_worker_rejection_packet_payload(*, delivery_gate: str, out: str, rejection_format: str, project_root: Path) -> dict[str, Any]:
+    if rejection_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_rejection_packet_format_invalid", f"Unsupported rejection packet format: {rejection_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_rejection_packet")
+    gate_path = _safe_input_path(delivery_gate, project_root, "runtime_worker_rejection_packet_delivery_gate")
+    gate = _load_input_json(gate_path, "runtime_worker_rejection_packet_delivery_gate")
+    _validate_delivery_gate_packet(gate, "runtime_worker_rejection_packet_delivery_gate")
+    rejected = not bool(gate.get("delivery_gate_pass"))
+    reasons = list(gate.get("rejection_reasons") or [])
+    packet = {
+        "ok": True,
+        "command": "runtime worker-result rejection-packet",
+        "kind": "runtime_worker_rejection_recovery_packet",
+        "schema_version": SCHEMA_VERSION,
+        "marker": REJECTION_RECOVERY_PACKET_MARKER,
+        "delivery_gate_source": _artifact_source(gate_path, project_root),
+        "original_readiness": bool(gate.get("delivery_gate_pass")),
+        "rejected": rejected,
+        "rejection_reasons": reasons,
+        "next_required_evidence": _next_required_evidence(reasons),
+        "recovery_guidance": _recovery_guidance(reasons),
+        "recovery_status": "blocked_until_evidence_fixed" if rejected else "not_required",
+        "rerun_command": "runtime worker-result delivery-gate after fixed closure evidence and merge-readiness are regenerated" if rejected else "none",
+        "replay_ready": True,
+        "governance_ready": not rejected,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "validation_commands": _worker_validation_commands(),
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "rejection_format": rejection_format,
+        "written": True,
+    }
+    if rejection_format == "json":
+        _write_json(output_path, packet)
+    else:
+        _write_text(output_path, _format_rejection_packet_text(packet))
+    return packet
+
+
+def runtime_worker_audit_replay_payload(*, packet: str, project_root: Path) -> dict[str, Any]:
+    packet_path = _safe_input_path(packet, project_root, "runtime_worker_audit_replay_packet")
+    source = _load_input_json(packet_path, "runtime_worker_audit_replay_packet")
+    summary = _audit_replay_summary(source)
+    return {
+        "ok": True,
+        "command": "runtime worker-result audit-replay",
+        "kind": "runtime_worker_audit_packet_replay",
+        "schema_version": SCHEMA_VERSION,
+        "marker": AUDIT_PACKET_REPLAY_MARKER,
+        "packet_source": _artifact_source(packet_path, project_root),
+        "packet_kind": str(source.get("kind", "")),
+        "original_readiness": summary["original_readiness"],
+        "rejection_reasons": summary["rejection_reasons"],
+        "recovery_status": summary["recovery_status"],
+        "replay_ready": summary["replay_ready"],
+        "governance_ready": summary["governance_ready"],
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+    }
 
 
 
@@ -1182,6 +1316,28 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"merge_readiness_ready: {str(payload['merge_readiness_ready']).lower()}")
         lines.append(f"next_action: {payload['next_action']}")
         lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_delivery_gate_summary":
+        lines.append(f"source_branch: {payload['source_branch']}")
+        lines.append(f"source_head: {payload['source_head']}")
+        lines.append(f"target_branch: {payload['target_branch']}")
+        lines.append(f"delivery_gate_pass: {str(payload['delivery_gate_pass']).lower()}")
+        lines.append(f"gate_status: {payload['gate_status']}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"next_action: {payload['next_action']}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_rejection_recovery_packet":
+        lines.append(f"rejected: {str(payload['rejected']).lower()}")
+        lines.append(f"original_readiness: {str(payload['original_readiness']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"recovery_status: {payload['recovery_status']}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_audit_packet_replay":
+        lines.append(f"packet_kind: {payload['packet_kind']}")
+        lines.append(f"original_readiness: {str(payload['original_readiness']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"recovery_status: {payload['recovery_status']}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"governance_ready: {str(payload['governance_ready']).lower()}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
@@ -2411,6 +2567,191 @@ def _validate_worker_delivery_bundle_for_merge(payload: dict[str, Any]) -> None:
     for key in ("worker_gate_summary", "invocation_packet_summary", "replay_summary", "audit_closure_summary"):
         if not isinstance(payload.get(key), dict):
             raise RuntimeFoundationError("runtime_worker_merge_readiness_delivery_bundle_invalid", f"Worker delivery bundle missing {key}.")
+
+
+
+def _validate_merge_readiness_packet(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_merge_readiness_packet":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Merge-readiness packet schema is invalid.")
+    if payload.get("marker") != MERGE_READINESS_PACKET_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "Merge-readiness packet marker is missing.")
+
+
+def _validate_delivery_gate_packet(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_delivery_gate_summary":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Delivery gate packet schema is invalid.")
+    if payload.get("marker") != DELIVERY_GATE_PACKET_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "Delivery gate packet marker is missing.")
+
+
+def _delivery_gate_rejection_reasons(readiness: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if not bool(readiness.get("reviewer_attestation_present")):
+        reasons.append("reviewer_attestation_missing")
+    if not bool(readiness.get("closure_evidence_imported")):
+        reasons.append("closure_evidence_not_imported")
+    if not bool(readiness.get("closure_evidence_gate_readable")):
+        reasons.append("closure_evidence_not_gate_readable")
+    if not bool(readiness.get("external_worker_replay_ready")):
+        reasons.append("external_worker_replay_not_ready")
+    if not bool(readiness.get("audit_closure_ready")):
+        reasons.append("audit_closure_not_ready")
+    if not bool(readiness.get("delivery_bundle_ready")):
+        reasons.append("delivery_bundle_not_ready")
+    if not bool(readiness.get("merge_readiness_ready")):
+        reasons.append("merge_readiness_not_ready")
+    if readiness.get("invocation_allowed") is not False:
+        reasons.append("invocation_not_refused")
+    if readiness.get("external_execution_refused") is not True:
+        reasons.append("external_execution_not_refused")
+    for key in ("provider_calls", "model_calls", "browser_calls", "shell_calls"):
+        if readiness.get(key) is not False:
+            reasons.append(f"{key}_not_false")
+    for reason in readiness.get("readiness_blocking_reasons") or []:
+        text = str(reason)
+        if text and text not in reasons:
+            reasons.append(text)
+    return reasons
+
+
+def _next_required_evidence(reasons: list[str]) -> list[str]:
+    evidence: list[str] = []
+    mapping = {
+        "reviewer_attestation_missing": "valid reviewer attestation packet",
+        "closure_evidence_not_imported": "fixed closure evidence import",
+        "closure_evidence_not_gate_readable": "gate-readable closure evidence",
+        "external_worker_replay_not_ready": "worker-result replay evidence",
+        "audit_closure_not_ready": "worker audit closure packet",
+        "delivery_bundle_not_ready": "worker delivery bundle",
+        "merge_readiness_not_ready": "regenerated merge-readiness packet",
+        "invocation_not_refused": "merge-readiness with invocation_allowed=false",
+        "external_execution_not_refused": "merge-readiness with external_execution_refused=true",
+        "provider_calls_not_false": "merge-readiness with provider_calls=false",
+        "model_calls_not_false": "merge-readiness with model_calls=false",
+        "browser_calls_not_false": "merge-readiness with browser_calls=false",
+        "shell_calls_not_false": "merge-readiness with shell_calls=false",
+    }
+    for reason in reasons:
+        item = mapping.get(reason, f"evidence resolving {reason}")
+        if item not in evidence:
+            evidence.append(item)
+    return evidence
+
+
+def _recovery_guidance(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No recovery required; proceed to safe delivery."]
+    guidance = [
+        "Inspect rejection_reasons.",
+        "Regenerate or re-import the required static evidence only.",
+        "Regenerate merge-readiness from the fixed artifacts.",
+        "Rerun runtime worker-result delivery-gate.",
+    ]
+    if any(reason.startswith(("provider_", "model_", "browser_", "shell_")) for reason in reasons):
+        guidance.insert(1, "Remove any call-flag true claim from the static packet before rerun.")
+    if "invocation_not_refused" in reasons or "external_execution_not_refused" in reasons:
+        guidance.insert(1, "Restore explicit external execution refusal predicates before rerun.")
+    return guidance
+
+
+def _audit_replay_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    kind = str(payload.get("kind", ""))
+    if kind == "runtime_worker_audit_closure_packet":
+        return {
+            "original_readiness": bool(payload.get("replay_ready")) and bool(payload.get("governance_ready")),
+            "rejection_reasons": [],
+            "recovery_status": "not_applicable",
+            "replay_ready": bool(payload.get("replay_ready")),
+            "governance_ready": bool(payload.get("governance_ready")),
+        }
+    if kind == "runtime_worker_merge_readiness_packet":
+        if payload.get("marker") != MERGE_READINESS_PACKET_MARKER:
+            raise RuntimeFoundationError("runtime_worker_audit_replay_packet_marker_missing", "Merge-readiness packet marker is missing.")
+        reasons = list(payload.get("readiness_blocking_reasons") or [])
+        ready = bool(payload.get("merge_readiness_ready"))
+        return {
+            "original_readiness": ready,
+            "rejection_reasons": reasons,
+            "recovery_status": "not_required" if ready else "needs_fixed_evidence",
+            "replay_ready": bool(payload.get("external_worker_replay_ready")),
+            "governance_ready": bool(payload.get("audit_closure_ready")) and bool(payload.get("delivery_bundle_ready")),
+        }
+    if kind == "runtime_worker_delivery_gate_summary":
+        if payload.get("marker") != DELIVERY_GATE_PACKET_MARKER:
+            raise RuntimeFoundationError("runtime_worker_audit_replay_packet_marker_missing", "Delivery gate packet marker is missing.")
+        ready = bool(payload.get("delivery_gate_pass"))
+        return {
+            "original_readiness": ready,
+            "rejection_reasons": list(payload.get("rejection_reasons") or []),
+            "recovery_status": "not_required" if ready else "recovery_required",
+            "replay_ready": True,
+            "governance_ready": ready,
+        }
+    if kind == "runtime_worker_rejection_recovery_packet":
+        if payload.get("marker") != REJECTION_RECOVERY_PACKET_MARKER:
+            raise RuntimeFoundationError("runtime_worker_audit_replay_packet_marker_missing", "Rejection recovery packet marker is missing.")
+        return {
+            "original_readiness": bool(payload.get("original_readiness")),
+            "rejection_reasons": list(payload.get("rejection_reasons") or []),
+            "recovery_status": str(payload.get("recovery_status", "")),
+            "replay_ready": bool(payload.get("replay_ready")),
+            "governance_ready": bool(payload.get("governance_ready")),
+        }
+    raise RuntimeFoundationError("runtime_worker_audit_replay_packet_invalid", "Unsupported audit replay packet kind.")
+
+
+def _format_delivery_gate_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Delivery Gate Summary",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"marker: {payload['marker']}",
+        f"source_branch: {payload['source_branch']}",
+        f"source_head: {payload['source_head']}",
+        f"target_branch: {payload['target_branch']}",
+        f"delivery_gate_pass: {str(payload['delivery_gate_pass']).lower()}",
+        f"gate_status: {payload['gate_status']}",
+        f"reviewer_attestation_present: {str(payload['reviewer_attestation_present']).lower()}",
+        f"closure_evidence_imported: {str(payload['closure_evidence_imported']).lower()}",
+        f"closure_evidence_gate_readable: {str(payload['closure_evidence_gate_readable']).lower()}",
+        f"external_worker_replay_ready: {str(payload['external_worker_replay_ready']).lower()}",
+        f"audit_closure_ready: {str(payload['audit_closure_ready']).lower()}",
+        f"delivery_bundle_ready: {str(payload['delivery_bundle_ready']).lower()}",
+        f"invocation_allowed: {str(payload['invocation_allowed']).lower()}",
+        f"external_execution_refused: {str(payload['external_execution_refused']).lower()}",
+        f"provider_calls: {str(payload['provider_calls']).lower()}",
+        f"model_calls: {str(payload['model_calls']).lower()}",
+        f"browser_calls: {str(payload['browser_calls']).lower()}",
+        f"shell_calls: {str(payload['shell_calls']).lower()}",
+        f"next_action: {payload['next_action']}",
+        f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}",
+        "",
+        "## Recovery Guidance",
+    ]
+    lines.extend(f"- {item}" for item in payload["recovery_guidance"])
+    return "\n".join(lines)
+
+
+def _format_rejection_packet_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AgentOffice Rejection Recovery Packet",
+        "",
+        f"schema_version: {payload['schema_version']}",
+        f"marker: {payload['marker']}",
+        f"rejected: {str(payload['rejected']).lower()}",
+        f"original_readiness: {str(payload['original_readiness']).lower()}",
+        f"recovery_status: {payload['recovery_status']}",
+        f"replay_ready: {str(payload['replay_ready']).lower()}",
+        f"governance_ready: {str(payload['governance_ready']).lower()}",
+        f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}",
+        "",
+        "## Next Required Evidence",
+    ]
+    lines.extend(f"- {item}" for item in payload["next_required_evidence"] or ["none"])
+    lines.extend(["", "## Recovery Guidance"])
+    lines.extend(f"- {item}" for item in payload["recovery_guidance"])
+    return "\n".join(lines)
+
 
 
 def _format_reviewer_attestation_text(payload: dict[str, Any]) -> str:

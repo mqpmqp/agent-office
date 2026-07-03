@@ -119,6 +119,40 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         ], root)
         self.assertEqual(delivery[0], 0, delivery[2])
 
+
+    def _prepare_merge_readiness(self, root: Path) -> Path:
+        self._prepare_worker_delivery_bundle(root)
+        base = root / ".ai" / "workspaces" / "demo"
+        reviewer_output = base / "reviewer-output.md"
+        reviewer_output.write_text(
+            "\n".join([
+                "# Static Reviewer Output",
+                "verdict: PASS",
+                "marker: R23_REVIEW_COMPLETE",
+                "review_type: artifact",
+                "review_caveat: artifact-only reviewer output",
+                "findings_summary: no blockers",
+                "reviewed_artifacts: .ai/workspaces/demo/worker-delivery-bundle.json",
+                "reviewed_bundle_summary: worker delivery bundle ready",
+                "safety_caveat: no provider/model/browser/shell execution",
+                "R23_REVIEW_COMPLETE",
+            ]),
+            encoding="utf-8",
+        )
+        attestation = run_cli([
+            "runtime", "worker-result", "reviewer-attestation", "--reviewer-artifact", ".ai/workspaces/demo/reviewer-output.md", "--marker", "R23_REVIEW_COMPLETE", "--out", ".ai/workspaces/demo/reviewer-attestation.json", "--json"
+        ], root)
+        self.assertEqual(attestation[0], 0, attestation[2])
+        closure = run_cli([
+            "runtime", "worker-result", "closure-evidence", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--out", ".ai/workspaces/demo/closure-evidence.json", "--json"
+        ], root)
+        self.assertEqual(closure[0], 0, closure[2])
+        merge = run_cli([
+            "runtime", "worker-result", "merge-readiness", "--delivery-bundle", ".ai/workspaces/demo/worker-delivery-bundle.json", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--closure-evidence", ".ai/workspaces/demo/closure-evidence.json", "--baseline", "base123", "--source-branch", "phase45/r23-r25", "--source-head", "head123", "--target-branch", "phase6/mainline", "--out", ".ai/workspaces/demo/merge-readiness.json", "--json"
+        ], root)
+        self.assertEqual(merge[0], 0, merge[2])
+        return base
+
     def test_init_json_positive_creates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1347,6 +1381,190 @@ class RuntimeFoundationCliTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 0)
                 self.assertIn("worker-result", stdout.getvalue())
                 self.assertEqual(stderr.getvalue(), "")
+
+
+    def test_worker_result_delivery_gate_audit_replay_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_merge_readiness(root)
+            gate_json = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/merge-readiness.json", "--out", ".ai/workspaces/demo/delivery-gate.json", "--json"
+            ], root)
+            gate_text = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/merge-readiness.json", "--out", ".ai/workspaces/demo/delivery-gate.txt", "--format", "text", "--json"
+            ], root)
+            replay_json = run_cli([
+                "runtime", "worker-result", "audit-replay", "--packet", ".ai/workspaces/demo/delivery-gate.json", "--json"
+            ], root)
+            replay_text = run_cli([
+                "runtime", "worker-result", "audit-replay", "--packet", ".ai/workspaces/demo/delivery-gate.json"
+            ], root)
+            gate_written = json.loads((base / "delivery-gate.json").read_text(encoding="utf-8"))
+            gate_text_body = (base / "delivery-gate.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(gate_json[0], 0, gate_json[2])
+        gate = json.loads(gate_json[1])
+        self.assertEqual(gate["kind"], "runtime_worker_delivery_gate_summary")
+        self.assertTrue(gate["delivery_gate_pass"])
+        self.assertEqual(gate["gate_status"], "pass")
+        self.assertEqual(gate["rejection_reasons"], [])
+        self.assertEqual(gate["next_action"], "safe delivery")
+        self.assertTrue(gate["reviewer_attestation_present"])
+        self.assertTrue(gate["closure_evidence_imported"])
+        self.assertTrue(gate["closure_evidence_gate_readable"])
+        self.assertTrue(gate["external_worker_replay_ready"])
+        self.assertTrue(gate["audit_closure_ready"])
+        self.assertTrue(gate["delivery_bundle_ready"])
+        self.assertFalse(gate["invocation_allowed"])
+        self.assertTrue(gate["external_execution_refused"])
+        self.assertFalse(gate["provider_calls"])
+        self.assertFalse(gate["model_calls"])
+        self.assertFalse(gate["browser_calls"])
+        self.assertFalse(gate["shell_calls"])
+        self.assertEqual(gate_written["marker"], "AGENT_OFFICE_DELIVERY_GATE_PACKET")
+        self.assertEqual(gate_text[0], 0, gate_text[2])
+        self.assertIn("delivery_gate_pass: true", gate_text_body)
+        self.assertEqual(replay_json[0], 0, replay_json[2])
+        replay = json.loads(replay_json[1])
+        self.assertEqual(replay["kind"], "runtime_worker_audit_packet_replay")
+        self.assertTrue(replay["original_readiness"])
+        self.assertEqual(replay["rejection_reasons"], [])
+        self.assertTrue(replay["replay_ready"])
+        self.assertTrue(replay["governance_ready"])
+        self.assertEqual(replay_text[0], 0, replay_text[2])
+        self.assertIn("original_readiness: true", replay_text[1])
+        self.assertNotIn("Traceback", gate_json[1] + gate_json[2] + gate_text[1] + gate_text[2] + replay_json[1] + replay_json[2] + replay_text[1] + replay_text[2])
+
+    def test_worker_result_delivery_gate_rejection_recovery_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_merge_readiness(root)
+            good = json.loads((base / "merge-readiness.json").read_text(encoding="utf-8"))
+            cases = [
+                ("missing-attestation.json", {"reviewer_attestation_present": False, "merge_readiness_ready": False}, "reviewer_attestation_missing"),
+                ("missing-closure.json", {"closure_evidence_imported": False, "merge_readiness_ready": False}, "closure_evidence_not_imported"),
+                ("invocation-allowed.json", {"invocation_allowed": True, "merge_readiness_ready": False}, "invocation_not_refused"),
+                ("execution-not-refused.json", {"external_execution_refused": False, "merge_readiness_ready": False}, "external_execution_not_refused"),
+                ("provider-call.json", {"provider_calls": True, "merge_readiness_ready": False}, "provider_calls_not_false"),
+                ("model-call.json", {"model_calls": True, "merge_readiness_ready": False}, "model_calls_not_false"),
+                ("browser-call.json", {"browser_calls": True, "merge_readiness_ready": False}, "browser_calls_not_false"),
+                ("shell-call.json", {"shell_calls": True, "merge_readiness_ready": False}, "shell_calls_not_false"),
+            ]
+            results = {}
+            for filename, updates, expected_reason in cases:
+                payload = dict(good)
+                payload.update(updates)
+                (base / filename).write_text(json.dumps(payload), encoding="utf-8")
+                results[expected_reason] = run_cli([
+                    "runtime", "worker-result", "delivery-gate", "--merge-readiness", f".ai/workspaces/demo/{filename}", "--out", f".ai/workspaces/demo/{filename}.gate.json", "--json"
+                ], root)
+            reject_gate = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/missing-closure.json", "--out", ".ai/workspaces/demo/rejected-delivery-gate.json", "--json"
+            ], root)
+            rejection = run_cli([
+                "runtime", "worker-result", "rejection-packet", "--delivery-gate", ".ai/workspaces/demo/rejected-delivery-gate.json", "--out", ".ai/workspaces/demo/rejection-packet.json", "--json"
+            ], root)
+            rejection_text = run_cli([
+                "runtime", "worker-result", "rejection-packet", "--delivery-gate", ".ai/workspaces/demo/rejected-delivery-gate.json", "--out", ".ai/workspaces/demo/rejection-packet.txt", "--format", "text", "--json"
+            ], root)
+            replay_rejection = run_cli([
+                "runtime", "worker-result", "audit-replay", "--packet", ".ai/workspaces/demo/rejection-packet.json", "--json"
+            ], root)
+            fixed_closure = run_cli([
+                "runtime", "worker-result", "closure-evidence", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--out", ".ai/workspaces/demo/fixed-closure-evidence.json", "--json"
+            ], root)
+            fixed_merge = run_cli([
+                "runtime", "worker-result", "merge-readiness", "--delivery-bundle", ".ai/workspaces/demo/worker-delivery-bundle.json", "--reviewer-attestation", ".ai/workspaces/demo/reviewer-attestation.json", "--closure-evidence", ".ai/workspaces/demo/fixed-closure-evidence.json", "--baseline", "base123", "--source-branch", "phase45/r23-r25", "--source-head", "head123", "--target-branch", "phase6/mainline", "--out", ".ai/workspaces/demo/fixed-merge-readiness.json", "--json"
+            ], root)
+            recovered_gate = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/fixed-merge-readiness.json", "--out", ".ai/workspaces/demo/recovered-delivery-gate.json", "--json"
+            ], root)
+            rejection_text_body = (base / "rejection-packet.txt").read_text(encoding="utf-8")
+
+        for expected_reason, result in results.items():
+            with self.subTest(expected_reason=expected_reason):
+                self.assertEqual(result[0], 0, result[2])
+                payload = json.loads(result[1])
+                self.assertFalse(payload["delivery_gate_pass"])
+                self.assertIn(expected_reason, payload["rejection_reasons"])
+                self.assertNotIn("Traceback", result[1] + result[2])
+        self.assertEqual(reject_gate[0], 0, reject_gate[2])
+        rejected = json.loads(reject_gate[1])
+        self.assertFalse(rejected["delivery_gate_pass"])
+        self.assertIn("closure_evidence_not_imported", rejected["rejection_reasons"])
+        self.assertEqual(rejection[0], 0, rejection[2])
+        rejection_payload = json.loads(rejection[1])
+        self.assertTrue(rejection_payload["rejected"])
+        self.assertIn("closure_evidence_not_imported", rejection_payload["rejection_reasons"])
+        self.assertIn("fixed closure evidence import", rejection_payload["next_required_evidence"])
+        self.assertEqual(rejection_payload["recovery_status"], "blocked_until_evidence_fixed")
+        self.assertEqual(rejection_text[0], 0, rejection_text[2])
+        self.assertIn("recovery_status", rejection_text_body)
+        self.assertEqual(replay_rejection[0], 0, replay_rejection[2])
+        replay = json.loads(replay_rejection[1])
+        self.assertFalse(replay["original_readiness"])
+        self.assertIn("closure_evidence_not_imported", replay["rejection_reasons"])
+        self.assertEqual(replay["recovery_status"], "blocked_until_evidence_fixed")
+        self.assertEqual(fixed_closure[0], 0, fixed_closure[2])
+        self.assertEqual(fixed_merge[0], 0, fixed_merge[2])
+        self.assertEqual(recovered_gate[0], 0, recovered_gate[2])
+        recovered = json.loads(recovered_gate[1])
+        self.assertTrue(recovered["delivery_gate_pass"])
+        self.assertEqual(recovered["rejection_reasons"], [])
+        combined = reject_gate[1] + reject_gate[2] + rejection[1] + rejection[2] + rejection_text[1] + rejection_text[2] + replay_rejection[1] + replay_rejection[2] + fixed_closure[1] + fixed_closure[2] + fixed_merge[1] + fixed_merge[2] + recovered_gate[1] + recovered_gate[2]
+        self.assertNotIn("Traceback", combined)
+
+    def test_worker_result_delivery_gate_replay_errors_and_help_are_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_merge_readiness(root)
+            bad_json = base / "bad-packet.json"
+            bad_json.write_text("{", encoding="utf-8")
+            empty = base / "empty-packet.json"
+            empty.write_text("", encoding="utf-8")
+            missing_marker_payload = json.loads((base / "merge-readiness.json").read_text(encoding="utf-8"))
+            missing_marker_payload.pop("marker")
+            (base / "missing-marker.json").write_text(json.dumps(missing_marker_payload), encoding="utf-8")
+            missing = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/missing.json", "--out", ".ai/workspaces/demo/gate.json", "--json"
+            ], root)
+            malformed = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/bad-packet.json", "--out", ".ai/workspaces/demo/gate.json", "--json"
+            ], root)
+            empty_result = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/empty-packet.json", "--out", ".ai/workspaces/demo/gate.json", "--json"
+            ], root)
+            missing_marker = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/missing-marker.json", "--out", ".ai/workspaces/demo/gate.json", "--json"
+            ], root)
+            traversal = run_cli([
+                "runtime", "worker-result", "delivery-gate", "--merge-readiness", ".ai/workspaces/demo/../merge-readiness.json", "--out", ".ai/workspaces/demo/gate.json", "--json"
+            ], root)
+            bad_replay = run_cli([
+                "runtime", "worker-result", "audit-replay", "--packet", ".ai/workspaces/demo/bad-packet.json", "--json"
+            ], root)
+
+        self.assertEqual(json.loads(missing[1])["error_code"], "runtime_worker_delivery_gate_merge_readiness_missing")
+        self.assertEqual(json.loads(malformed[1])["error_code"], "runtime_worker_delivery_gate_merge_readiness_invalid")
+        self.assertEqual(json.loads(empty_result[1])["error_code"], "runtime_worker_delivery_gate_merge_readiness_invalid")
+        self.assertEqual(json.loads(missing_marker[1])["error_code"], "runtime_worker_delivery_gate_merge_readiness_marker_missing")
+        self.assertEqual(json.loads(traversal[1])["error_code"], "runtime_worker_delivery_gate_merge_readiness_path_traversal")
+        self.assertEqual(json.loads(bad_replay[1])["error_code"], "runtime_worker_audit_replay_packet_invalid")
+        for argv in (
+            ["runtime", "worker-result", "delivery-gate", "--help"],
+            ["runtime", "worker-result", "rejection-packet", "--help"],
+            ["runtime", "worker-result", "audit-replay", "--help"],
+        ):
+            with self.subTest(argv=argv):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+                    cli.main(argv)
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn("worker-result", stdout.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
+        combined = missing[1] + missing[2] + malformed[1] + malformed[2] + empty_result[1] + empty_result[2] + missing_marker[1] + missing_marker[2] + traversal[1] + traversal[2] + bad_replay[1] + bad_replay[2]
+        self.assertNotIn("Traceback", combined)
 
     def test_external_worker_adapter_prototype_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
