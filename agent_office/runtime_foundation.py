@@ -25,6 +25,14 @@ RELEASE_CANDIDATE_PACKAGE_MARKER = "AGENT_OFFICE_RELEASE_CANDIDATE_PACKAGE"
 EXTERNAL_REVIEW_HANDOFF_MARKER = "AGENT_OFFICE_EXTERNAL_REVIEW_HANDOFF"
 EVIDENCE_ARCHIVE_INDEX_MARKER = "AGENT_OFFICE_EVIDENCE_ARCHIVE_INDEX"
 EVIDENCE_ARCHIVE_VERIFY_MARKER = "AGENT_OFFICE_EVIDENCE_ARCHIVE_VERIFY"
+EXTERNAL_REVIEW_ARCHIVE_IMPORT_MARKER = "AGENT_OFFICE_EXTERNAL_REVIEW_ARCHIVE_IMPORT"
+RELEASE_CLOSURE_BUNDLE_MARKER = "AGENT_OFFICE_RELEASE_CLOSURE_BUNDLE"
+ARCHIVE_REPLAY_VERIFICATION_MARKER = "AGENT_OFFICE_ARCHIVE_REPLAY_VERIFICATION"
+FINAL_DELIVERY_READINESS_MARKER = "AGENT_OFFICE_FINAL_DELIVERY_READINESS"
+FAILED_REVIEW_RECOVERY_MARKER = "AGENT_OFFICE_FAILED_REVIEW_RECOVERY_PACKET"
+COMPACT_ARCHIVE_INDEX_MARKER = "AGENT_OFFICE_COMPACT_EVIDENCE_ARCHIVE_INDEX"
+COMPACT_ARCHIVE_VERIFY_MARKER = "AGENT_OFFICE_COMPACT_EVIDENCE_ARCHIVE_VERIFY"
+RC_PROMOTION_GATE_MARKER = "AGENT_OFFICE_RC_PROMOTION_GATE"
 ARCHIVE_REQUIRED_ROLES = (
     "release_candidate",
     "provenance_manifest",
@@ -35,6 +43,12 @@ ARCHIVE_REQUIRED_ROLES = (
     "rejection_recovery",
     "audit_replay",
     "external_review_handoff",
+)
+COMPACT_ARCHIVE_REQUIRED_ROLES = ARCHIVE_REQUIRED_ROLES + (
+    "external_reviewer_import",
+    "release_closure",
+    "archive_replay",
+    "final_delivery_readiness",
 )
 PROVENANCE_REQUIRED_ROLE_ORDER = (
     "reviewer_attestation",
@@ -1492,6 +1506,501 @@ def runtime_worker_archive_verify_payload(*, index: str, project_root: Path) -> 
     return _verify_archive_index(index_payload, index_path, project_root)
 
 
+def runtime_worker_reviewer_archive_import_payload(
+    *,
+    reviewer_output: str,
+    archive_index: str,
+    expected_marker: str,
+    out: str,
+    import_format: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if import_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_reviewer_archive_import_format_invalid", f"Unsupported reviewer import format: {import_format}")
+    marker = str(expected_marker).strip()
+    if not marker:
+        raise RuntimeFoundationError("runtime_worker_reviewer_archive_import_marker_required", "Expected reviewer output marker is required.")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_reviewer_archive_import")
+    reviewer_path = _safe_input_path(reviewer_output, project_root, "runtime_worker_reviewer_archive_import_reviewer_output")
+    archive_path = _safe_input_path(archive_index, project_root, "runtime_worker_reviewer_archive_import_archive_index")
+    archive_payload = _load_input_json(archive_path, "runtime_worker_reviewer_archive_import_archive_index")
+    archive_verification = _verify_archive_index(archive_payload, archive_path, project_root)
+    if not archive_verification["archive_valid"]:
+        raise RuntimeFoundationError(
+            "runtime_worker_reviewer_archive_import_archive_not_ready",
+            "Evidence archive index is not ready for reviewer import: " + ", ".join(archive_verification["rejection_reasons"]),
+        )
+    parsed = _load_reviewer_artifact(reviewer_path, marker)
+    reviewer_source = _artifact_source(reviewer_path, project_root)
+    verdict = parsed["verdict"]
+    review_passed = verdict == "pass"
+    archive_record = _archive_record(
+        record_id="external_reviewer_import",
+        role="external_reviewer_import",
+        path=reviewer_source["path"],
+        sha256=reviewer_source["sha256"],
+        byte_count=reviewer_source["bytes"],
+        parents=["external_review_handoff"],
+        source_marker=parsed["marker"],
+        archive_ready=bool(archive_verification["archive_ready"]),
+        replay_ready=bool(archive_verification["replay_ready"] and review_passed),
+    )
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result reviewer-archive-import",
+        "kind": "runtime_worker_external_reviewer_archive_import",
+        "schema_version": SCHEMA_VERSION,
+        "marker": EXTERNAL_REVIEW_ARCHIVE_IMPORT_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "reviewer_output_source": reviewer_source,
+        "archive_index_source": _artifact_source(archive_path, project_root),
+        "review_verdict": verdict,
+        "review_marker": parsed["marker"],
+        "review_caveat": parsed["review_caveat"],
+        "findings_summary": parsed["findings_summary"],
+        "reviewed_artifact_chain": list(parsed["reviewed_artifacts"]),
+        "reviewed_bundle_summary": parsed["reviewed_bundle_summary"],
+        "safety_caveat": parsed["safety_caveat"],
+        "archive_import_record": archive_record,
+        "archive_verification_summary": _archive_verification_summary(archive_verification),
+        "archive_ready": bool(archive_verification["archive_ready"]),
+        "replay_ready": bool(archive_verification["replay_ready"] and review_passed),
+        "terminal_status": "review_passed" if review_passed else f"review_{verdict or 'missing'}",
+        "promotion_eligible": review_passed,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "import_format": import_format,
+        "written": True,
+    }
+    if import_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_reviewer_archive_import_text(payload))
+    return payload
+
+
+def runtime_worker_release_closure_payload(
+    *,
+    release_candidate: str,
+    external_review_handoff: str,
+    archive_index: str,
+    reviewer_import: str,
+    provenance_manifest: str,
+    out: str,
+    closure_format: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if closure_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_release_closure_format_invalid", f"Unsupported release closure format: {closure_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_release_closure")
+    package_path = _safe_input_path(release_candidate, project_root, "runtime_worker_release_closure_release_candidate")
+    handoff_path = _safe_input_path(external_review_handoff, project_root, "runtime_worker_release_closure_external_review_handoff")
+    archive_path = _safe_input_path(archive_index, project_root, "runtime_worker_release_closure_archive_index")
+    import_path = _safe_input_path(reviewer_import, project_root, "runtime_worker_release_closure_reviewer_import")
+    manifest_path = _safe_input_path(provenance_manifest, project_root, "runtime_worker_release_closure_provenance_manifest")
+    package = _load_input_json(package_path, "runtime_worker_release_closure_release_candidate")
+    handoff = _load_input_json(handoff_path, "runtime_worker_release_closure_external_review_handoff")
+    archive_payload = _load_input_json(archive_path, "runtime_worker_release_closure_archive_index")
+    import_payload = _load_input_json(import_path, "runtime_worker_release_closure_reviewer_import")
+    manifest = _load_input_json(manifest_path, "runtime_worker_release_closure_provenance_manifest")
+    _validate_release_candidate_package(package, "runtime_worker_release_closure_release_candidate")
+    _validate_external_review_handoff(handoff, package, "runtime_worker_release_closure_external_review_handoff")
+    _validate_external_reviewer_import(import_payload, "runtime_worker_release_closure_reviewer_import")
+    archive_verification = _verify_archive_index(archive_payload, archive_path, project_root)
+    provenance_verification = _verify_provenance_manifest(manifest, manifest_path, project_root, command="runtime worker-result provenance-verify")
+    reasons = _release_closure_reasons(package, handoff, archive_verification, import_payload, provenance_verification)
+    closure_ready = not reasons
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result release-closure",
+        "kind": "runtime_worker_release_closure_bundle",
+        "schema_version": SCHEMA_VERSION,
+        "marker": RELEASE_CLOSURE_BUNDLE_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "release_candidate_source": _artifact_source(package_path, project_root),
+        "external_review_handoff_source": _artifact_source(handoff_path, project_root),
+        "archive_index_source": _artifact_source(archive_path, project_root),
+        "reviewer_import_source": _artifact_source(import_path, project_root),
+        "provenance_manifest_source": _artifact_source(manifest_path, project_root),
+        "closure_status": "closed" if closure_ready else "blocked",
+        "review_verdict": import_payload["review_verdict"],
+        "review_marker": import_payload["review_marker"],
+        "expected_reviewer_output_marker": handoff["expected_reviewer_output_marker"],
+        "findings_summary": import_payload["findings_summary"],
+        "evidence_chain_status": {
+            "archive_valid": bool(archive_verification["archive_valid"]),
+            "archive_ready": bool(archive_verification["archive_ready"]),
+            "provenance_chain_valid": bool(provenance_verification["chain_valid"]),
+            "release_candidate_archive_ready": bool(package["archive_ready"]),
+        },
+        "replay_status": {
+            "archive_replay_ready": bool(archive_verification["replay_ready"]),
+            "provenance_replay_ready": bool(package["replay_ready"]),
+            "reviewer_import_replay_ready": bool(import_payload["replay_ready"]),
+        },
+        "safety_predicates": _static_refusal_predicate_summary([package, handoff, archive_payload, import_payload]),
+        "rejection_reasons": reasons,
+        "required_evidence": _closure_required_evidence(reasons),
+        "recovery_guidance": _release_closure_recovery_guidance(reasons),
+        "archive_ready": closure_ready,
+        "replay_ready": closure_ready,
+        "delivery_ready": closure_ready,
+        "promotion_ready": closure_ready,
+        "next_action": "generate final delivery readiness" if closure_ready else "run failed review recovery loop",
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "closure_format": closure_format,
+        "written": True,
+    }
+    if closure_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_release_closure_text(payload))
+    return payload
+
+
+def runtime_worker_archive_replay_verification_payload(
+    *,
+    archive_index: str,
+    release_candidate: str,
+    closure_bundle: str,
+    out: str,
+    replay_format: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if replay_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_archive_replay_format_invalid", f"Unsupported archive replay format: {replay_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_archive_replay")
+    archive_path = _safe_input_path(archive_index, project_root, "runtime_worker_archive_replay_archive_index")
+    package_path = _safe_input_path(release_candidate, project_root, "runtime_worker_archive_replay_release_candidate")
+    closure_path = _safe_input_path(closure_bundle, project_root, "runtime_worker_archive_replay_closure_bundle")
+    archive_payload = _load_input_json(archive_path, "runtime_worker_archive_replay_archive_index")
+    package = _load_input_json(package_path, "runtime_worker_archive_replay_release_candidate")
+    closure = _load_input_json(closure_path, "runtime_worker_archive_replay_closure_bundle")
+    archive_verification = _verify_archive_index(archive_payload, archive_path, project_root)
+    reasons = list(archive_verification["rejection_reasons"])
+    try:
+        _validate_release_candidate_package(package, "runtime_worker_archive_replay_release_candidate")
+    except RuntimeFoundationError as exc:
+        reasons.append(exc.error_code)
+    try:
+        _validate_release_closure_bundle(closure, "runtime_worker_archive_replay_closure_bundle")
+    except RuntimeFoundationError as exc:
+        reasons.append(exc.error_code)
+    package_source = _artifact_source(package_path, project_root)
+    if archive_payload.get("release_candidate_source", {}).get("sha256") != package_source["sha256"]:
+        reasons.append("release_candidate_source_mismatch")
+    if closure.get("closure_status") != "closed":
+        reasons.append("release_closure_not_closed")
+    _append_static_refusal_reasons(package, "release_candidate", reasons)
+    _append_static_refusal_reasons(closure, "release_closure", reasons)
+    reasons = _dedupe_text(reasons)
+    valid = not reasons
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result archive-replay",
+        "kind": "runtime_worker_archive_replay_verification",
+        "schema_version": SCHEMA_VERSION,
+        "marker": ARCHIVE_REPLAY_VERIFICATION_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "archive_index_source": _artifact_source(archive_path, project_root),
+        "release_candidate_source": package_source,
+        "release_closure_source": _artifact_source(closure_path, project_root),
+        "archive_replay_valid": valid,
+        "archive_ready": valid and bool(archive_verification["archive_ready"]) and bool(closure.get("archive_ready")),
+        "replay_ready": valid and bool(archive_verification["replay_ready"]) and bool(closure.get("replay_ready")),
+        "record_count": int(archive_verification["record_count"]),
+        "closure_status": str(closure.get("closure_status", "unknown")),
+        "review_verdict": str(closure.get("review_verdict", "unknown")),
+        "rejection_reasons": reasons,
+        "recovery_guidance": _archive_replay_recovery_guidance(reasons),
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "replay_format": replay_format,
+        "written": True,
+    }
+    if replay_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_archive_replay_text(payload))
+    return payload
+
+
+def runtime_worker_final_delivery_readiness_payload(*, closure_bundle: str, archive_replay: str, out: str, readiness_format: str, project_root: Path) -> dict[str, Any]:
+    if readiness_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_final_delivery_readiness_format_invalid", f"Unsupported final delivery readiness format: {readiness_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_final_delivery_readiness")
+    closure_path = _safe_input_path(closure_bundle, project_root, "runtime_worker_final_delivery_readiness_closure_bundle")
+    replay_path = _safe_input_path(archive_replay, project_root, "runtime_worker_final_delivery_readiness_archive_replay")
+    closure = _load_input_json(closure_path, "runtime_worker_final_delivery_readiness_closure_bundle")
+    replay = _load_input_json(replay_path, "runtime_worker_final_delivery_readiness_archive_replay")
+    reasons: list[str] = []
+    try:
+        _validate_release_closure_bundle(closure, "runtime_worker_final_delivery_readiness_closure_bundle")
+    except RuntimeFoundationError as exc:
+        reasons.append(exc.error_code)
+    try:
+        _validate_archive_replay_verification(replay, "runtime_worker_final_delivery_readiness_archive_replay")
+    except RuntimeFoundationError as exc:
+        reasons.append(exc.error_code)
+    if closure.get("closure_status") != "closed":
+        reasons.append("release_closure_not_closed")
+    if str(closure.get("review_verdict", "")).lower() != "pass":
+        reasons.append(f"reviewer_verdict_not_pass:{closure.get('review_verdict', 'missing')}")
+    if replay.get("archive_replay_valid") is not True:
+        reasons.append("archive_replay_not_valid")
+    if replay.get("archive_ready") is not True:
+        reasons.append("archive_not_ready")
+    if replay.get("replay_ready") is not True:
+        reasons.append("archive_replay_not_ready")
+    _append_static_refusal_reasons(closure, "release_closure", reasons)
+    _append_static_refusal_reasons(replay, "archive_replay", reasons)
+    reasons = _dedupe_text(reasons)
+    ready = not reasons
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result final-readiness",
+        "kind": "runtime_worker_final_delivery_readiness_packet",
+        "schema_version": SCHEMA_VERSION,
+        "marker": FINAL_DELIVERY_READINESS_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "release_closure_source": _artifact_source(closure_path, project_root),
+        "archive_replay_source": _artifact_source(replay_path, project_root),
+        "delivery_ready": ready,
+        "promotion_ready": ready,
+        "review_verdict": str(closure.get("review_verdict", "unknown")),
+        "closure_status": str(closure.get("closure_status", "unknown")),
+        "rejection_reasons": reasons,
+        "required_evidence": _final_readiness_required_evidence(reasons),
+        "recovery_guidance": _final_readiness_recovery_guidance(reasons),
+        "next_action": "run release candidate promotion gate" if ready else "recover failed review or evidence chain",
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "readiness_format": readiness_format,
+        "written": True,
+    }
+    if readiness_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_final_readiness_text(payload))
+    return payload
+
+
+def runtime_worker_failed_review_recovery_payload(*, closure_bundle: str, out: str, recovery_format: str, project_root: Path) -> dict[str, Any]:
+    if recovery_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_failed_review_recovery_format_invalid", f"Unsupported review recovery format: {recovery_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_failed_review_recovery")
+    closure_path = _safe_input_path(closure_bundle, project_root, "runtime_worker_failed_review_recovery_closure_bundle")
+    closure = _load_input_json(closure_path, "runtime_worker_failed_review_recovery_closure_bundle")
+    try:
+        _validate_release_closure_bundle(closure, "runtime_worker_failed_review_recovery_closure_bundle")
+        reasons = list(closure.get("rejection_reasons", []))
+    except RuntimeFoundationError as exc:
+        reasons = [exc.error_code]
+    recovery_required = bool(reasons) or closure.get("closure_status") != "closed"
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result review-recovery",
+        "kind": "runtime_worker_failed_review_recovery_packet",
+        "schema_version": SCHEMA_VERSION,
+        "marker": FAILED_REVIEW_RECOVERY_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "release_closure_source": _artifact_source(closure_path, project_root),
+        "original_closure_status": str(closure.get("closure_status", "unknown")),
+        "original_review_verdict": str(closure.get("review_verdict", "unknown")),
+        "recovery_required": recovery_required,
+        "recovery_status": "blocked_until_review_or_evidence_fixed" if recovery_required else "not_required",
+        "rejection_reasons": _dedupe_text(reasons),
+        "required_evidence": _closure_required_evidence(reasons),
+        "recovery_path": [
+            "Import fixed external reviewer output with the expected marker and verdict PASS.",
+            "Regenerate release-closure from the fixed reviewer import and current evidence archive.",
+            "Rerun archive-replay and final-readiness.",
+            "Run compact-archive, compact-verify, and rc-promotion-gate after readiness passes.",
+        ] if recovery_required else ["No recovery required; release closure is already closed."],
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "recovery_format": recovery_format,
+        "written": True,
+    }
+    if recovery_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_review_recovery_text(payload))
+    return payload
+
+
+def runtime_worker_compact_archive_payload(
+    *,
+    archive_index: str,
+    release_closure: str,
+    archive_replay: str,
+    final_readiness: str,
+    out: str,
+    compact_format: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if compact_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_compact_archive_format_invalid", f"Unsupported compact archive format: {compact_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_compact_archive")
+    archive_path = _safe_input_path(archive_index, project_root, "runtime_worker_compact_archive_archive_index")
+    closure_path = _safe_input_path(release_closure, project_root, "runtime_worker_compact_archive_release_closure")
+    replay_path = _safe_input_path(archive_replay, project_root, "runtime_worker_compact_archive_archive_replay")
+    readiness_path = _safe_input_path(final_readiness, project_root, "runtime_worker_compact_archive_final_readiness")
+    archive_payload = _load_input_json(archive_path, "runtime_worker_compact_archive_archive_index")
+    closure = _load_input_json(closure_path, "runtime_worker_compact_archive_release_closure")
+    replay = _load_input_json(replay_path, "runtime_worker_compact_archive_archive_replay")
+    readiness = _load_input_json(readiness_path, "runtime_worker_compact_archive_final_readiness")
+    _validate_release_closure_bundle(closure, "runtime_worker_compact_archive_release_closure")
+    _validate_archive_replay_verification(replay, "runtime_worker_compact_archive_archive_replay")
+    _validate_final_delivery_readiness(readiness, "runtime_worker_compact_archive_final_readiness")
+    records = _compact_archive_records(archive_payload, closure, closure_path, replay, replay_path, readiness, readiness_path, project_root)
+    archive_ready = all(record["archive_ready"] is True for record in records)
+    replay_ready = all(record["replay_ready"] is True for record in records)
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result compact-archive",
+        "kind": "runtime_worker_compact_evidence_archive_index",
+        "schema_version": SCHEMA_VERSION,
+        "marker": COMPACT_ARCHIVE_INDEX_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "required_roles": list(COMPACT_ARCHIVE_REQUIRED_ROLES),
+        "record_count": len(records),
+        "records": records,
+        "archive_index_source": _artifact_source(archive_path, project_root),
+        "release_closure_source": _artifact_source(closure_path, project_root),
+        "archive_replay_source": _artifact_source(replay_path, project_root),
+        "final_readiness_source": _artifact_source(readiness_path, project_root),
+        "archive_ready": archive_ready,
+        "replay_ready": replay_ready,
+        "terminal_status": "ready" if archive_ready and replay_ready and readiness.get("delivery_ready") is True else "blocked",
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "compact_format": compact_format,
+        "written": True,
+    }
+    if compact_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_compact_archive_text(payload))
+    return payload
+
+
+def runtime_worker_compact_archive_verify_payload(*, compact_index: str, project_root: Path) -> dict[str, Any]:
+    compact_path = _safe_input_path(compact_index, project_root, "runtime_worker_compact_archive_index")
+    compact_payload = _load_input_json(compact_path, "runtime_worker_compact_archive_index")
+    return _verify_compact_archive_index(compact_payload, compact_path, project_root)
+
+
+def runtime_worker_rc_promotion_gate_payload(*, final_readiness: str, compact_index: str, release_closure: str, out: str, gate_format: str, project_root: Path) -> dict[str, Any]:
+    if gate_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_rc_promotion_gate_format_invalid", f"Unsupported promotion gate format: {gate_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_rc_promotion_gate")
+    readiness_path = _safe_input_path(final_readiness, project_root, "runtime_worker_rc_promotion_gate_final_readiness")
+    compact_path = _safe_input_path(compact_index, project_root, "runtime_worker_rc_promotion_gate_compact_index")
+    closure_path = _safe_input_path(release_closure, project_root, "runtime_worker_rc_promotion_gate_release_closure")
+    readiness = _load_input_json(readiness_path, "runtime_worker_rc_promotion_gate_final_readiness")
+    compact = _load_input_json(compact_path, "runtime_worker_rc_promotion_gate_compact_index")
+    closure = _load_input_json(closure_path, "runtime_worker_rc_promotion_gate_release_closure")
+    compact_verification = _verify_compact_archive_index(compact, compact_path, project_root)
+    reasons = list(compact_verification["rejection_reasons"])
+    try:
+        _validate_final_delivery_readiness(readiness, "runtime_worker_rc_promotion_gate_final_readiness")
+    except RuntimeFoundationError as exc:
+        reasons.append(exc.error_code)
+    try:
+        _validate_release_closure_bundle(closure, "runtime_worker_rc_promotion_gate_release_closure")
+    except RuntimeFoundationError as exc:
+        reasons.append(exc.error_code)
+    if readiness.get("delivery_ready") is not True:
+        reasons.append("final_delivery_not_ready")
+    if readiness.get("promotion_ready") is not True:
+        reasons.append("final_promotion_not_ready")
+    if compact_verification.get("compact_valid") is not True:
+        reasons.append("compact_archive_not_valid")
+    if compact_verification.get("archive_ready") is not True:
+        reasons.append("compact_archive_not_ready")
+    if compact_verification.get("replay_ready") is not True:
+        reasons.append("compact_replay_not_ready")
+    if closure.get("closure_status") != "closed":
+        reasons.append("release_closure_not_closed")
+    _append_static_refusal_reasons(readiness, "final_readiness", reasons)
+    _append_static_refusal_reasons(compact, "compact_archive", reasons)
+    _append_static_refusal_reasons(closure, "release_closure", reasons)
+    reasons = _dedupe_text(reasons)
+    promotion_ready = not reasons
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result rc-promotion-gate",
+        "kind": "runtime_worker_release_candidate_promotion_gate",
+        "schema_version": SCHEMA_VERSION,
+        "marker": RC_PROMOTION_GATE_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "final_readiness_source": _artifact_source(readiness_path, project_root),
+        "compact_archive_source": _artifact_source(compact_path, project_root),
+        "release_closure_source": _artifact_source(closure_path, project_root),
+        "promotion_ready": promotion_ready,
+        "delivery_ready": promotion_ready,
+        "rejection_reasons": reasons,
+        "recovery_guidance": _promotion_recovery_guidance(reasons),
+        "next_action": "static promotion packet ready; no release, tag, or default branch change executed" if promotion_ready else "recover final readiness and compact archive evidence",
+        "real_release_executed": False,
+        "tag_created": False,
+        "default_branch_changed": False,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "gate_format": gate_format,
+        "written": True,
+    }
+    if gate_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_promotion_gate_text(payload))
+    return payload
+
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -1721,6 +2230,57 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
         lines.append("recovery_guidance:")
         lines.extend(f"  - {item}" for item in payload["recovery_guidance"])
+    if payload.get("kind") == "runtime_worker_external_reviewer_archive_import":
+        lines.append(f"review_verdict: {payload['review_verdict']}")
+        lines.append(f"review_marker: {payload['review_marker']}")
+        lines.append(f"archive_ready: {str(payload['archive_ready']).lower()}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"terminal_status: {payload['terminal_status']}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_release_closure_bundle":
+        lines.append(f"closure_status: {payload['closure_status']}")
+        lines.append(f"review_verdict: {payload['review_verdict']}")
+        lines.append(f"delivery_ready: {str(payload['delivery_ready']).lower()}")
+        lines.append(f"promotion_ready: {str(payload['promotion_ready']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"next_action: {payload['next_action']}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_archive_replay_verification":
+        lines.append(f"archive_replay_valid: {str(payload['archive_replay_valid']).lower()}")
+        lines.append(f"archive_ready: {str(payload['archive_ready']).lower()}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_final_delivery_readiness_packet":
+        lines.append(f"delivery_ready: {str(payload['delivery_ready']).lower()}")
+        lines.append(f"promotion_ready: {str(payload['promotion_ready']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"next_action: {payload['next_action']}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_failed_review_recovery_packet":
+        lines.append(f"recovery_required: {str(payload['recovery_required']).lower()}")
+        lines.append(f"recovery_status: {payload['recovery_status']}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_compact_evidence_archive_index":
+        lines.append(f"record_count: {payload['record_count']}")
+        lines.append(f"archive_ready: {str(payload['archive_ready']).lower()}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"terminal_status: {payload['terminal_status']}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_compact_evidence_archive_verification":
+        lines.append(f"compact_valid: {str(payload['compact_valid']).lower()}")
+        lines.append(f"archive_ready: {str(payload['archive_ready']).lower()}")
+        lines.append(f"replay_ready: {str(payload['replay_ready']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append("recovery_guidance:")
+        lines.extend(f"  - {item}" for item in payload["recovery_guidance"])
+    if payload.get("kind") == "runtime_worker_release_candidate_promotion_gate":
+        lines.append(f"promotion_ready: {str(payload['promotion_ready']).lower()}")
+        lines.append(f"delivery_ready: {str(payload['delivery_ready']).lower()}")
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+        lines.append(f"next_action: {payload['next_action']}")
+        lines.append(f"output_path: {payload['output_path']}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
 
@@ -3284,6 +3844,393 @@ def _format_archive_index_text(payload: dict[str, Any]) -> str:
     lines.extend(f"- {record['record_id']} ({record['role']}): {record['path']} sha256={record['sha256']} bytes={record['byte_count']} parents={','.join(record['parents']) or '-'}" for record in payload["records"])
     return "\n".join(lines)
 
+
+def _format_reviewer_archive_import_text(payload: dict[str, Any]) -> str:
+    return _format_release_loop_text(
+        "AgentOffice External Reviewer Archive Import",
+        payload,
+        ["marker", "review_verdict", "review_marker", "archive_ready", "replay_ready", "terminal_status", "output_path"],
+    )
+
+
+def _format_release_closure_text(payload: dict[str, Any]) -> str:
+    return _format_release_loop_text(
+        "AgentOffice Release Closure Bundle",
+        payload,
+        ["marker", "closure_status", "review_verdict", "delivery_ready", "promotion_ready", "next_action", "output_path"],
+    )
+
+
+def _format_archive_replay_text(payload: dict[str, Any]) -> str:
+    return _format_release_loop_text(
+        "AgentOffice Archive Replay Verification",
+        payload,
+        ["marker", "archive_replay_valid", "archive_ready", "replay_ready", "closure_status", "review_verdict", "output_path"],
+    )
+
+
+def _format_final_readiness_text(payload: dict[str, Any]) -> str:
+    return _format_release_loop_text(
+        "AgentOffice Final Delivery Readiness",
+        payload,
+        ["marker", "delivery_ready", "promotion_ready", "review_verdict", "closure_status", "next_action", "output_path"],
+    )
+
+
+def _format_review_recovery_text(payload: dict[str, Any]) -> str:
+    return _format_release_loop_text(
+        "AgentOffice Failed Review Recovery",
+        payload,
+        ["marker", "recovery_required", "recovery_status", "original_review_verdict", "original_closure_status", "output_path"],
+    )
+
+
+def _format_compact_archive_text(payload: dict[str, Any]) -> str:
+    lines = _format_release_loop_lines(
+        "AgentOffice Compact Evidence Archive Index",
+        payload,
+        ["marker", "record_count", "archive_ready", "replay_ready", "terminal_status", "output_path"],
+    )
+    lines.extend(["", "## Records"])
+    lines.extend(f"- {record['record_id']} ({record['role']}): {record['path']} sha256={record['sha256']} bytes={record['byte_count']} parents={','.join(record['parents']) or '-'} terminal_status={record['terminal_status']}" for record in payload["records"])
+    return "\n".join(lines)
+
+
+def _format_promotion_gate_text(payload: dict[str, Any]) -> str:
+    return _format_release_loop_text(
+        "AgentOffice Release Candidate Promotion Gate",
+        payload,
+        ["marker", "promotion_ready", "delivery_ready", "next_action", "real_release_executed", "tag_created", "default_branch_changed", "output_path"],
+    )
+
+
+def _format_release_loop_text(title: str, payload: dict[str, Any], keys: list[str]) -> str:
+    return "\n".join(_format_release_loop_lines(title, payload, keys))
+
+
+def _format_release_loop_lines(title: str, payload: dict[str, Any], keys: list[str]) -> list[str]:
+    lines = [f"# {title}", "", f"schema_version: {payload['schema_version']}"]
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            value = str(value).lower()
+        lines.append(f"{key}: {value}")
+    if "rejection_reasons" in payload:
+        lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
+    if "recovery_guidance" in payload:
+        lines.append("recovery_guidance:")
+        lines.extend(f"- {item}" for item in payload["recovery_guidance"])
+    return lines
+
+
+def _validate_external_reviewer_import(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_external_reviewer_archive_import":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "External reviewer archive import schema is invalid.")
+    if payload.get("marker") != EXTERNAL_REVIEW_ARCHIVE_IMPORT_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "External reviewer archive import marker is missing.")
+    if not str(payload.get("review_verdict", "")).strip():
+        raise RuntimeFoundationError(f"{code_prefix}_verdict_missing", "External reviewer import verdict is missing.")
+    if not isinstance(payload.get("archive_import_record"), dict):
+        raise RuntimeFoundationError(f"{code_prefix}_record_missing", "External reviewer import record is missing.")
+    _validate_static_refusal_predicates(payload, code_prefix)
+
+
+def _validate_release_closure_bundle(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_release_closure_bundle":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Release closure bundle schema is invalid.")
+    if payload.get("marker") != RELEASE_CLOSURE_BUNDLE_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "Release closure bundle marker is missing.")
+    _validate_static_refusal_predicates(payload, code_prefix)
+
+
+def _validate_archive_replay_verification(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_archive_replay_verification":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Archive replay verification schema is invalid.")
+    if payload.get("marker") != ARCHIVE_REPLAY_VERIFICATION_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "Archive replay verification marker is missing.")
+    _validate_static_refusal_predicates(payload, code_prefix)
+
+
+def _validate_final_delivery_readiness(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_final_delivery_readiness_packet":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Final delivery readiness schema is invalid.")
+    if payload.get("marker") != FINAL_DELIVERY_READINESS_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "Final delivery readiness marker is missing.")
+    _validate_static_refusal_predicates(payload, code_prefix)
+
+
+def _archive_verification_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "archive_valid": bool(payload["archive_valid"]),
+        "archive_ready": bool(payload["archive_ready"]),
+        "replay_ready": bool(payload["replay_ready"]),
+        "record_count": int(payload["record_count"]),
+        "rejection_reasons": list(payload["rejection_reasons"]),
+    }
+
+
+def _release_closure_reasons(package: dict[str, Any], handoff: dict[str, Any], archive_verification: dict[str, Any], reviewer_import: dict[str, Any], provenance_verification: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    verdict = str(reviewer_import.get("review_verdict", "")).lower()
+    if verdict != "pass":
+        reasons.append(f"reviewer_verdict_not_pass:{verdict or 'missing'}")
+    if reviewer_import.get("review_marker") != handoff.get("expected_reviewer_output_marker"):
+        reasons.append("reviewer_marker_mismatch")
+    if archive_verification.get("archive_valid") is not True:
+        reasons.append("archive_index_not_valid")
+    if archive_verification.get("archive_ready") is not True:
+        reasons.append("archive_not_ready")
+    if archive_verification.get("replay_ready") is not True:
+        reasons.append("archive_replay_not_ready")
+    if provenance_verification.get("chain_valid") is not True:
+        reasons.append("provenance_chain_not_valid")
+    if package.get("archive_ready") is not True or package.get("replay_ready") is not True:
+        reasons.append("release_candidate_not_ready")
+    if reviewer_import.get("archive_ready") is not True:
+        reasons.append("reviewer_import_archive_not_ready")
+    if reviewer_import.get("replay_ready") is not True:
+        reasons.append("reviewer_import_replay_not_ready")
+    for label, payload in (("release_candidate", package), ("external_review_handoff", handoff), ("reviewer_import", reviewer_import)):
+        _append_static_refusal_reasons(payload, label, reasons)
+    return _dedupe_text(reasons)
+
+
+def _static_refusal_predicate_summary(payloads: list[dict[str, Any]]) -> dict[str, bool]:
+    return {
+        "invocation_allowed_false": all(payload.get("invocation_allowed") is False for payload in payloads),
+        "external_execution_refused_true": all(payload.get("external_execution_refused") is True for payload in payloads),
+        "provider_calls_false": all(payload.get("provider_calls") is False for payload in payloads),
+        "model_calls_false": all(payload.get("model_calls") is False for payload in payloads),
+        "browser_calls_false": all(payload.get("browser_calls") is False for payload in payloads),
+        "shell_calls_false": all(payload.get("shell_calls") is False for payload in payloads),
+    }
+
+
+def _closure_required_evidence(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No additional evidence required."]
+    evidence: list[str] = []
+    if any(reason.startswith("reviewer_") for reason in reasons):
+        evidence.append("Fixed external reviewer output with expected marker, verdict PASS, caveat, findings summary, and reviewed artifact chain.")
+    if any("archive" in reason or "stale" in reason for reason in reasons):
+        evidence.append("Regenerated release candidate package, handoff, and archive index from current artifacts.")
+    if any("provenance" in reason for reason in reasons):
+        evidence.append("Verified provenance manifest and replay-ready artifact chain.")
+    if any("not_false" in reason or "not_refused" in reason for reason in reasons):
+        evidence.append("Restored static refusal predicates: invocation_allowed=false, external_execution_refused=true, and provider/model/browser/shell calls false.")
+    return _dedupe_text(evidence or ["Regenerated release closure evidence from current verified artifacts."])
+
+
+def _release_closure_recovery_guidance(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No recovery required; release closure is reviewer-ready and archive-ready."]
+    guidance = _closure_required_evidence(reasons)
+    guidance.append("Rerun reviewer-archive-import, release-closure, archive-replay, and final-readiness after recovery.")
+    return _dedupe_text(guidance)
+
+
+def _archive_replay_recovery_guidance(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No recovery required; archive replay verification passed."]
+    guidance = _archive_recovery_guidance(reasons)
+    guidance.append("Regenerate release-closure before rerunning archive-replay when reviewer evidence changed.")
+    return _dedupe_text(guidance)
+
+
+def _final_readiness_required_evidence(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No additional evidence required."]
+    evidence = _closure_required_evidence(reasons)
+    if any("archive_replay" in reason for reason in reasons):
+        evidence.append("Passing archive replay verification packet.")
+    return _dedupe_text(evidence)
+
+
+def _final_readiness_recovery_guidance(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No recovery required; final delivery readiness passed."]
+    guidance = _final_readiness_required_evidence(reasons)
+    guidance.append("Rerun final-readiness after release closure and archive replay pass.")
+    return _dedupe_text(guidance)
+
+
+def _compact_archive_records(archive_payload: dict[str, Any], closure: dict[str, Any], closure_path: Path, replay: dict[str, Any], replay_path: Path, readiness: dict[str, Any], readiness_path: Path, project_root: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for record in archive_payload.get("records", []):
+        if not isinstance(record, dict):
+            continue
+        compact = dict(record)
+        compact["terminal_status"] = "ready" if record.get("archive_ready") is True and record.get("replay_ready") is True else "blocked"
+        records.append(compact)
+    import_source = closure["reviewer_import_source"]
+    records.append(_compact_record_from_source(
+        record_id="external_reviewer_import",
+        role="external_reviewer_import",
+        source=import_source,
+        parents=["external_review_handoff"],
+        source_marker=EXTERNAL_REVIEW_ARCHIVE_IMPORT_MARKER,
+        archive_ready=closure.get("review_verdict") == "pass",
+        replay_ready=closure.get("review_verdict") == "pass",
+        terminal_status="ready" if closure.get("review_verdict") == "pass" else "blocked",
+    ))
+    closure_source = _artifact_source(closure_path, project_root)
+    records.append(_compact_record_from_source(
+        record_id="release_closure",
+        role="release_closure",
+        source=closure_source,
+        parents=["release_candidate", "external_reviewer_import"],
+        source_marker=RELEASE_CLOSURE_BUNDLE_MARKER,
+        archive_ready=bool(closure.get("archive_ready")),
+        replay_ready=bool(closure.get("replay_ready")),
+        terminal_status=str(closure.get("closure_status", "unknown")),
+    ))
+    replay_source = _artifact_source(replay_path, project_root)
+    records.append(_compact_record_from_source(
+        record_id="archive_replay",
+        role="archive_replay",
+        source=replay_source,
+        parents=["release_closure", "release_candidate"],
+        source_marker=ARCHIVE_REPLAY_VERIFICATION_MARKER,
+        archive_ready=bool(replay.get("archive_ready")),
+        replay_ready=bool(replay.get("replay_ready")),
+        terminal_status="ready" if replay.get("archive_replay_valid") is True else "blocked",
+    ))
+    readiness_source = _artifact_source(readiness_path, project_root)
+    records.append(_compact_record_from_source(
+        record_id="final_delivery_readiness",
+        role="final_delivery_readiness",
+        source=readiness_source,
+        parents=["archive_replay", "release_closure"],
+        source_marker=FINAL_DELIVERY_READINESS_MARKER,
+        archive_ready=bool(readiness.get("delivery_ready")),
+        replay_ready=bool(readiness.get("promotion_ready")),
+        terminal_status="ready" if readiness.get("delivery_ready") is True and readiness.get("promotion_ready") is True else "blocked",
+    ))
+    return records
+
+
+def _compact_record_from_source(*, record_id: str, role: str, source: dict[str, Any], parents: list[str], source_marker: str, archive_ready: bool, replay_ready: bool, terminal_status: str) -> dict[str, Any]:
+    record = _archive_record(
+        record_id=record_id,
+        role=role,
+        path=str(source["path"]),
+        sha256=str(source["sha256"]),
+        byte_count=int(source["bytes"]),
+        parents=parents,
+        source_marker=source_marker,
+        archive_ready=archive_ready,
+        replay_ready=replay_ready,
+    )
+    record["terminal_status"] = terminal_status
+    return record
+
+
+def _verify_compact_archive_index(index: dict[str, Any], index_path: Path, project_root: Path) -> dict[str, Any]:
+    reasons: list[str] = []
+    if index.get("schema_version") != SCHEMA_VERSION or index.get("kind") != "runtime_worker_compact_evidence_archive_index":
+        reasons.append("compact_index_schema_invalid")
+    if index.get("marker") != COMPACT_ARCHIVE_INDEX_MARKER:
+        reasons.append("compact_index_marker_missing")
+    _append_static_refusal_reasons(index, "compact_archive", reasons)
+    records = index.get("records")
+    if not isinstance(records, list) or not records:
+        records = []
+        reasons.append("compact_index_empty")
+    entries = [record for record in records if isinstance(record, dict)]
+    if len(entries) != len(records):
+        reasons.append("compact_record_invalid")
+    if index.get("record_count") != len(entries):
+        reasons.append("compact_record_count_mismatch")
+    record_ids = [str(record.get("record_id", "")) for record in entries]
+    roles = [str(record.get("role", "")) for record in entries]
+    for record_id in sorted({record_id for record_id in record_ids if record_ids.count(record_id) > 1}):
+        reasons.append(f"duplicate_record_id:{record_id}")
+    for role in COMPACT_ARCHIVE_REQUIRED_ROLES:
+        if role not in roles:
+            reasons.append(f"required_role_missing:{role}")
+    by_id = {str(record.get("record_id", "")): record for record in entries}
+    payloads: dict[str, dict[str, Any]] = {}
+    for record in entries:
+        record_id = str(record.get("record_id", ""))
+        role = str(record.get("role", "unknown"))
+        parents = record.get("parents")
+        if not isinstance(parents, list):
+            reasons.append(f"parents_invalid:{record_id or role}")
+            parents = []
+        for parent in parents:
+            if str(parent) not in by_id:
+                reasons.append(f"parent_missing:{record_id or role}:{parent}")
+        if record.get("archive_ready") is not True:
+            reasons.append(f"archive_ready_false:{record_id or role}")
+        if record.get("replay_ready") is not True:
+            reasons.append(f"replay_ready_false:{record_id or role}")
+        if not str(record.get("terminal_status", "")).strip():
+            reasons.append(f"terminal_status_missing:{record_id or role}")
+        artifact_path, path_reasons = _archive_record_path(record, project_root)
+        reasons.extend(path_reasons)
+        if artifact_path is None:
+            continue
+        current = _artifact_source(artifact_path, project_root)
+        if record.get("sha256") != current["sha256"]:
+            reasons.append(f"sha256_mismatch:{record_id or role}")
+        if record.get("byte_count") != current["bytes"]:
+            reasons.append(f"byte_count_mismatch:{record_id or role}")
+        try:
+            payload = _load_input_json(artifact_path, f"runtime_worker_compact_archive_{role}")
+        except RuntimeFoundationError:
+            reasons.append(f"artifact_json_invalid:{record_id or role}")
+            continue
+        payloads[record_id] = payload
+        if record.get("source_marker") != _payload_marker(payload):
+            reasons.append(f"source_marker_mismatch:{record_id or role}")
+        _append_static_refusal_reasons(payload, record_id or role, reasons)
+    final_readiness = payloads.get("final_delivery_readiness")
+    if final_readiness and (final_readiness.get("delivery_ready") is not True or final_readiness.get("promotion_ready") is not True):
+        reasons.append("final_delivery_not_ready")
+    release_closure = payloads.get("release_closure")
+    if release_closure and release_closure.get("closure_status") != "closed":
+        reasons.append("release_closure_not_closed")
+    unique_reasons = _dedupe_text(reasons)
+    compact_valid = not unique_reasons
+    return {
+        "ok": True,
+        "command": "runtime worker-result compact-verify",
+        "kind": "runtime_worker_compact_evidence_archive_verification",
+        "schema_version": SCHEMA_VERSION,
+        "marker": COMPACT_ARCHIVE_VERIFY_MARKER,
+        "compact_index_source": _artifact_source(index_path, project_root),
+        "compact_valid": compact_valid,
+        "archive_ready": compact_valid and bool(index.get("archive_ready")) and all(record.get("archive_ready") is True for record in entries),
+        "replay_ready": compact_valid and bool(index.get("replay_ready")) and all(record.get("replay_ready") is True for record in entries),
+        "record_count": len(entries),
+        "rejection_reasons": unique_reasons,
+        "recovery_guidance": _compact_archive_recovery_guidance(unique_reasons),
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+    }
+
+
+def _compact_archive_recovery_guidance(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No recovery required; compact archive index is intact and replay-ready."]
+    guidance = _archive_recovery_guidance(reasons)
+    if any(reason.startswith(("terminal_status_missing:", "final_delivery_not_ready", "release_closure_not_closed")) for reason in reasons):
+        guidance.append("Regenerate release closure, archive replay, final readiness, and compact archive after fixing terminal status evidence.")
+    guidance.append("Rerun runtime worker-result compact-verify after recovery.")
+    return _dedupe_text(guidance)
+
+
+def _promotion_recovery_guidance(reasons: list[str]) -> list[str]:
+    if not reasons:
+        return ["No recovery required; static RC promotion packet is ready. No release, tag, or default branch change was executed."]
+    guidance = _compact_archive_recovery_guidance(reasons)
+    guidance.append("Rerun rc-promotion-gate only after final-readiness and compact-verify pass.")
+    return _dedupe_text(guidance)
 
 
 def _provenance_artifact_entry(role: str, path: Path, payload: dict[str, Any], project_root: Path) -> dict[str, Any]:

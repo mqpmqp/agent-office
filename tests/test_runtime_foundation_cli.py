@@ -211,6 +211,96 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertEqual(index[0], 0, index[2])
         return base
 
+    def _write_external_reviewer_output(self, base: Path, *, verdict: str = "PASS", marker: str = "R29_EXTERNAL_REVIEW_COMPLETE", name: str = "external-reviewer-output.md") -> None:
+        (base / name).write_text(
+            "\n".join([
+                "# External Reviewer Output",
+                f"verdict: {verdict}",
+                f"marker: {marker}",
+                "review_type: artifact",
+                "review_caveat: artifact-only external review; no VPS validation claimed",
+                "findings_summary: release candidate evidence reviewed",
+                "reviewed_artifacts: .ai/workspaces/demo/release-candidate.json, .ai/workspaces/demo/archive-index.json",
+                "reviewed_bundle_summary: archive index and release candidate reviewed",
+                "safety_caveat: no provider/model/browser/shell execution",
+                marker,
+            ]),
+            encoding="utf-8",
+        )
+
+    def _run_release_closure_loop(self, root: Path, *, reviewer_output: str = "external-reviewer-output.md", prefix: str = "", expect_ready: bool = True) -> None:
+        suffix = f"-{prefix}" if prefix else ""
+        expected_code = 0 if expect_ready else 2
+        reviewer_import = run_cli([
+            "runtime", "worker-result", "reviewer-archive-import",
+            "--reviewer-output", f".ai/workspaces/demo/{reviewer_output}",
+            "--archive-index", ".ai/workspaces/demo/archive-index.json",
+            "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+            "--out", f".ai/workspaces/demo/reviewer-import{suffix}.json",
+            "--json",
+        ], root)
+        self.assertEqual(reviewer_import[0], 0, reviewer_import[2])
+        release_closure = run_cli([
+            "runtime", "worker-result", "release-closure",
+            "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+            "--external-review-handoff", ".ai/workspaces/demo/external-review-handoff.json",
+            "--archive-index", ".ai/workspaces/demo/archive-index.json",
+            "--reviewer-import", f".ai/workspaces/demo/reviewer-import{suffix}.json",
+            "--provenance-manifest", ".ai/workspaces/demo/provenance-manifest.json",
+            "--out", f".ai/workspaces/demo/release-closure{suffix}.json",
+            "--json",
+        ], root)
+        self.assertEqual(release_closure[0], expected_code, release_closure[1] + release_closure[2])
+        archive_replay = run_cli([
+            "runtime", "worker-result", "archive-replay",
+            "--archive-index", ".ai/workspaces/demo/archive-index.json",
+            "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+            "--release-closure", f".ai/workspaces/demo/release-closure{suffix}.json",
+            "--out", f".ai/workspaces/demo/archive-replay{suffix}.json",
+            "--json",
+        ], root)
+        self.assertEqual(archive_replay[0], expected_code, archive_replay[1] + archive_replay[2])
+        final_readiness = run_cli([
+            "runtime", "worker-result", "final-readiness",
+            "--release-closure", f".ai/workspaces/demo/release-closure{suffix}.json",
+            "--archive-replay", f".ai/workspaces/demo/archive-replay{suffix}.json",
+            "--out", f".ai/workspaces/demo/final-readiness{suffix}.json",
+            "--json",
+        ], root)
+        self.assertEqual(final_readiness[0], expected_code, final_readiness[1] + final_readiness[2])
+        if expect_ready:
+            compact = run_cli([
+                "runtime", "worker-result", "compact-archive",
+                "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                "--release-closure", f".ai/workspaces/demo/release-closure{suffix}.json",
+                "--archive-replay", f".ai/workspaces/demo/archive-replay{suffix}.json",
+                "--final-readiness", f".ai/workspaces/demo/final-readiness{suffix}.json",
+                "--out", f".ai/workspaces/demo/compact-index{suffix}.json",
+                "--json",
+            ], root)
+            self.assertEqual(compact[0], 0, compact[2])
+            compact_verify = run_cli([
+                "runtime", "worker-result", "compact-verify",
+                "--index", f".ai/workspaces/demo/compact-index{suffix}.json",
+                "--json",
+            ], root)
+            self.assertEqual(compact_verify[0], 0, compact_verify[1] + compact_verify[2])
+            promotion = run_cli([
+                "runtime", "worker-result", "rc-promotion-gate",
+                "--final-readiness", f".ai/workspaces/demo/final-readiness{suffix}.json",
+                "--compact-index", f".ai/workspaces/demo/compact-index{suffix}.json",
+                "--release-closure", f".ai/workspaces/demo/release-closure{suffix}.json",
+                "--out", f".ai/workspaces/demo/promotion-gate{suffix}.json",
+                "--json",
+            ], root)
+            self.assertEqual(promotion[0], 0, promotion[1] + promotion[2])
+
+    def _prepare_release_closure_loop(self, root: Path) -> Path:
+        base = self._prepare_archive_index(root)
+        self._write_external_reviewer_output(base)
+        self._run_release_closure_loop(root)
+        return base
+
     def test_init_json_positive_creates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2031,6 +2121,306 @@ class RuntimeFoundationCliTests(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), "")
         combined = malformed_result[1] + malformed_result[2] + empty_result[1] + empty_result[2]
         self.assertNotIn("Traceback", combined)
+
+    def test_worker_result_release_closure_promotion_loop_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_release_closure_loop(root)
+            import_text = run_cli([
+                "runtime", "worker-result", "reviewer-archive-import",
+                "--reviewer-output", ".ai/workspaces/demo/external-reviewer-output.md",
+                "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+                "--out", ".ai/workspaces/demo/reviewer-import.txt",
+                "--format", "text",
+                "--json",
+            ], root)
+            closure_text = run_cli([
+                "runtime", "worker-result", "release-closure",
+                "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+                "--external-review-handoff", ".ai/workspaces/demo/external-review-handoff.json",
+                "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                "--reviewer-import", ".ai/workspaces/demo/reviewer-import.json",
+                "--provenance-manifest", ".ai/workspaces/demo/provenance-manifest.json",
+                "--out", ".ai/workspaces/demo/release-closure.txt",
+                "--format", "text",
+                "--json",
+            ], root)
+            replay_text = run_cli([
+                "runtime", "worker-result", "archive-replay",
+                "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+                "--release-closure", ".ai/workspaces/demo/release-closure.json",
+                "--out", ".ai/workspaces/demo/archive-replay.txt",
+                "--format", "text",
+                "--json",
+            ], root)
+            readiness_text = run_cli([
+                "runtime", "worker-result", "final-readiness",
+                "--release-closure", ".ai/workspaces/demo/release-closure.json",
+                "--archive-replay", ".ai/workspaces/demo/archive-replay.json",
+                "--out", ".ai/workspaces/demo/final-readiness.txt",
+                "--format", "text",
+                "--json",
+            ], root)
+            compact_text = run_cli([
+                "runtime", "worker-result", "compact-archive",
+                "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                "--release-closure", ".ai/workspaces/demo/release-closure.json",
+                "--archive-replay", ".ai/workspaces/demo/archive-replay.json",
+                "--final-readiness", ".ai/workspaces/demo/final-readiness.json",
+                "--out", ".ai/workspaces/demo/compact-index.txt",
+                "--format", "text",
+                "--json",
+            ], root)
+            compact_verify_text = run_cli([
+                "runtime", "worker-result", "compact-verify", "--index", ".ai/workspaces/demo/compact-index.json"
+            ], root)
+            promotion_text = run_cli([
+                "runtime", "worker-result", "rc-promotion-gate",
+                "--final-readiness", ".ai/workspaces/demo/final-readiness.json",
+                "--compact-index", ".ai/workspaces/demo/compact-index.json",
+                "--release-closure", ".ai/workspaces/demo/release-closure.json",
+                "--out", ".ai/workspaces/demo/promotion-gate.txt",
+                "--format", "text",
+                "--json",
+            ], root)
+            reviewer_import = json.loads((base / "reviewer-import.json").read_text(encoding="utf-8"))
+            closure = json.loads((base / "release-closure.json").read_text(encoding="utf-8"))
+            replay = json.loads((base / "archive-replay.json").read_text(encoding="utf-8"))
+            readiness = json.loads((base / "final-readiness.json").read_text(encoding="utf-8"))
+            compact = json.loads((base / "compact-index.json").read_text(encoding="utf-8"))
+            promotion = json.loads((base / "promotion-gate.json").read_text(encoding="utf-8"))
+            import_text_body = (base / "reviewer-import.txt").read_text(encoding="utf-8")
+            closure_text_body = (base / "release-closure.txt").read_text(encoding="utf-8")
+            replay_text_body = (base / "archive-replay.txt").read_text(encoding="utf-8")
+            readiness_text_body = (base / "final-readiness.txt").read_text(encoding="utf-8")
+            compact_text_body = (base / "compact-index.txt").read_text(encoding="utf-8")
+            promotion_text_body = (base / "promotion-gate.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(reviewer_import["kind"], "runtime_worker_external_reviewer_archive_import")
+        self.assertEqual(reviewer_import["review_verdict"], "pass")
+        self.assertTrue(reviewer_import["archive_ready"])
+        self.assertTrue(reviewer_import["replay_ready"])
+        self.assertEqual(closure["closure_status"], "closed")
+        self.assertTrue(closure["delivery_ready"])
+        self.assertTrue(replay["archive_replay_valid"])
+        self.assertTrue(readiness["delivery_ready"])
+        self.assertTrue(readiness["promotion_ready"])
+        self.assertEqual(compact["kind"], "runtime_worker_compact_evidence_archive_index")
+        self.assertEqual({record["role"] for record in compact["records"]}, {
+            "release_candidate",
+            "provenance_manifest",
+            "delivery_gate",
+            "reviewer_attestation",
+            "closure_evidence",
+            "merge_readiness",
+            "rejection_recovery",
+            "audit_replay",
+            "external_review_handoff",
+            "external_reviewer_import",
+            "release_closure",
+            "archive_replay",
+            "final_delivery_readiness",
+        })
+        self.assertTrue(promotion["promotion_ready"])
+        self.assertFalse(promotion["real_release_executed"])
+        self.assertFalse(promotion["tag_created"])
+        self.assertFalse(promotion["default_branch_changed"])
+        for result in (import_text, closure_text, replay_text, readiness_text, compact_text, compact_verify_text, promotion_text):
+            self.assertEqual(result[0], 0, result[1] + result[2])
+            self.assertNotIn("Traceback", result[1] + result[2])
+        self.assertIn("review_verdict: pass", import_text_body)
+        self.assertIn("closure_status: closed", closure_text_body)
+        self.assertIn("archive_replay_valid: true", replay_text_body)
+        self.assertIn("delivery_ready: true", readiness_text_body)
+        self.assertIn("terminal_status: ready", compact_text_body)
+        self.assertIn("promotion_ready: true", promotion_text_body)
+
+    def test_worker_result_failed_review_recovery_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_archive_index(root)
+            self._write_external_reviewer_output(base, verdict="FAIL", name="external-reviewer-output-fail.md")
+            self._run_release_closure_loop(root, reviewer_output="external-reviewer-output-fail.md", prefix="fail", expect_ready=False)
+            recovery = run_cli([
+                "runtime", "worker-result", "review-recovery",
+                "--release-closure", ".ai/workspaces/demo/release-closure-fail.json",
+                "--out", ".ai/workspaces/demo/review-recovery.json",
+                "--json",
+            ], root)
+            self.assertEqual(recovery[0], 0, recovery[1] + recovery[2])
+            self._write_external_reviewer_output(base, verdict="PASS", name="external-reviewer-output-fixed.md")
+            self._run_release_closure_loop(root, reviewer_output="external-reviewer-output-fixed.md", prefix="fixed", expect_ready=True)
+            failed_closure = json.loads((base / "release-closure-fail.json").read_text(encoding="utf-8"))
+            failed_readiness = json.loads((base / "final-readiness-fail.json").read_text(encoding="utf-8"))
+            recovery_payload = json.loads((base / "review-recovery.json").read_text(encoding="utf-8"))
+            fixed_readiness = json.loads((base / "final-readiness-fixed.json").read_text(encoding="utf-8"))
+            fixed_promotion = json.loads((base / "promotion-gate-fixed.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(failed_closure["closure_status"], "blocked")
+        self.assertIn("reviewer_verdict_not_pass:fail", failed_closure["rejection_reasons"])
+        self.assertFalse(failed_readiness["delivery_ready"])
+        self.assertTrue(recovery_payload["recovery_required"])
+        self.assertEqual(recovery_payload["recovery_status"], "blocked_until_review_or_evidence_fixed")
+        self.assertTrue(fixed_readiness["delivery_ready"])
+        self.assertTrue(fixed_promotion["promotion_ready"])
+
+    def test_worker_result_compact_archive_and_promotion_rejects_cleanly(self) -> None:
+        def run_case(mutator, expected_reason: str) -> dict[str, object]:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                base = self._prepare_release_closure_loop(root)
+                compact = json.loads((base / "compact-index.json").read_text(encoding="utf-8"))
+                mutator(root, base, compact)
+                (base / "case-compact-index.json").write_text(json.dumps(compact), encoding="utf-8")
+                result = run_cli([
+                    "runtime", "worker-result", "compact-verify", "--index", ".ai/workspaces/demo/case-compact-index.json", "--json"
+                ], root)
+            self.assertEqual(result[0], 2, result[1] + result[2])
+            payload = json.loads(result[1])
+            self.assertFalse(payload["compact_valid"])
+            self.assertIn(expected_reason, payload["rejection_reasons"])
+            self.assertTrue(payload["recovery_guidance"])
+            self.assertNotIn("Traceback", result[1] + result[2])
+            return payload
+
+        def record(index: dict[str, object], record_id: str) -> dict[str, object]:
+            for entry in index["records"]:
+                if entry["record_id"] == record_id:
+                    return entry
+            raise AssertionError(record_id)
+
+        run_case(lambda root, base, index: index["records"].append(dict(index["records"][0])), "duplicate_record_id:provenance_manifest")
+        run_case(lambda root, base, index: index.update({"records": [entry for entry in index["records"] if entry["record_id"] != "final_delivery_readiness"]}), "required_role_missing:final_delivery_readiness")
+        run_case(lambda root, base, index: record(index, "release_closure").update({"parents": ["missing_parent"]}), "parent_missing:release_closure:missing_parent")
+        run_case(lambda root, base, index: record(index, "final_delivery_readiness").update({"sha256": "0" * 64}), "sha256_mismatch:final_delivery_readiness")
+
+        def bad_predicate(root: Path, base: Path, index: dict[str, object]) -> None:
+            readiness = json.loads((base / "final-readiness.json").read_text(encoding="utf-8"))
+            readiness["provider_calls"] = True
+            (base / "final-readiness.json").write_text(json.dumps(readiness), encoding="utf-8")
+
+        run_case(bad_predicate, "provider_calls_not_false:final_delivery_readiness")
+
+        def traversal(root: Path, base: Path, index: dict[str, object]) -> None:
+            record(index, "release_closure")["path"] = ".ai/workspaces/demo/../release-closure.json"
+
+        run_case(traversal, "artifact_path_traversal:release_closure")
+
+        def symlink(root: Path, base: Path, index: dict[str, object]) -> None:
+            link = base / "final-readiness-link.json"
+            try:
+                link.symlink_to(base / "final-readiness.json")
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink unsupported: {exc}")
+            record(index, "final_delivery_readiness")["path"] = ".ai/workspaces/demo/final-readiness-link.json"
+
+        run_case(symlink, "artifact_symlink:final_delivery_readiness")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_release_closure_loop(root)
+            compact = json.loads((base / "compact-index.json").read_text(encoding="utf-8"))
+            compact["records"].append(dict(compact["records"][0]))
+            (base / "bad-compact-index.json").write_text(json.dumps(compact), encoding="utf-8")
+            promotion = run_cli([
+                "runtime", "worker-result", "rc-promotion-gate",
+                "--final-readiness", ".ai/workspaces/demo/final-readiness.json",
+                "--compact-index", ".ai/workspaces/demo/bad-compact-index.json",
+                "--release-closure", ".ai/workspaces/demo/release-closure.json",
+                "--out", ".ai/workspaces/demo/promotion-reject.json",
+                "--json",
+            ], root)
+        self.assertEqual(promotion[0], 2, promotion[1] + promotion[2])
+        promotion_payload = json.loads(promotion[1])
+        self.assertFalse(promotion_payload["promotion_ready"])
+        self.assertIn("compact_archive_not_valid", promotion_payload["rejection_reasons"])
+
+    def test_worker_result_release_closure_errors_and_help_are_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = self._prepare_archive_index(root)
+            missing_marker = base / "missing-marker.md"
+            missing_marker.write_text("verdict: PASS\nmarker: OTHER_MARKER\n", encoding="utf-8")
+            malformed = base / "bad-review.json"
+            malformed.write_text("{", encoding="utf-8")
+            non_utf8 = base / "non-utf8.md"
+            non_utf8.write_bytes(b"\xff\xfe")
+            empty = base / "empty-review.md"
+            empty.write_text("", encoding="utf-8")
+            results = [
+                run_cli([
+                    "runtime", "worker-result", "reviewer-archive-import",
+                    "--reviewer-output", ".ai/workspaces/demo/missing-marker.md",
+                    "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                    "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+                    "--out", ".ai/workspaces/demo/import-missing-marker.json",
+                    "--json",
+                ], root),
+                run_cli([
+                    "runtime", "worker-result", "reviewer-archive-import",
+                    "--reviewer-output", ".ai/workspaces/demo/bad-review.json",
+                    "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                    "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+                    "--out", ".ai/workspaces/demo/import-bad-json.json",
+                    "--json",
+                ], root),
+                run_cli([
+                    "runtime", "worker-result", "reviewer-archive-import",
+                    "--reviewer-output", ".ai/workspaces/demo/non-utf8.md",
+                    "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                    "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+                    "--out", ".ai/workspaces/demo/import-non-utf8.json",
+                    "--json",
+                ], root),
+                run_cli([
+                    "runtime", "worker-result", "reviewer-archive-import",
+                    "--reviewer-output", ".ai/workspaces/demo/empty-review.md",
+                    "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                    "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+                    "--out", ".ai/workspaces/demo/import-empty.json",
+                    "--json",
+                ], root),
+                run_cli([
+                    "runtime", "worker-result", "reviewer-archive-import",
+                    "--reviewer-output", ".ai/workspaces/demo/../external-reviewer-output.md",
+                    "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                    "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+                    "--out", ".ai/workspaces/demo/import-traversal.json",
+                    "--json",
+                ], root),
+            ]
+
+        expected_codes = [
+            "runtime_worker_reviewer_artifact_marker_missing",
+            "runtime_worker_reviewer_artifact_invalid_json",
+            "runtime_worker_reviewer_artifact_non_utf8",
+            "runtime_worker_reviewer_artifact_empty",
+            "runtime_worker_reviewer_archive_import_reviewer_output_path_traversal",
+        ]
+        for result, expected in zip(results, expected_codes):
+            self.assertEqual(result[0], 2, result[1] + result[2])
+            self.assertEqual(json.loads(result[1])["error_code"], expected)
+            self.assertNotIn("Traceback", result[1] + result[2])
+        for argv in (
+            ["runtime", "worker-result", "reviewer-archive-import", "--help"],
+            ["runtime", "worker-result", "release-closure", "--help"],
+            ["runtime", "worker-result", "archive-replay", "--help"],
+            ["runtime", "worker-result", "final-readiness", "--help"],
+            ["runtime", "worker-result", "review-recovery", "--help"],
+            ["runtime", "worker-result", "compact-archive", "--help"],
+            ["runtime", "worker-result", "compact-verify", "--help"],
+            ["runtime", "worker-result", "rc-promotion-gate", "--help"],
+        ):
+            with self.subTest(argv=argv):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+                    cli.main(argv)
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn("worker-result", stdout.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
 
     def test_external_worker_adapter_prototype_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
