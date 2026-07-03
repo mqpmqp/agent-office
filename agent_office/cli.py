@@ -157,6 +157,16 @@ from .run_bundle import (
     write_run_bundle,
 )
 
+from .v1_final_delivery import (
+    V1FinalDeliveryError,
+    build_final_delivery_packet,
+    final_delivery_error_payload,
+    format_final_delivery_packet,
+    format_final_delivery_verify,
+    verify_final_delivery_packet,
+    write_final_delivery_packet,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TASKS_ROOT = PROJECT_ROOT / ".ai" / "tasks"
@@ -1612,6 +1622,27 @@ def cmd_runtime(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_v1(args: argparse.Namespace) -> int:
+    action = args.v1_action
+    if action == "final-delivery":
+        try:
+            packet = build_final_delivery_packet(PROJECT_ROOT)
+            if args.out:
+                write_final_delivery_packet(args.out, packet, PROJECT_ROOT)
+        except V1FinalDeliveryError as exc:
+            if args.json:
+                print(json.dumps(final_delivery_error_payload("v1 final-delivery", exc), indent=2, ensure_ascii=False))
+                return 2
+            raise AgentOfficeError(str(exc)) from exc
+        print(json.dumps(packet, indent=2, ensure_ascii=False) if args.json else format_final_delivery_packet(packet))
+        return 0
+    if action == "verify-final-delivery":
+        payload = verify_final_delivery_packet(args.path, PROJECT_ROOT)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_final_delivery_verify(payload))
+        return 0 if payload["ok"] else 2
+    raise AgentOfficeError("v1 requires final-delivery or verify-final-delivery.")
+
+
 def cmd_run_demo(args: argparse.Namespace) -> int:
     demo_mode = resolve_mode(args, "run-demo")
     validate_task_id(args.task_id)
@@ -2128,6 +2159,17 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_worker_dry_run_publish.add_argument("--format", choices=["json", "text"], default="json", help="Dry-run publish output format. Default: json.")
     runtime_worker_dry_run_publish.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_worker_dry_run_publish.set_defaults(func=cmd_runtime)
+
+    p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
+    v1_sub = p.add_subparsers(dest="v1_action", required=True)
+    final_delivery = v1_sub.add_parser("final-delivery", help="Generate the deterministic AgentOffice v1 final delivery packet.")
+    final_delivery.add_argument("--out", help="Optional JSON output path under the project root or temp directory.")
+    final_delivery.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    final_delivery.set_defaults(func=cmd_v1)
+    verify_final_delivery = v1_sub.add_parser("verify-final-delivery", help="Verify an AgentOffice v1 final delivery packet.")
+    verify_final_delivery.add_argument("--path", required=True, help="Final delivery packet JSON path to verify.")
+    verify_final_delivery.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    verify_final_delivery.set_defaults(func=cmd_v1)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")

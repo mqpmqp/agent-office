@@ -120,6 +120,56 @@ The provenance manifest chains the R23-R25 artifacts into a deterministic, tampe
 `dry-run-publish` describes what a future explicitly authorized publish would require. It records target branch, target commit, candidate release id/name, source evidence references, promotion gate status, approval checklist, and required artifacts while keeping `would_create_tag=false`, `would_create_release=false`, `would_push=false`, and `would_change_default_branch=false`. Real release/tag/default-branch promotion remains a later independent gate requiring explicit authorization.
 
 
+## v1 Final Delivery Packet
+
+P49 is the final implementation batch for AgentOffice v1. It adds a deterministic final delivery packet and verifier so reviewers can inspect the v1 delivery state without running providers, runtimes, models, external workers, or adapters.
+
+Generate the packet as JSON or reviewer-ready text:
+
+```bash
+python3 -m agent_office v1 final-delivery --json
+python3 -m agent_office v1 final-delivery
+python3 -m agent_office v1 final-delivery --out /tmp/agentoffice-v1-final-delivery.json --json
+```
+
+Verify a saved packet:
+
+```bash
+python3 -m agent_office v1 verify-final-delivery --path /tmp/agentoffice-v1-final-delivery.json --json
+python3 -m agent_office v1 verify-final-delivery --path /tmp/agentoffice-v1-final-delivery.json
+```
+
+The packet top-level contract includes `schema_version`, `packet_type`, `phase`, `status`, `repo`, `delivery`, `contracts`, `validation`, `artifacts`, `review`, `merge_gate`, `safety`, `non_goals`, and `next_actions`. Text output contains `AGENTOFFICE_V1_FINAL_DELIVERY_PACKET`; verifier text emits `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_PASS` or `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_FAIL`.
+
+Generate the P49 review artifact bundle after the source branch is committed and pushed:
+
+```bash
+BASELINE="$(cat /tmp/agentoffice_p49_baseline.txt)"
+HEAD="$(git rev-parse HEAD)"
+OUT="/opt/agent-office/P49_REVIEW_ARTIFACT_BUNDLE.md"
+SHA="/opt/agent-office/P49_REVIEW_ARTIFACT_BUNDLE.md.sha256"
+# Write the Markdown artifact from the P49 report, git status, diff stat, name-status, full diff, and changed-file snapshots.
+sha256sum "$OUT" > "$SHA"
+```
+
+Expected reviewer output files:
+
+- `P49_CLAUDE_ARTIFACT_REVIEW_OUTPUT.md`
+- `P49_CLAUDE_REVIEW_FIX_DELTA_REVIEW_OUTPUT.md` only if a fix is needed
+- `P49_CLAUDE_MERGE_GATE_REVIEW_OUTPUT.md` only for merge gate review if used
+
+Claude review is artifact-based. Claude must review the uploaded bundle and `.sha256` sidecar and must not claim it personally executed VPS commands unless that is true and recorded in the source report.
+
+Merge gate prerequisites:
+
+1. P49 source branch is pushed.
+2. P49 artifact-based review is complete.
+3. Any required review-fix delta is complete.
+4. Merge gate is explicitly authorized.
+5. v1 tag or release declaration happens only after the merge gate.
+
+Safety constraints: do not read `.env`, do not print environment variable values, do not trigger provider/runtime/adapter external behavior, do not merge `phase6/mainline`, do not tag, do not force push, and do not mutate the default branch during P49.
+
 ## Claude Token Rule
 
 Mock Claude reads only `final-for-claude.md`. P5-05 adds a staged real Claude final judge dry-run that can also review bounded staged artifacts under `.ai/context/`, `.ai/codex/`, and `.ai/grok/`.
