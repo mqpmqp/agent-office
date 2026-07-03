@@ -33,6 +33,9 @@ FAILED_REVIEW_RECOVERY_MARKER = "AGENT_OFFICE_FAILED_REVIEW_RECOVERY_PACKET"
 COMPACT_ARCHIVE_INDEX_MARKER = "AGENT_OFFICE_COMPACT_EVIDENCE_ARCHIVE_INDEX"
 COMPACT_ARCHIVE_VERIFY_MARKER = "AGENT_OFFICE_COMPACT_EVIDENCE_ARCHIVE_VERIFY"
 RC_PROMOTION_GATE_MARKER = "AGENT_OFFICE_RC_PROMOTION_GATE"
+RELEASE_CANDIDATE_EXPORT_PACKET_MARKER = "AGENT_OFFICE_RELEASE_CANDIDATE_EXPORT_PACKET"
+PROMOTION_EVIDENCE_PACKET_MARKER = "AGENT_OFFICE_PROMOTION_EVIDENCE_PACKET"
+DRY_RUN_PUBLISH_PACKET_MARKER = "AGENT_OFFICE_DRY_RUN_PUBLISH_PACKET"
 ARCHIVE_REQUIRED_ROLES = (
     "release_candidate",
     "provenance_manifest",
@@ -2001,6 +2004,305 @@ def runtime_worker_rc_promotion_gate_payload(*, final_readiness: str, compact_in
     return payload
 
 
+def runtime_worker_release_candidate_export_payload(*, release_candidate: str, archive_index: str, out: str, export_format: str, project_root: Path) -> dict[str, Any]:
+    if export_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_release_candidate_export_format_invalid", f"Unsupported release candidate export format: {export_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_release_candidate_export")
+    package_path = _safe_input_path(release_candidate, project_root, "runtime_worker_release_candidate_export_release_candidate")
+    archive_path = _safe_input_path(archive_index, project_root, "runtime_worker_release_candidate_export_archive_index")
+    package = _load_input_json(package_path, "runtime_worker_release_candidate_export_release_candidate")
+    archive_payload = _load_input_json(archive_path, "runtime_worker_release_candidate_export_archive_index")
+    _validate_release_candidate_package(package, "runtime_worker_release_candidate_export_release_candidate")
+    archive_verification = _verify_archive_index(archive_payload, archive_path, project_root)
+    if not archive_verification["archive_valid"]:
+        raise RuntimeFoundationError(
+            "runtime_worker_release_candidate_export_archive_not_ready",
+            "Evidence archive index is not export-ready: " + ", ".join(archive_verification["rejection_reasons"]),
+        )
+    manifest = {
+        "release_candidate_source": _artifact_source(package_path, project_root),
+        "archive_index_source": _artifact_source(archive_path, project_root),
+        "expected_roles": list(ARCHIVE_REQUIRED_ROLES),
+        "record_count": int(archive_verification["record_count"]),
+        "records": _release_candidate_export_records(archive_payload),
+    }
+    digest = _stable_payload_digest(manifest)
+    readiness_summary = {
+        "release_candidate_archive_ready": bool(package["archive_ready"]),
+        "release_candidate_replay_ready": bool(package["replay_ready"]),
+        "archive_valid": bool(archive_verification["archive_valid"]),
+        "archive_ready": bool(archive_verification["archive_ready"]),
+        "replay_ready": bool(archive_verification["replay_ready"]),
+        "export_ready": bool(package["archive_ready"] and package["replay_ready"] and archive_verification["archive_ready"] and archive_verification["replay_ready"]),
+    }
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result release-candidate-export",
+        "kind": "runtime_worker_release_candidate_export_packet",
+        "schema_version": SCHEMA_VERSION,
+        "marker": RELEASE_CANDIDATE_EXPORT_PACKET_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "manifest": manifest,
+        "manifest_digest": digest,
+        "digest": digest,
+        "record_count": manifest["record_count"],
+        "expected_roles": list(ARCHIVE_REQUIRED_ROLES),
+        "readiness_summary": readiness_summary,
+        "export_ready": readiness_summary["export_ready"],
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "export_format": export_format,
+        "written": True,
+    }
+    if export_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_release_candidate_export_text(payload))
+    return payload
+
+
+def runtime_worker_promotion_evidence_payload(
+    *,
+    release_candidate: str,
+    archive_index: str,
+    release_closure: str,
+    archive_replay: str,
+    final_readiness: str,
+    compact_index: str,
+    promotion_gate: str,
+    out: str,
+    evidence_format: str,
+    final_mainline: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if evidence_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_promotion_evidence_format_invalid", f"Unsupported promotion evidence format: {evidence_format}")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_promotion_evidence")
+    package_path = _safe_input_path(release_candidate, project_root, "runtime_worker_promotion_evidence_release_candidate")
+    archive_path = _safe_input_path(archive_index, project_root, "runtime_worker_promotion_evidence_archive_index")
+    closure_path = _safe_input_path(release_closure, project_root, "runtime_worker_promotion_evidence_release_closure")
+    replay_path = _safe_input_path(archive_replay, project_root, "runtime_worker_promotion_evidence_archive_replay")
+    readiness_path = _safe_input_path(final_readiness, project_root, "runtime_worker_promotion_evidence_final_readiness")
+    compact_path = _safe_input_path(compact_index, project_root, "runtime_worker_promotion_evidence_compact_index")
+    gate_path = _safe_input_path(promotion_gate, project_root, "runtime_worker_promotion_evidence_promotion_gate")
+    package = _load_input_json(package_path, "runtime_worker_promotion_evidence_release_candidate")
+    archive_payload = _load_input_json(archive_path, "runtime_worker_promotion_evidence_archive_index")
+    closure = _load_input_json(closure_path, "runtime_worker_promotion_evidence_release_closure")
+    replay = _load_input_json(replay_path, "runtime_worker_promotion_evidence_archive_replay")
+    readiness = _load_input_json(readiness_path, "runtime_worker_promotion_evidence_final_readiness")
+    compact = _load_input_json(compact_path, "runtime_worker_promotion_evidence_compact_index")
+    gate = _load_input_json(gate_path, "runtime_worker_promotion_evidence_promotion_gate")
+    _validate_release_candidate_package(package, "runtime_worker_promotion_evidence_release_candidate")
+    _validate_release_closure_bundle(closure, "runtime_worker_promotion_evidence_release_closure")
+    _validate_archive_replay_verification(replay, "runtime_worker_promotion_evidence_archive_replay")
+    _validate_final_delivery_readiness(readiness, "runtime_worker_promotion_evidence_final_readiness")
+    _validate_rc_promotion_gate(gate, "runtime_worker_promotion_evidence_promotion_gate")
+    archive_verification = _verify_archive_index(archive_payload, archive_path, project_root)
+    compact_verification = _verify_compact_archive_index(compact, compact_path, project_root)
+    if not archive_verification["archive_valid"]:
+        raise RuntimeFoundationError(
+            "runtime_worker_promotion_evidence_archive_not_ready",
+            "Evidence archive index is not evidence-ready: " + ", ".join(archive_verification["rejection_reasons"]),
+        )
+    if not compact_verification["compact_valid"]:
+        raise RuntimeFoundationError(
+            "runtime_worker_promotion_evidence_compact_not_ready",
+            "Compact archive index is not evidence-ready: " + ", ".join(compact_verification["rejection_reasons"]),
+        )
+    merge_readiness = _archive_payload_by_role(compact, "merge_readiness", project_root, "runtime_worker_promotion_evidence")
+    reviewed_refs = {
+        "source_branch": str(merge_readiness.get("source_branch", "")),
+        "source_head": str(merge_readiness.get("source_head", "")),
+        "target_branch": str(merge_readiness.get("target_branch", "")),
+        "target_before": str(merge_readiness.get("baseline", "")),
+        "final_mainline": str(final_mainline).strip() or "not_recorded_static_pre_release",
+    }
+    evidence_ready = bool(
+        closure.get("delivery_ready") is True
+        and closure.get("promotion_ready") is True
+        and replay.get("archive_replay_valid") is True
+        and readiness.get("delivery_ready") is True
+        and readiness.get("promotion_ready") is True
+        and compact_verification.get("compact_valid") is True
+        and gate.get("promotion_ready") is True
+    )
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result promotion-evidence",
+        "kind": "runtime_worker_promotion_evidence_packet",
+        "schema_version": SCHEMA_VERSION,
+        "marker": PROMOTION_EVIDENCE_PACKET_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "reviewed_refs": reviewed_refs,
+        "release_candidate_source": _artifact_source(package_path, project_root),
+        "archive_index_source": _artifact_source(archive_path, project_root),
+        "release_closure_source": _artifact_source(closure_path, project_root),
+        "archive_replay_source": _artifact_source(replay_path, project_root),
+        "final_readiness_source": _artifact_source(readiness_path, project_root),
+        "compact_archive_source": _artifact_source(compact_path, project_root),
+        "promotion_gate_source": _artifact_source(gate_path, project_root),
+        "release_closure_status": {
+            "closure_status": str(closure.get("closure_status", "unknown")),
+            "review_verdict": str(closure.get("review_verdict", "unknown")),
+            "delivery_ready": bool(closure.get("delivery_ready")),
+            "promotion_ready": bool(closure.get("promotion_ready")),
+        },
+        "archive_replay_status": {
+            "archive_replay_valid": bool(replay.get("archive_replay_valid")),
+            "archive_ready": bool(replay.get("archive_ready")),
+            "replay_ready": bool(replay.get("replay_ready")),
+        },
+        "compact_archive_terminal_status": {
+            "compact_valid": bool(compact_verification.get("compact_valid")),
+            "archive_ready": bool(compact_verification.get("archive_ready")),
+            "replay_ready": bool(compact_verification.get("replay_ready")),
+            "terminal_status": str(compact.get("terminal_status", "unknown")),
+            "record_count": int(compact_verification.get("record_count", 0)),
+        },
+        "promotion_gate_result": {
+            "promotion_ready": bool(gate.get("promotion_ready")),
+            "delivery_ready": bool(gate.get("delivery_ready")),
+            "rejection_reasons": list(gate.get("rejection_reasons", [])),
+        },
+        "delivery_promotion_readiness": {
+            "delivery_ready": evidence_ready,
+            "promotion_ready": evidence_ready,
+            "evidence_ready": evidence_ready,
+        },
+        "validation_evidence_references": _worker_validation_commands(),
+        "negative_recovery_coverage_references": [
+            "review-recovery supports fail -> fixed import -> replay -> readiness pass",
+            "archive-verify and compact-verify reject duplicate, missing, malformed, and traversal evidence cleanly",
+            "dry-run-publish refuses publish-ready status when promotion evidence is blocked",
+        ],
+        "safety_boundary_declarations": dict(WORKER_SAFETY_BOUNDARIES),
+        "no_real_promotion_proof": _no_real_promotion_proof(),
+        "evidence_ready": evidence_ready,
+        "promotion_ready": evidence_ready,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "evidence_format": evidence_format,
+        "written": True,
+    }
+    if evidence_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_promotion_evidence_text(payload))
+    return payload
+
+
+def runtime_worker_dry_run_publish_payload(
+    *,
+    promotion_evidence: str,
+    release_candidate_export: str,
+    promotion_gate: str,
+    out: str,
+    publish_format: str,
+    candidate_name: str,
+    target_branch: str,
+    target_commit: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    if publish_format not in {"json", "text"}:
+        raise RuntimeFoundationError("runtime_worker_dry_run_publish_format_invalid", f"Unsupported dry-run publish format: {publish_format}")
+    if not str(candidate_name).strip():
+        raise RuntimeFoundationError("runtime_worker_dry_run_publish_candidate_name_required", "Candidate release name is required.")
+    if not str(target_branch).strip() or not str(target_commit).strip():
+        raise RuntimeFoundationError("runtime_worker_dry_run_publish_target_required", "Target branch and target commit are required.")
+    output_path = _safe_output_path(out, project_root, "runtime_worker_dry_run_publish")
+    evidence_path = _safe_input_path(promotion_evidence, project_root, "runtime_worker_dry_run_publish_promotion_evidence")
+    export_path = _safe_input_path(release_candidate_export, project_root, "runtime_worker_dry_run_publish_release_candidate_export")
+    gate_path = _safe_input_path(promotion_gate, project_root, "runtime_worker_dry_run_publish_promotion_gate")
+    evidence = _load_input_json(evidence_path, "runtime_worker_dry_run_publish_promotion_evidence")
+    export = _load_input_json(export_path, "runtime_worker_dry_run_publish_release_candidate_export")
+    gate = _load_input_json(gate_path, "runtime_worker_dry_run_publish_promotion_gate")
+    _validate_promotion_evidence_packet(evidence, "runtime_worker_dry_run_publish_promotion_evidence")
+    _validate_release_candidate_export_packet(export, "runtime_worker_dry_run_publish_release_candidate_export")
+    _validate_rc_promotion_gate(gate, "runtime_worker_dry_run_publish_promotion_gate")
+    reasons: list[str] = []
+    if evidence.get("evidence_ready") is not True:
+        reasons.append("promotion_evidence_not_ready")
+    if export.get("export_ready") is not True:
+        reasons.append("release_candidate_export_not_ready")
+    if gate.get("promotion_ready") is not True:
+        reasons.append("promotion_gate_not_ready")
+    publish_ready = not reasons
+    payload = {
+        "ok": True,
+        "command": "runtime worker-result dry-run-publish",
+        "kind": "runtime_worker_dry_run_publish_packet",
+        "schema_version": SCHEMA_VERSION,
+        "marker": DRY_RUN_PUBLISH_PACKET_MARKER,
+        "generated_at": "deterministic-static-v1",
+        "target_branch": str(target_branch).strip(),
+        "target_commit": str(target_commit).strip(),
+        "candidate_release_id": _candidate_release_id(candidate_name, target_commit),
+        "candidate_release_name": str(candidate_name).strip(),
+        "source_evidence_references": {
+            "promotion_evidence": _artifact_source(evidence_path, project_root),
+            "release_candidate_export": _artifact_source(export_path, project_root),
+            "promotion_gate": _artifact_source(gate_path, project_root),
+        },
+        "promotion_gate_status": {
+            "promotion_ready": bool(gate.get("promotion_ready")),
+            "delivery_ready": bool(gate.get("delivery_ready")),
+            "rejection_reasons": list(gate.get("rejection_reasons", [])),
+        },
+        "publish_ready": publish_ready,
+        "dry_run_only": True,
+        "would_create_tag": False,
+        "would_create_release": False,
+        "would_push": False,
+        "would_change_default_branch": False,
+        "required_human_approval_checklist": [
+            "Confirm independent review remains PASS for the exact target commit.",
+            "Confirm release notes and rollback plan are ready.",
+            "Authorize a separate real release/tag/default-branch gate explicitly.",
+        ],
+        "required_artifacts_before_real_promotion": [
+            "promotion evidence packet",
+            "release candidate export packet",
+            "RC promotion gate packet",
+            "operator approval outside this dry-run command",
+        ],
+        "dry_run_proof": {
+            "status": "dry_run_only",
+            "exact_command": "python3 -m agent_office runtime worker-result dry-run-publish",
+            "real_tag_created": False,
+            "real_release_created": False,
+            "real_push_executed": False,
+            "default_branch_changed": False,
+        },
+        "rejection_reasons": reasons,
+        "invocation_allowed": False,
+        "external_execution_refused": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "browser_calls": False,
+        "shell_calls": False,
+        "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
+        "output_path": _project_relative(output_path, project_root),
+        "publish_format": publish_format,
+        "written": True,
+    }
+    if publish_format == "json":
+        _write_json(output_path, payload)
+    else:
+        _write_text(output_path, _format_dry_run_publish_text(payload))
+    return payload
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -2280,6 +2582,25 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"delivery_ready: {str(payload['delivery_ready']).lower()}")
         lines.append(f"rejection_reasons: {', '.join(payload['rejection_reasons']) or 'none'}")
         lines.append(f"next_action: {payload['next_action']}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_release_candidate_export_packet":
+        lines.append(f"record_count: {payload['record_count']}")
+        lines.append(f"manifest_digest: {payload['manifest_digest']}")
+        lines.append(f"export_ready: {str(payload['export_ready']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_promotion_evidence_packet":
+        lines.append(f"source_branch: {payload['reviewed_refs']['source_branch']}")
+        lines.append(f"source_head: {payload['reviewed_refs']['source_head']}")
+        lines.append(f"target_branch: {payload['reviewed_refs']['target_branch']}")
+        lines.append(f"evidence_ready: {str(payload['evidence_ready']).lower()}")
+        lines.append(f"promotion_ready: {str(payload['promotion_ready']).lower()}")
+        lines.append(f"output_path: {payload['output_path']}")
+    if payload.get("kind") == "runtime_worker_dry_run_publish_packet":
+        lines.append(f"candidate_release_id: {payload['candidate_release_id']}")
+        lines.append(f"target_branch: {payload['target_branch']}")
+        lines.append(f"target_commit: {payload['target_commit']}")
+        lines.append(f"publish_ready: {str(payload['publish_ready']).lower()}")
+        lines.append(f"would_create_tag: {str(payload['would_create_tag']).lower()}")
         lines.append(f"output_path: {payload['output_path']}")
     lines.append("provider/runtime/adapter execution: not triggered")
     return "\n".join(lines)
@@ -3076,6 +3397,11 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stable_payload_digest(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _safe_output_path(path: str, project_root: Path, code_prefix: str) -> Path:
     if not str(path).strip():
         raise RuntimeFoundationError(f"{code_prefix}_output_required", "Output path is required.")
@@ -3627,6 +3953,8 @@ def _verify_archive_index(index: dict[str, Any], index_path: Path, project_root:
     for role in ARCHIVE_REQUIRED_ROLES:
         if role not in roles:
             reasons.append(f"required_role_missing:{role}")
+    for role in sorted({role for role in roles if roles.count(role) > 1}):
+        reasons.append(f"duplicate_role:{role}")
     by_id = {str(record.get("record_id", "")): record for record in entries}
     payloads: dict[str, dict[str, Any]] = {}
     for record in entries:
@@ -3904,6 +4232,47 @@ def _format_promotion_gate_text(payload: dict[str, Any]) -> str:
     )
 
 
+
+def _format_release_candidate_export_text(payload: dict[str, Any]) -> str:
+    lines = _format_release_loop_lines(
+        "AgentOffice Release Candidate Export Packet",
+        payload,
+        ["marker", "record_count", "manifest_digest", "export_ready", "output_path"],
+    )
+    lines.extend(["", "## Records"])
+    lines.extend(f"- {record['record_id']} ({record['role']}): {record['path']} sha256={record['sha256']}" for record in payload["manifest"]["records"])
+    return "\n".join(lines)
+
+
+def _format_promotion_evidence_text(payload: dict[str, Any]) -> str:
+    lines = _format_release_loop_lines(
+        "AgentOffice Promotion Evidence Packet",
+        payload,
+        ["marker", "evidence_ready", "promotion_ready", "output_path"],
+    )
+    refs = payload["reviewed_refs"]
+    lines.extend([
+        "",
+        "## Reviewed Refs",
+        f"source_branch: {refs['source_branch']}",
+        f"source_head: {refs['source_head']}",
+        f"target_branch: {refs['target_branch']}",
+        f"target_before: {refs['target_before']}",
+        f"final_mainline: {refs['final_mainline']}",
+    ])
+    lines.extend(["", "## No Real Promotion Proof"])
+    lines.extend(f"{key}: {str(value).lower() if isinstance(value, bool) else value}" for key, value in payload["no_real_promotion_proof"].items())
+    return "\n".join(lines)
+
+
+def _format_dry_run_publish_text(payload: dict[str, Any]) -> str:
+    return _format_release_loop_text(
+        "AgentOffice Dry-run Publish Packet",
+        payload,
+        ["marker", "candidate_release_id", "target_branch", "target_commit", "publish_ready", "would_create_tag", "would_create_release", "would_push", "would_change_default_branch", "output_path"],
+    )
+
+
 def _format_release_loop_text(title: str, payload: dict[str, Any], keys: list[str]) -> str:
     return "\n".join(_format_release_loop_lines(title, payload, keys))
 
@@ -4148,6 +4517,8 @@ def _verify_compact_archive_index(index: dict[str, Any], index_path: Path, proje
     for role in COMPACT_ARCHIVE_REQUIRED_ROLES:
         if role not in roles:
             reasons.append(f"required_role_missing:{role}")
+    for role in sorted({role for role in roles if roles.count(role) > 1}):
+        reasons.append(f"duplicate_role:{role}")
     by_id = {str(record.get("record_id", "")): record for record in entries}
     payloads: dict[str, dict[str, Any]] = {}
     for record in entries:
@@ -4213,6 +4584,91 @@ def _verify_compact_archive_index(index: dict[str, Any], index_path: Path, proje
         "shell_calls": False,
         "safety_boundaries": dict(WORKER_SAFETY_BOUNDARIES),
     }
+
+
+
+def _validate_rc_promotion_gate(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_release_candidate_promotion_gate":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "RC promotion gate schema is invalid.")
+    if payload.get("marker") != RC_PROMOTION_GATE_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "RC promotion gate marker is missing.")
+    if payload.get("real_release_executed") is not False or payload.get("tag_created") is not False or payload.get("default_branch_changed") is not False:
+        raise RuntimeFoundationError(f"{code_prefix}_real_promotion_predicate_invalid", "RC promotion gate must prove no release, tag, or default branch mutation occurred.")
+    _validate_static_refusal_predicates(payload, code_prefix)
+
+
+def _validate_release_candidate_export_packet(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_release_candidate_export_packet":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Release candidate export packet schema is invalid.")
+    if payload.get("marker") != RELEASE_CANDIDATE_EXPORT_PACKET_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "Release candidate export packet marker is missing.")
+    manifest = payload.get("manifest")
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("records"), list):
+        raise RuntimeFoundationError(f"{code_prefix}_manifest_invalid", "Release candidate export manifest is invalid.")
+    digest = str(payload.get("manifest_digest", ""))
+    if not digest or digest != _stable_payload_digest(manifest):
+        raise RuntimeFoundationError(f"{code_prefix}_digest_mismatch", "Release candidate export digest does not match manifest.")
+    _validate_static_refusal_predicates(payload, code_prefix)
+
+
+def _validate_promotion_evidence_packet(payload: dict[str, Any], code_prefix: str) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("kind") != "runtime_worker_promotion_evidence_packet":
+        raise RuntimeFoundationError(f"{code_prefix}_invalid", "Promotion evidence packet schema is invalid.")
+    if payload.get("marker") != PROMOTION_EVIDENCE_PACKET_MARKER:
+        raise RuntimeFoundationError(f"{code_prefix}_marker_missing", "Promotion evidence packet marker is missing.")
+    refs = payload.get("reviewed_refs")
+    if not isinstance(refs, dict) or not refs.get("source_head") or not refs.get("target_branch"):
+        raise RuntimeFoundationError(f"{code_prefix}_refs_invalid", "Promotion evidence reviewed refs are invalid.")
+    proof = payload.get("no_real_promotion_proof")
+    if not isinstance(proof, dict) or any(proof.get(key) is not False for key in ("real_release_executed", "tag_created", "github_release_created", "default_branch_changed", "force_push_executed")):
+        raise RuntimeFoundationError(f"{code_prefix}_real_promotion_proof_invalid", "Promotion evidence must prove no real release, tag, force push, or default branch mutation occurred.")
+    _validate_static_refusal_predicates(payload, code_prefix)
+
+
+def _release_candidate_export_records(index: dict[str, Any]) -> list[dict[str, Any]]:
+    records = [record for record in index.get("records", []) if isinstance(record, dict)]
+    ordered = sorted(records, key=lambda record: (str(record.get("role", "")), str(record.get("record_id", ""))))
+    return [
+        {
+            "record_id": str(record.get("record_id", "")),
+            "role": str(record.get("role", "")),
+            "path": str(record.get("path", "")),
+            "sha256": str(record.get("sha256", "")),
+            "byte_count": int(record.get("byte_count", 0)),
+            "parents": [str(parent) for parent in record.get("parents", [])],
+            "source_marker": str(record.get("source_marker", "")),
+        }
+        for record in ordered
+    ]
+
+
+def _archive_payload_by_role(index: dict[str, Any], role: str, project_root: Path, code_prefix: str) -> dict[str, Any]:
+    records = index.get("records")
+    if not isinstance(records, list):
+        raise RuntimeFoundationError(f"{code_prefix}_records_invalid", "Archive records are invalid.")
+    matches = [record for record in records if isinstance(record, dict) and record.get("role") == role]
+    if len(matches) != 1:
+        raise RuntimeFoundationError(f"{code_prefix}_{role}_record_invalid", f"Expected exactly one archive record for role: {role}")
+    artifact_path, reasons = _archive_record_path(matches[0], project_root)
+    if artifact_path is None:
+        raise RuntimeFoundationError(f"{code_prefix}_{role}_path_invalid", ", ".join(reasons))
+    return _load_input_json(artifact_path, f"{code_prefix}_{role}")
+
+
+def _no_real_promotion_proof() -> dict[str, bool]:
+    return {
+        "real_release_executed": False,
+        "tag_created": False,
+        "github_release_created": False,
+        "default_branch_changed": False,
+        "force_push_executed": False,
+    }
+
+
+def _candidate_release_id(candidate_name: str, target_commit: str) -> str:
+    name = str(candidate_name).strip().lower().replace(" ", "-") or "agentoffice-release-candidate"
+    commit = str(target_commit).strip()[:12] or "unknown"
+    return f"{name}-{commit}"
 
 
 def _compact_archive_recovery_guidance(reasons: list[str]) -> list[str]:
