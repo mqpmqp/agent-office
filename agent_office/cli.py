@@ -80,6 +80,9 @@ from .runtime_foundation import (
     runtime_worker_provenance_replay_payload,
     runtime_worker_provenance_verify_payload,
     runtime_worker_rc_promotion_gate_payload,
+    runtime_worker_release_candidate_export_payload,
+    runtime_worker_promotion_evidence_payload,
+    runtime_worker_dry_run_publish_payload,
     runtime_worker_rejection_packet_payload,
     runtime_worker_release_candidate_payload,
     runtime_worker_release_closure_payload,
@@ -1540,6 +1543,34 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             payload = runtime_worker_compact_archive_verify_payload(compact_index=args.index, project_root=PROJECT_ROOT)
         elif action == "worker-result" and args.worker_result_action == "rc-promotion-gate":
             payload = runtime_worker_rc_promotion_gate_payload(final_readiness=args.final_readiness, compact_index=args.compact_index, release_closure=args.release_closure, out=args.out, gate_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "release-candidate-export":
+            payload = runtime_worker_release_candidate_export_payload(release_candidate=args.release_candidate, archive_index=args.archive_index, out=args.out, export_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "worker-result" and args.worker_result_action == "promotion-evidence":
+            payload = runtime_worker_promotion_evidence_payload(
+                release_candidate=args.release_candidate,
+                archive_index=args.archive_index,
+                release_closure=args.release_closure,
+                archive_replay=args.archive_replay,
+                final_readiness=args.final_readiness,
+                compact_index=args.compact_index,
+                promotion_gate=args.promotion_gate,
+                out=args.out,
+                evidence_format=args.format,
+                final_mainline=args.final_mainline,
+                project_root=PROJECT_ROOT,
+            )
+        elif action == "worker-result" and args.worker_result_action == "dry-run-publish":
+            payload = runtime_worker_dry_run_publish_payload(
+                promotion_evidence=args.promotion_evidence,
+                release_candidate_export=args.release_candidate_export,
+                promotion_gate=args.promotion_gate,
+                out=args.out,
+                publish_format=args.format,
+                candidate_name=args.candidate_name,
+                target_branch=args.target_branch,
+                target_commit=args.target_commit,
+                project_root=PROJECT_ROOT,
+            )
         else:
             raise RuntimeFoundationError("runtime_unknown_action", "unknown runtime action")
     except RuntimeFoundationError as exc:
@@ -1572,6 +1603,12 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         return 0 if payload["compact_valid"] else 2
     if action == "worker-result" and getattr(args, "worker_result_action", None) == "rc-promotion-gate":
         return 0 if payload["promotion_ready"] else 2
+    if action == "worker-result" and getattr(args, "worker_result_action", None) == "release-candidate-export":
+        return 0 if payload["export_ready"] else 2
+    if action == "worker-result" and getattr(args, "worker_result_action", None) == "promotion-evidence":
+        return 0 if payload["evidence_ready"] else 2
+    if action == "worker-result" and getattr(args, "worker_result_action", None) == "dry-run-publish":
+        return 0 if payload["publish_ready"] else 2
     return 0
 
 
@@ -2060,6 +2097,37 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_worker_rc_promotion_gate.add_argument("--format", choices=["json", "text"], default="json", help="RC promotion gate output format. Default: json.")
     runtime_worker_rc_promotion_gate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_worker_rc_promotion_gate.set_defaults(func=cmd_runtime)
+    runtime_worker_release_candidate_export = runtime_worker_result_sub.add_parser("release-candidate-export", help="Write a reviewer-ready release candidate export packet from RC and archive evidence.")
+    runtime_worker_release_candidate_export.add_argument("--release-candidate", required=True, help="Project-local release candidate package JSON path.")
+    runtime_worker_release_candidate_export.add_argument("--archive-index", required=True, help="Project-local evidence archive index JSON path.")
+    runtime_worker_release_candidate_export.add_argument("--out", required=True, help="Project-local release candidate export packet output path.")
+    runtime_worker_release_candidate_export.add_argument("--format", choices=["json", "text"], default="json", help="Release candidate export output format. Default: json.")
+    runtime_worker_release_candidate_export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_release_candidate_export.set_defaults(func=cmd_runtime)
+    runtime_worker_promotion_evidence = runtime_worker_result_sub.add_parser("promotion-evidence", help="Write a reviewer-ready promotion evidence packet without releasing or tagging.")
+    runtime_worker_promotion_evidence.add_argument("--release-candidate", required=True, help="Project-local release candidate package JSON path.")
+    runtime_worker_promotion_evidence.add_argument("--archive-index", required=True, help="Project-local evidence archive index JSON path.")
+    runtime_worker_promotion_evidence.add_argument("--release-closure", required=True, help="Project-local release closure bundle JSON path.")
+    runtime_worker_promotion_evidence.add_argument("--archive-replay", required=True, help="Project-local archive replay verification JSON path.")
+    runtime_worker_promotion_evidence.add_argument("--final-readiness", required=True, help="Project-local final readiness JSON path.")
+    runtime_worker_promotion_evidence.add_argument("--compact-index", required=True, help="Project-local compact archive index JSON path.")
+    runtime_worker_promotion_evidence.add_argument("--promotion-gate", required=True, help="Project-local RC promotion gate JSON path.")
+    runtime_worker_promotion_evidence.add_argument("--final-mainline", default="not_recorded_static_pre_release", help="Final mainline commit recorded in the evidence packet when known.")
+    runtime_worker_promotion_evidence.add_argument("--out", required=True, help="Project-local promotion evidence packet output path.")
+    runtime_worker_promotion_evidence.add_argument("--format", choices=["json", "text"], default="json", help="Promotion evidence output format. Default: json.")
+    runtime_worker_promotion_evidence.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_promotion_evidence.set_defaults(func=cmd_runtime)
+    runtime_worker_dry_run_publish = runtime_worker_result_sub.add_parser("dry-run-publish", help="Write a dry-run publish packet without tag, release, push, or default-branch mutation.")
+    runtime_worker_dry_run_publish.add_argument("--promotion-evidence", required=True, help="Project-local promotion evidence packet JSON path.")
+    runtime_worker_dry_run_publish.add_argument("--release-candidate-export", required=True, help="Project-local release candidate export packet JSON path.")
+    runtime_worker_dry_run_publish.add_argument("--promotion-gate", required=True, help="Project-local RC promotion gate JSON path.")
+    runtime_worker_dry_run_publish.add_argument("--candidate-name", required=True, help="Candidate release name recorded in the dry-run packet.")
+    runtime_worker_dry_run_publish.add_argument("--target-branch", required=True, help="Target branch that a future real publish would use.")
+    runtime_worker_dry_run_publish.add_argument("--target-commit", required=True, help="Target commit that a future real publish would use.")
+    runtime_worker_dry_run_publish.add_argument("--out", required=True, help="Project-local dry-run publish packet output path.")
+    runtime_worker_dry_run_publish.add_argument("--format", choices=["json", "text"], default="json", help="Dry-run publish output format. Default: json.")
+    runtime_worker_dry_run_publish.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_worker_dry_run_publish.set_defaults(func=cmd_runtime)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")

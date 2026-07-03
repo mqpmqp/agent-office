@@ -301,6 +301,46 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self._run_release_closure_loop(root)
         return base
 
+
+    def _run_r41_packets(self, root: Path) -> tuple[Path, dict[str, object], dict[str, object], dict[str, object]]:
+        base = self._prepare_release_closure_loop(root)
+        export = run_cli([
+            "runtime", "worker-result", "release-candidate-export",
+            "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+            "--archive-index", ".ai/workspaces/demo/archive-index.json",
+            "--out", ".ai/workspaces/demo/release-candidate-export.json",
+            "--json",
+        ], root)
+        self.assertEqual(export[0], 0, export[1] + export[2])
+        evidence = run_cli([
+            "runtime", "worker-result", "promotion-evidence",
+            "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+            "--archive-index", ".ai/workspaces/demo/archive-index.json",
+            "--release-closure", ".ai/workspaces/demo/release-closure.json",
+            "--archive-replay", ".ai/workspaces/demo/archive-replay.json",
+            "--final-readiness", ".ai/workspaces/demo/final-readiness.json",
+            "--compact-index", ".ai/workspaces/demo/compact-index.json",
+            "--promotion-gate", ".ai/workspaces/demo/promotion-gate.json",
+            "--final-mainline", "merge123",
+            "--out", ".ai/workspaces/demo/promotion-evidence.json",
+            "--json",
+        ], root)
+        self.assertEqual(evidence[0], 0, evidence[1] + evidence[2])
+        publish = run_cli([
+            "runtime", "worker-result", "dry-run-publish",
+            "--promotion-evidence", ".ai/workspaces/demo/promotion-evidence.json",
+            "--release-candidate-export", ".ai/workspaces/demo/release-candidate-export.json",
+            "--promotion-gate", ".ai/workspaces/demo/promotion-gate.json",
+            "--candidate-name", "AgentOffice R41 R45 RC",
+            "--target-branch", "phase6/mainline",
+            "--target-commit", "merge123",
+            "--out", ".ai/workspaces/demo/dry-run-publish.json",
+            "--json",
+        ], root)
+        self.assertEqual(publish[0], 0, publish[1] + publish[2])
+        self.assertNotIn("Traceback", export[1] + export[2] + evidence[1] + evidence[2] + publish[1] + publish[2])
+        return base, json.loads(export[1]), json.loads(evidence[1]), json.loads(publish[1])
+
     def test_init_json_positive_creates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2237,6 +2277,164 @@ class RuntimeFoundationCliTests(unittest.TestCase):
         self.assertIn("terminal_status: ready", compact_text_body)
         self.assertIn("promotion_ready: true", promotion_text_body)
 
+
+    def test_worker_result_r41_r45_packets_json_text_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base, export, evidence, publish = self._run_r41_packets(root)
+            export_text = run_cli([
+                "runtime", "worker-result", "release-candidate-export",
+                "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+                "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                "--out", ".ai/workspaces/demo/release-candidate-export.txt",
+                "--format", "text",
+            ], root)
+            evidence_text = run_cli([
+                "runtime", "worker-result", "promotion-evidence",
+                "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+                "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                "--release-closure", ".ai/workspaces/demo/release-closure.json",
+                "--archive-replay", ".ai/workspaces/demo/archive-replay.json",
+                "--final-readiness", ".ai/workspaces/demo/final-readiness.json",
+                "--compact-index", ".ai/workspaces/demo/compact-index.json",
+                "--promotion-gate", ".ai/workspaces/demo/promotion-gate.json",
+                "--final-mainline", "merge123",
+                "--out", ".ai/workspaces/demo/promotion-evidence.txt",
+                "--format", "text",
+            ], root)
+            publish_text = run_cli([
+                "runtime", "worker-result", "dry-run-publish",
+                "--promotion-evidence", ".ai/workspaces/demo/promotion-evidence.json",
+                "--release-candidate-export", ".ai/workspaces/demo/release-candidate-export.json",
+                "--promotion-gate", ".ai/workspaces/demo/promotion-gate.json",
+                "--candidate-name", "AgentOffice R41 R45 RC",
+                "--target-branch", "phase6/mainline",
+                "--target-commit", "merge123",
+                "--out", ".ai/workspaces/demo/dry-run-publish.txt",
+                "--format", "text",
+            ], root)
+            export_body = (base / "release-candidate-export.txt").read_text(encoding="utf-8")
+            evidence_body = (base / "promotion-evidence.txt").read_text(encoding="utf-8")
+            publish_body = (base / "dry-run-publish.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(export["kind"], "runtime_worker_release_candidate_export_packet")
+        self.assertTrue(export["export_ready"])
+        self.assertEqual(export["record_count"], len(export["manifest"]["records"]))
+        self.assertEqual(len(export["manifest_digest"]), 64)
+        record_order = [(record["role"], record["record_id"]) for record in export["manifest"]["records"]]
+        self.assertEqual(record_order, sorted(record_order))
+        self.assertEqual(evidence["kind"], "runtime_worker_promotion_evidence_packet")
+        self.assertTrue(evidence["evidence_ready"])
+        self.assertEqual(evidence["reviewed_refs"]["source_branch"], "phase45/r23-r25")
+        self.assertEqual(evidence["reviewed_refs"]["target_before"], "base123")
+        self.assertEqual(evidence["reviewed_refs"]["final_mainline"], "merge123")
+        self.assertTrue(evidence["release_closure_status"]["promotion_ready"])
+        self.assertFalse(evidence["no_real_promotion_proof"]["tag_created"])
+        self.assertEqual(publish["kind"], "runtime_worker_dry_run_publish_packet")
+        self.assertTrue(publish["publish_ready"])
+        self.assertFalse(publish["would_create_tag"])
+        self.assertFalse(publish["would_create_release"])
+        self.assertFalse(publish["would_push"])
+        self.assertFalse(publish["would_change_default_branch"])
+        for result in (export_text, evidence_text, publish_text):
+            self.assertEqual(result[0], 0, result[1] + result[2])
+            self.assertNotIn("Traceback", result[1] + result[2])
+        self.assertIn("# AgentOffice Release Candidate Export Packet", export_body)
+        self.assertIn("# AgentOffice Promotion Evidence Packet", evidence_body)
+        self.assertIn("# AgentOffice Dry-run Publish Packet", publish_body)
+
+    def test_worker_result_r41_r45_replay_and_negative_rejects_cleanly(self) -> None:
+        def write_archive_case(base: Path, name: str, mutator) -> str:
+            archive = json.loads((base / "archive-index.json").read_text(encoding="utf-8"))
+            mutator(archive)
+            archive["record_count"] = len(archive.get("records", []))
+            path = base / name
+            path.write_text(json.dumps(archive, indent=2) + "\n", encoding="utf-8")
+            return f".ai/workspaces/demo/{name}"
+
+        def export_case(root: Path, archive_path: str) -> tuple[int, str, str]:
+            return run_cli([
+                "runtime", "worker-result", "release-candidate-export",
+                "--release-candidate", ".ai/workspaces/demo/release-candidate.json",
+                "--archive-index", archive_path,
+                "--out", ".ai/workspaces/demo/reject-export.json",
+                "--json",
+            ], root)
+
+        def first_role(archive: dict[str, object], role: str) -> dict[str, object]:
+            for record in archive["records"]:
+                if record["role"] == role:
+                    return record
+            raise AssertionError(role)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base, export, evidence, publish = self._run_r41_packets(root)
+            replay = run_cli([
+                "runtime", "worker-result", "dry-run-publish",
+                "--promotion-evidence", ".ai/workspaces/demo/promotion-evidence.json",
+                "--release-candidate-export", ".ai/workspaces/demo/release-candidate-export.json",
+                "--promotion-gate", ".ai/workspaces/demo/promotion-gate.json",
+                "--candidate-name", "AgentOffice R41 R45 RC",
+                "--target-branch", "phase6/mainline",
+                "--target-commit", "merge123",
+                "--out", ".ai/workspaces/demo/dry-run-publish-replay.json",
+                "--json",
+            ], root)
+            duplicate_role_path = write_archive_case(base, "archive-duplicate-role.json", lambda archive: archive["records"].append({**first_role(archive, "release_candidate"), "record_id": "release_candidate_copy"}))
+            missing_role_path = write_archive_case(base, "archive-missing-role.json", lambda archive: archive.update({"records": [record for record in archive["records"] if record["role"] != "external_review_handoff"]}))
+            traversal_path = write_archive_case(base, "archive-traversal.json", lambda archive: first_role(archive, "release_candidate").update({"path": ".ai/workspaces/demo/../release-candidate.json"}))
+            malformed_archive = base / "archive-malformed.json"
+            malformed_archive.write_text("{", encoding="utf-8")
+            bad_review = base / "bad-review.json"
+            bad_review.write_text("{", encoding="utf-8")
+            blocked_gate = json.loads((base / "promotion-gate.json").read_text(encoding="utf-8"))
+            blocked_gate["promotion_ready"] = False
+            blocked_gate["delivery_ready"] = False
+            blocked_gate["rejection_reasons"] = ["test_blocked"]
+            (base / "promotion-gate-blocked.json").write_text(json.dumps(blocked_gate, indent=2) + "\n", encoding="utf-8")
+            blocked_publish = run_cli([
+                "runtime", "worker-result", "dry-run-publish",
+                "--promotion-evidence", ".ai/workspaces/demo/promotion-evidence.json",
+                "--release-candidate-export", ".ai/workspaces/demo/release-candidate-export.json",
+                "--promotion-gate", ".ai/workspaces/demo/promotion-gate-blocked.json",
+                "--candidate-name", "AgentOffice R41 R45 RC",
+                "--target-branch", "phase6/mainline",
+                "--target-commit", "merge123",
+                "--out", ".ai/workspaces/demo/dry-run-publish-blocked.json",
+                "--json",
+            ], root)
+            malformed_review = run_cli([
+                "runtime", "worker-result", "reviewer-archive-import",
+                "--reviewer-output", ".ai/workspaces/demo/bad-review.json",
+                "--archive-index", ".ai/workspaces/demo/archive-index.json",
+                "--expected-marker", "R29_EXTERNAL_REVIEW_COMPLETE",
+                "--out", ".ai/workspaces/demo/import-bad-review.json",
+                "--json",
+            ], root)
+            rejects = [
+                (export_case(root, duplicate_role_path), "duplicate_role:release_candidate"),
+                (export_case(root, missing_role_path), "required_role_missing:external_review_handoff"),
+                (export_case(root, traversal_path), "artifact_path_traversal:release_candidate"),
+                (export_case(root, ".ai/workspaces/demo/archive-malformed.json"), "runtime_worker_release_candidate_export_archive_index_invalid"),
+                (malformed_review, "runtime_worker_reviewer_artifact_invalid_json"),
+            ]
+
+        self.assertEqual(replay[0], 0, replay[1] + replay[2])
+        replay_payload = json.loads(replay[1])
+        self.assertEqual(replay_payload["candidate_release_id"], publish["candidate_release_id"])
+        self.assertEqual(export["manifest_digest"], export["digest"])
+        self.assertEqual(blocked_publish[0], 2, blocked_publish[1] + blocked_publish[2])
+        blocked_payload = json.loads(blocked_publish[1])
+        self.assertFalse(blocked_payload["publish_ready"])
+        self.assertIn("promotion_gate_not_ready", blocked_payload["rejection_reasons"])
+        self.assertFalse(blocked_payload["would_create_tag"])
+        for result, expected in rejects:
+            self.assertEqual(result[0], 2, result[1] + result[2])
+            self.assertIn(expected, result[1] + result[2])
+            self.assertNotIn("Traceback", result[1] + result[2])
+        self.assertNotIn("Traceback", replay[1] + replay[2] + blocked_publish[1] + blocked_publish[2])
+
     def test_worker_result_failed_review_recovery_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2412,6 +2610,9 @@ class RuntimeFoundationCliTests(unittest.TestCase):
             ["runtime", "worker-result", "compact-archive", "--help"],
             ["runtime", "worker-result", "compact-verify", "--help"],
             ["runtime", "worker-result", "rc-promotion-gate", "--help"],
+            ["runtime", "worker-result", "release-candidate-export", "--help"],
+            ["runtime", "worker-result", "promotion-evidence", "--help"],
+            ["runtime", "worker-result", "dry-run-publish", "--help"],
         ):
             with self.subTest(argv=argv):
                 stdout = io.StringIO()
