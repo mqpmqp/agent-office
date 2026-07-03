@@ -120,6 +120,46 @@ The provenance manifest chains the R23-R25 artifacts into a deterministic, tampe
 `dry-run-publish` describes what a future explicitly authorized publish would require. It records target branch, target commit, candidate release id/name, source evidence references, promotion gate status, approval checklist, and required artifacts while keeping `would_create_tag=false`, `would_create_release=false`, `would_push=false`, and `would_change_default_branch=false`. Real release/tag/default-branch promotion remains a later independent gate requiring explicit authorization.
 
 
+## v1 Final Delivery Packet
+
+P49 is the final implementation batch for AgentOffice v1. It adds a deterministic final delivery packet and verifier so reviewers can inspect the v1 delivery state without running providers, runtimes, models, external workers, or adapters.
+
+Generate the packet as JSON or reviewer-ready text:
+
+```bash
+python3 -m agent_office v1 final-delivery --json
+python3 -m agent_office v1 final-delivery
+python3 -m agent_office v1 final-delivery --out /tmp/agentoffice-v1-final-delivery.json --json
+```
+
+Verify a saved packet:
+
+```bash
+python3 -m agent_office v1 verify-final-delivery --path /tmp/agentoffice-v1-final-delivery.json --json
+python3 -m agent_office v1 verify-final-delivery --path /tmp/agentoffice-v1-final-delivery.json
+```
+
+The packet top-level contract includes `schema_version`, `packet_type`, `phase`, `status`, `repo`, `delivery`, `contracts`, `validation`, `artifacts`, `review`, `merge_gate`, `safety`, `non_goals`, and `next_actions`. Text output contains `AGENTOFFICE_V1_FINAL_DELIVERY_PACKET`; verifier text emits `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_PASS` or `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_FAIL`.
+
+Codex-only closure output files for the user-approved P49 path:
+
+- `P49_CODEX_SELF_REVIEW_OUTPUT.md`
+- `P49_CODEX_REVIEW_FIX_REPORT.md` only if the self-review requires a fix
+- `P49_CODEX_MERGE_GATE_REPORT.md`
+- `P49_V1_FINAL_RELEASE_DECLARATION.md` after mainline merge validation
+
+External artifact review is not a prerequisite when the operator explicitly chooses Codex-only closure. Do not create, cite, or imply external reviewer output unless that review actually occurred and is saved as evidence.
+
+Merge gate prerequisites:
+
+1. P49 source branch is pushed.
+2. P49 Codex self-review is complete.
+3. Any required Codex review-fix delta is complete and validated.
+4. Codex merge gate passes under explicit operator authorization.
+5. v1 final release declaration happens only after merge and post-merge validation.
+
+Safety constraints: the packet and verifier do not read `.env`, do not print environment variable values, do not trigger provider/runtime/adapter external behavior, do not tag, do not force push, and do not mutate the default branch.
+
 ## Claude Token Rule
 
 Mock Claude reads only `final-for-claude.md`. P5-05 adds a staged real Claude final judge dry-run that can also review bounded staged artifacts under `.ai/context/`, `.ai/codex/`, and `.ai/grok/`.
