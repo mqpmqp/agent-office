@@ -140,3 +140,12 @@ Coverage:
 - GitHub Release operator handoff and dry-run plan perform no network or GitHub writes
 - release-candidate packet does not create tags or releases
 - invalid candidate versions return clean failures
+
+## Milestone G - Longrun Operator Docs
+
+Status: implemented.
+
+Coverage:
+
+- README documents autonomy plan, ledger, validation, review packet, merge packet, release ops handoff, no-token release behavior, safety boundaries, and recommended operator workflow
+- existing README content was appended, not rewritten

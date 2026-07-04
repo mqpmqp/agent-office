@@ -1202,3 +1202,64 @@ P35 dogfoods the one-click Codex delivery runner introduced by P34. The intended
 5. verify local and remote `phase6/mainline` are synced to the resulting merge commit.
 
 This flow remains static and local to git/repository state; it must not read `.env`, print environment variables, or trigger provider/model/runtime/adapter behavior.
+
+## Autonomous Delivery Platform V1
+
+AgentOffice includes a local-only autonomous delivery workflow for long-running, reviewable delivery branches. These commands do not read `.env`, print environment variables, call providers or models, mutate tags, create GitHub Releases, or merge into `phase6/mainline`.
+
+Mission planning:
+
+```bash
+python3 -m agent_office autonomy plan --goal release-ops --json
+python3 -m agent_office autonomy plan --goal post-v1 --json
+python3 -m agent_office autonomy plan --goal autonomous-delivery --json
+```
+
+Run ledger and checkpoints:
+
+```bash
+python3 -m agent_office autonomy init --goal autonomous-delivery --path .ai/autonomy/runs/demo --json
+python3 -m agent_office autonomy status --path .ai/autonomy/runs/demo --json
+python3 -m agent_office autonomy checkpoint --path .ai/autonomy/runs/demo --name preflight --status passed --json
+python3 -m agent_office autonomy report --path .ai/autonomy/runs/demo --json
+```
+
+Validation recorder:
+
+```bash
+python3 -m agent_office autonomy validate --path .ai/autonomy/runs/demo --suite minimal --json
+python3 -m agent_office autonomy validate --path .ai/autonomy/runs/demo --suite release --json
+python3 -m agent_office autonomy validate --path .ai/autonomy/runs/demo --suite full --json
+```
+
+`autonomy validate` only runs built-in allowlisted suites. It is not a general shell runner. Each command record stores the command text, argv, exit code, stdout path, stderr path, and duration in the run ledger.
+
+Review and merge gate packets:
+
+```bash
+python3 -m agent_office autonomy review-packet --base <base_commit> --head HEAD --out /tmp/review-packet.md --json
+python3 -m agent_office autonomy merge-packet --source phase52/autonomous-delivery-platform-v1 --target phase6/mainline --json
+```
+
+`review-packet` writes a Markdown bundle with commit list, diff stat, name-status, full diff, file snapshots, safety boundaries, caveats, and review focus. `merge-packet` emits source/target heads, merge-base, changed files, required validations, required reports, exact merge commands, post-merge validation, and rollback notes; it does not execute a merge.
+
+Release operations handoff:
+
+```bash
+python3 -m agent_office v1 release-state --json
+python3 -m agent_office v1 github-release-handoff --json
+python3 -m agent_office v1 github-release-plan --json
+python3 -m agent_office v1 release-candidate --version v1.1.0 --json
+```
+
+No-token release behavior is explicit: `skipped_no_token` remains `publish_state=skipped`, never `published`. Release handoff and plan packets are dry-run/operator packets and perform no GitHub writes.
+
+Recommended operator workflow:
+
+1. Create or resume a feature branch.
+2. Generate an autonomy plan for the goal.
+3. Initialize a run ledger under `.ai/autonomy/runs/<run-id>`.
+4. Add checkpoints after preflight, implementation, validation, review packet, and merge packet steps.
+5. Run `minimal` validation after each milestone and `full` validation before review.
+6. Generate a review packet and merge packet.
+7. Review the branch; merge only after explicit human authorization and a fresh merge gate.
