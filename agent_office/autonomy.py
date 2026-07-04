@@ -4,6 +4,8 @@ from typing import Any
 
 import json
 import os
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +16,7 @@ PLAN_MARKER = "AGENTOFFICE_AUTONOMY_MISSION_PLAN"
 LEDGER_PACKET_TYPE = "agentoffice_autonomy_run_ledger"
 LEDGER_MARKER = "AGENTOFFICE_AUTONOMY_RUN_LEDGER"
 ALLOWED_LEDGER_STATUSES = {"pending", "running", "passed", "failed", "skipped", "blocked"}
+VALIDATION_SUITES = {"minimal", "release", "full"}
 
 
 class AutonomyError(RuntimeError):
@@ -213,6 +216,48 @@ def autonomy_report_payload(path: str, project_root: Path) -> dict[str, Any]:
     return _ledger_response("report", ledger, summary=summary)
 
 
+
+def autonomy_validate_payload(path: str, suite: str, project_root: Path) -> dict[str, Any]:
+    if suite not in VALIDATION_SUITES:
+        supported = ", ".join(sorted(VALIDATION_SUITES))
+        raise AutonomyError(f"unknown validation suite: {suite}. supported suites: {supported}.")
+    run_dir = _safe_run_dir(path, project_root, must_exist=True)
+    ledger = _read_ledger(run_dir)
+    validation_dir = run_dir / "validation" / _validation_run_id(suite)
+    validation_dir.mkdir(parents=True, exist_ok=False)
+    commands = _validation_commands(suite)
+    records = []
+    for index, command in enumerate(commands, start=1):
+        records.append(_run_validation_command(command, index, validation_dir, project_root))
+    ok = all(record["exit_code"] == 0 for record in records)
+    validation_record = {
+        "suite": suite,
+        "status": "passed" if ok else "failed",
+        "recorded_at": _now_iso(),
+        "commands": records,
+    }
+    ledger["validation_records"].append(validation_record)
+    ledger["status"] = validation_record["status"]
+    ledger["updated_at"] = validation_record["recorded_at"]
+    _write_ledger(run_dir, ledger)
+    return {"ok": ok, "action": "validate", "suite": suite, "ledger": ledger, "validation": validation_record}
+
+
+def format_autonomy_validation(payload: dict[str, Any]) -> str:
+    validation = payload["validation"]
+    lines = [
+        "AGENTOFFICE_AUTONOMY_VALIDATION",
+        f"suite: {payload['suite']}",
+        f"status: {validation['status']}",
+        f"ok: {_bool_text(bool(payload['ok']))}",
+        "commands:",
+    ]
+    for record in validation["commands"]:
+        lines.append(f"  - {record['command']}: exit_code={record['exit_code']} duration_seconds={record['duration_seconds']}")
+        lines.append(f"    stdout: {record['stdout_path']}")
+        lines.append(f"    stderr: {record['stderr_path']}")
+    return "\n".join(lines)
+
 def format_autonomy_ledger(payload: dict[str, Any]) -> str:
     ledger = payload["ledger"]
     lines = [
@@ -323,6 +368,64 @@ def _write_ledger(run_dir: Path, ledger: dict[str, Any]) -> None:
     tmp_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
     tmp_path.replace(path)
 
+
+
+def _validation_commands(suite: str) -> list[list[str]]:
+    minimal = [
+        ["python3", "-m", "compileall", "agent_office", "tests"],
+        ["python3", "-m", "unittest", "tests.test_autonomy_plan_cli"],
+        ["git", "diff", "--check"],
+    ]
+    release = [
+        ["python3", "-m", "agent_office", "v1", "final-delivery", "--json"],
+        ["python3", "-m", "agent_office", "v1", "verify-release-archive", "--archive", "/opt/agent-office/agentoffice-v1.0.0-final-delivery-archive.tar.gz", "--sha256", "/opt/agent-office/agentoffice-v1.0.0-final-delivery-archive.tar.gz.sha256", "--json"],
+        ["python3", "-m", "agent_office", "v1", "verify-github-release-readback", "--dir", "/opt/agent-office/V1_0_0_GITHUB_RELEASE_API_LONGRUN_READBACK", "--json"],
+    ]
+    full = [
+        ["python3", "-m", "compileall", "agent_office", "tests"],
+        ["python3", "-m", "unittest"],
+        ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
+        ["python3", "-m", "agent_office", "doctor", "--adapters"],
+        ["./scripts/verify.sh"],
+        ["./scripts/smoke-test.sh", "P6-PROFILES"],
+        ["python3", "-m", "agent_office", "run-staged", "P6-PROFILES", "--dry-run", "--reset"],
+        ["python3", "-m", "agent_office", "profiles", "--name", "lowest-cost", "--plan", "--json"],
+        ["git", "diff", "--check"],
+    ]
+    if suite == "minimal":
+        return minimal
+    if suite == "release":
+        return release
+    if suite == "full":
+        return full
+    raise AutonomyError(f"unknown validation suite: {suite}.")
+
+
+def _run_validation_command(command: list[str], index: int, validation_dir: Path, project_root: Path) -> dict[str, Any]:
+    started = time.monotonic()
+    result = subprocess.run(command, cwd=project_root, text=True, capture_output=True, check=False)
+    duration = round(time.monotonic() - started, 3)
+    stdout_path = validation_dir / f"{index:02d}-stdout.txt"
+    stderr_path = validation_dir / f"{index:02d}-stderr.txt"
+    stdout_path.write_text(result.stdout or "", encoding="utf-8")
+    stderr_path.write_text(result.stderr or "", encoding="utf-8")
+    return {
+        "command": _command_text(command),
+        "argv": command,
+        "exit_code": int(result.returncode),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "duration_seconds": duration,
+    }
+
+
+def _command_text(command: list[str]) -> str:
+    return " ".join(command)
+
+
+def _validation_run_id(suite: str) -> str:
+    safe_time = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{safe_time}-{suite}"
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")

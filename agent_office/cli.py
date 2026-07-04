@@ -181,8 +181,10 @@ from .autonomy import (
     autonomy_plan_payload,
     autonomy_report_payload,
     autonomy_status_payload,
+    autonomy_validate_payload,
     format_autonomy_ledger,
     format_autonomy_plan,
+    format_autonomy_validation,
 )
 
 
@@ -1663,9 +1665,13 @@ def cmd_autonomy(args: argparse.Namespace) -> int:
             payload = autonomy_report_payload(args.path, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
             return 0
+        if action == "validate":
+            payload = autonomy_validate_payload(args.path, args.suite, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_validation(payload))
+            return 0 if payload["ok"] else 2
     except AutonomyError as exc:
         raise AgentOfficeError(str(exc)) from exc
-    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, or report.")
+    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, or validate.")
 
 
 def cmd_v1(args: argparse.Namespace) -> int:
@@ -2243,6 +2249,11 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_report.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
     autonomy_report.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     autonomy_report.set_defaults(func=cmd_autonomy)
+    autonomy_validate = autonomy_sub.add_parser("validate", help="Run an allowlisted local validation suite and record transcripts.")
+    autonomy_validate.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_validate.add_argument("--suite", required=True, help="Validation suite: minimal, release, or full.")
+    autonomy_validate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_validate.set_defaults(func=cmd_autonomy)
 
     p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
     v1_sub = p.add_subparsers(dest="v1_action", required=True)

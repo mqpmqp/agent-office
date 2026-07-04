@@ -64,3 +64,23 @@ Coverage:
 - status transitions through allowlisted checkpoint statuses
 - path traversal, symlink, missing, malformed, and invalid ledger failures return clean CLI errors
 - project-root/temp path boundary enforced
+
+## Milestone C - Local Validation Recorder
+
+Status: implemented.
+
+Commands:
+
+`ash
+python3 -m agent_office autonomy validate --path .ai/autonomy/runs/demo --suite minimal --json
+python3 -m agent_office autonomy validate --path .ai/autonomy/runs/demo --suite release --json
+python3 -m agent_office autonomy validate --path .ai/autonomy/runs/demo --suite full --json
+`
+
+Coverage:
+
+- allowlisted suites only: minimal, release, full
+- no user-supplied shell command execution
+- records command text, argv, exit code, stdout path, stderr path, and duration
+- appends validation records into the run ledger and updates ledger status
+- failed command results are preserved and returned as clean JSON/text failure

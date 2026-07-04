@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -153,6 +154,71 @@ class AutonomyLedgerCliTests(unittest.TestCase):
 
         self.assertEqual(result[0], 2)
         self.assertIn("malformed JSON", result[2])
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+
+class AutonomyValidationCliTests(unittest.TestCase):
+    maxDiff = None
+
+    def test_autonomy_validate_minimal_records_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_path = root / ".ai" / "autonomy" / "runs" / "demo"
+            init = run_cli(["autonomy", "init", "--goal", "autonomous-delivery", "--path", str(run_path), "--json"], root)
+            completed = subprocess.CompletedProcess(args=["fake"], returncode=0, stdout="ok out", stderr="")
+            with patch("agent_office.autonomy.subprocess.run", return_value=completed) as run_mock:
+                result = run_cli(["autonomy", "validate", "--path", str(run_path), "--suite", "minimal", "--json"], root)
+            self.assertEqual(init[0], 0, init[1] + init[2])
+            self.assertEqual(result[0], 0, result[1] + result[2])
+            self.assertEqual(run_mock.call_count, 3)
+            payload = json.loads(result[1])
+            first = payload["validation"]["commands"][0]
+            self.assertTrue(Path(first["stdout_path"]).exists())
+            self.assertTrue(Path(first["stderr_path"]).exists())
+            self.assertEqual(Path(first["stdout_path"]).read_text(encoding="utf-8"), "ok out")
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["validation"]["suite"], "minimal")
+        self.assertEqual(payload["validation"]["status"], "passed")
+        self.assertEqual(len(payload["validation"]["commands"]), 3)
+        self.assertEqual(first["exit_code"], 0)
+        self.assertEqual(payload["ledger"]["validation_records"][0]["status"], "passed")
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+    def test_autonomy_validate_records_failed_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_path = root / ".ai" / "autonomy" / "runs" / "demo"
+            init = run_cli(["autonomy", "init", "--goal", "autonomous-delivery", "--path", str(run_path), "--json"], root)
+            results = [
+                subprocess.CompletedProcess(args=["fake1"], returncode=0, stdout="ok", stderr=""),
+                subprocess.CompletedProcess(args=["fake2"], returncode=7, stdout="", stderr="bad"),
+                subprocess.CompletedProcess(args=["fake3"], returncode=0, stdout="ok", stderr=""),
+            ]
+            with patch("agent_office.autonomy.subprocess.run", side_effect=results):
+                result = run_cli(["autonomy", "validate", "--path", str(run_path), "--suite", "minimal", "--json"], root)
+            payload = json.loads(result[1])
+            failed_stderr = Path(payload["validation"]["commands"][1]["stderr_path"]).read_text(encoding="utf-8")
+
+        self.assertEqual(init[0], 0, init[1] + init[2])
+        self.assertEqual(result[0], 2)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["validation"]["status"], "failed")
+        self.assertEqual(payload["validation"]["commands"][1]["exit_code"], 7)
+        self.assertEqual(failed_stderr, "bad")
+        self.assertEqual(payload["ledger"]["status"], "failed")
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+    def test_autonomy_validate_unknown_suite_is_clean_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_path = root / ".ai" / "autonomy" / "runs" / "demo"
+            init = run_cli(["autonomy", "init", "--goal", "autonomous-delivery", "--path", str(run_path), "--json"], root)
+            result = run_cli(["autonomy", "validate", "--path", str(run_path), "--suite", "unknown", "--json"], root)
+
+        self.assertEqual(init[0], 0, init[1] + init[2])
+        self.assertEqual(result[0], 2)
+        self.assertIn("unknown validation suite", result[2])
         self.assertNotIn("Traceback", result[1] + result[2])
 
 
