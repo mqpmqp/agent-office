@@ -180,10 +180,12 @@ from .autonomy import (
     autonomy_init_payload,
     autonomy_plan_payload,
     autonomy_report_payload,
+    autonomy_review_packet_payload,
     autonomy_status_payload,
     autonomy_validate_payload,
     format_autonomy_ledger,
     format_autonomy_plan,
+    format_autonomy_review_packet,
     format_autonomy_validation,
 )
 
@@ -1669,9 +1671,13 @@ def cmd_autonomy(args: argparse.Namespace) -> int:
             payload = autonomy_validate_payload(args.path, args.suite, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_validation(payload))
             return 0 if payload["ok"] else 2
+        if action == "review-packet":
+            payload = autonomy_review_packet_payload(args.base, args.head, args.out, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_review_packet(payload))
+            return 0
     except AutonomyError as exc:
         raise AgentOfficeError(str(exc)) from exc
-    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, or validate.")
+    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, validate, or review-packet.")
 
 
 def cmd_v1(args: argparse.Namespace) -> int:
@@ -2254,6 +2260,12 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_validate.add_argument("--suite", required=True, help="Validation suite: minimal, release, or full.")
     autonomy_validate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     autonomy_validate.set_defaults(func=cmd_autonomy)
+    autonomy_review_packet = autonomy_sub.add_parser("review-packet", help="Generate a local Markdown review packet from a commit range.")
+    autonomy_review_packet.add_argument("--base", required=True, help="Base commit or ref for diff evidence.")
+    autonomy_review_packet.add_argument("--head", required=True, help="Head commit or ref for diff evidence.")
+    autonomy_review_packet.add_argument("--out", required=True, help="Review packet Markdown output path under project root or temp directory.")
+    autonomy_review_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_review_packet.set_defaults(func=cmd_autonomy)
 
     p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
     v1_sub = p.add_subparsers(dest="v1_action", required=True)

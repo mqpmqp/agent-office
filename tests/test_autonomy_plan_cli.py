@@ -20,6 +20,22 @@ def run_cli(argv: list[str], project_root: Path) -> tuple[int, str, str]:
     return code, stdout.getvalue(), stderr.getvalue()
 
 
+def make_git_repo(root: Path) -> tuple[str, str]:
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True, capture_output=True, text=True)
+    (root / "sample.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "sample.txt"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=root, check=True, capture_output=True, text=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+    (root / "sample.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (root / "extra.txt").write_text("extra\n", encoding="utf-8")
+    subprocess.run(["git", "add", "sample.txt", "extra.txt"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "head"], cwd=root, check=True, capture_output=True, text=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+    return base, head
+
+
 class AutonomyPlanCliTests(unittest.TestCase):
     maxDiff = None
 
@@ -219,6 +235,71 @@ class AutonomyValidationCliTests(unittest.TestCase):
         self.assertEqual(init[0], 0, init[1] + init[2])
         self.assertEqual(result[0], 2)
         self.assertIn("unknown validation suite", result[2])
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+
+class AutonomyReviewPacketCliTests(unittest.TestCase):
+    maxDiff = None
+
+    def test_autonomy_review_packet_positive_json_and_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base, head = make_git_repo(root)
+            out = root / "review-packet.md"
+            result = run_cli(["autonomy", "review-packet", "--base", base, "--head", head, "--out", str(out), "--json"], root)
+            bundle = out.read_text(encoding="utf-8")
+
+        self.assertEqual(result[0], 0, result[1] + result[2])
+        payload = json.loads(result[1])
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["base"], base)
+        self.assertEqual(payload["head"], head)
+        self.assertEqual(payload["commit_count"], 1)
+        self.assertGreaterEqual(payload["snapshot_count"], 2)
+        self.assertIn("# AgentOffice Autonomy Review Packet", bundle)
+        self.assertIn("## Full Diff", bundle)
+        self.assertIn("sample.txt", bundle)
+        self.assertIn("extra.txt", bundle)
+        self.assertIn(".env is never read", bundle)
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+    def test_autonomy_review_packet_text_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base, head = make_git_repo(root)
+            out = root / "review-packet.md"
+            result = run_cli(["autonomy", "review-packet", "--base", base, "--head", head, "--out", str(out)], root)
+
+        self.assertEqual(result[0], 0, result[1] + result[2])
+        self.assertIn("AGENTOFFICE_AUTONOMY_REVIEW_PACKET", result[1])
+        self.assertIn(f"base: {base}", result[1])
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+    def test_autonomy_review_packet_rejects_unsafe_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base, head = make_git_repo(root)
+            traversal = run_cli(["autonomy", "review-packet", "--base", base, "--head", head, "--out", "../packet.md", "--json"], root)
+            target = root / "target.md"
+            target.write_text("target", encoding="utf-8")
+            link = root / "link.md"
+            link.symlink_to(target)
+            symlink = run_cli(["autonomy", "review-packet", "--base", base, "--head", head, "--out", str(link), "--json"], root)
+
+        self.assertEqual(traversal[0], 2)
+        self.assertIn("refused traversal", traversal[2])
+        self.assertEqual(symlink[0], 2)
+        self.assertIn("symlink refused", symlink[2])
+        self.assertNotIn("Traceback", traversal[1] + traversal[2] + symlink[1] + symlink[2])
+
+    def test_autonomy_review_packet_missing_ref_is_clean_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _base, head = make_git_repo(root)
+            result = run_cli(["autonomy", "review-packet", "--base", "missing-ref", "--head", head, "--out", str(root / "packet.md"), "--json"], root)
+
+        self.assertEqual(result[0], 2)
+        self.assertIn("review_packet_base failed", result[2])
         self.assertNotIn("Traceback", result[1] + result[2])
 
 

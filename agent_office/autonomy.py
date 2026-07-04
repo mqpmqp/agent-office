@@ -258,6 +258,58 @@ def format_autonomy_validation(payload: dict[str, Any]) -> str:
         lines.append(f"    stderr: {record['stderr_path']}")
     return "\n".join(lines)
 
+
+def autonomy_review_packet_payload(base: str, head: str, out: str, project_root: Path) -> dict[str, Any]:
+    out_path = _safe_output_file(out, project_root)
+    base_commit = _git_capture(["rev-parse", "--verify", base], project_root, "review_packet_base").strip()
+    head_commit = _git_capture(["rev-parse", "--verify", head], project_root, "review_packet_head").strip()
+    branch = _git_capture(["branch", "--show-current"], project_root, "review_packet_branch").strip() or "detached"
+    commits = _git_capture(["log", "--oneline", f"{base_commit}..{head_commit}"], project_root, "review_packet_log").splitlines()
+    diff_stat = _git_capture(["diff", "--stat", base_commit, head_commit], project_root, "review_packet_diff_stat")
+    name_status = _git_capture(["diff", "--name-status", base_commit, head_commit], project_root, "review_packet_name_status")
+    full_diff = _git_capture(["diff", "--no-ext-diff", base_commit, head_commit], project_root, "review_packet_full_diff")
+    snapshots = _changed_file_snapshots(name_status, head_commit, project_root)
+    bundle = _format_review_packet_markdown(
+        base_commit=base_commit,
+        head_commit=head_commit,
+        branch=branch,
+        commits=commits,
+        diff_stat=diff_stat,
+        name_status=name_status,
+        full_diff=full_diff,
+        snapshots=snapshots,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and out_path.is_symlink():
+        raise AutonomyError("review packet output symlink refused.")
+    out_path.write_text(bundle, encoding="utf-8")
+    return {
+        "ok": True,
+        "action": "review-packet",
+        "base": base_commit,
+        "head": head_commit,
+        "branch": branch,
+        "out": str(out_path),
+        "commit_count": len(commits),
+        "snapshot_count": len(snapshots),
+        "safety_boundaries": SAFETY_BOUNDARIES,
+    }
+
+
+def format_autonomy_review_packet(payload: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "AGENTOFFICE_AUTONOMY_REVIEW_PACKET",
+            f"ok: {_bool_text(bool(payload['ok']))}",
+            f"branch: {payload['branch']}",
+            f"base: {payload['base']}",
+            f"head: {payload['head']}",
+            f"out: {payload['out']}",
+            f"commits: {payload['commit_count']}",
+            f"snapshots: {payload['snapshot_count']}",
+        ]
+    )
+
 def format_autonomy_ledger(payload: dict[str, Any]) -> str:
     ledger = payload["ledger"]
     lines = [
@@ -289,6 +341,93 @@ def _ledger_response(action: str, ledger: dict[str, Any], **extra: Any) -> dict[
     payload.update(extra)
     return payload
 
+
+
+def _safe_output_file(path: str, project_root: Path) -> Path:
+    if not str(path).strip():
+        raise AutonomyError("output path is required.")
+    candidate = Path(path)
+    if any(part in {"..", ""} for part in candidate.parts) or any(part == ".env" for part in candidate.parts):
+        raise AutonomyError("output path contains refused traversal or .env component.")
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    _reject_symlink_components(candidate if candidate.exists() else candidate.parent)
+    candidate = candidate.resolve(strict=False)
+    root = project_root.resolve(strict=False)
+    tmp = Path(os.getenv("TMPDIR", "/tmp")).resolve(strict=False)
+    if not _is_relative_to(candidate, root) and not _is_relative_to(candidate, tmp):
+        raise AutonomyError("output path must stay under the project root or temp directory.")
+    if candidate.exists() and candidate.is_dir():
+        raise AutonomyError("output path is a directory.")
+    return candidate
+
+
+def _git_capture(args: list[str], project_root: Path, label: str) -> str:
+    result = subprocess.run(["git", *args], cwd=project_root, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "git command failed").strip().splitlines()
+        detail = message[0] if message else "git command failed"
+        raise AutonomyError(f"{label} failed: {detail}")
+    return result.stdout
+
+
+def _changed_file_snapshots(name_status: str, head_commit: str, project_root: Path) -> list[dict[str, Any]]:
+    snapshots = []
+    for raw_line in name_status.splitlines():
+        parts = raw_line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        file_path = parts[-1]
+        path_obj = Path(file_path)
+        if status.startswith("D") or any(part == ".env" for part in path_obj.parts):
+            snapshots.append({"path": file_path, "status": status, "skipped": True, "reason": "deleted_or_refused_path"})
+            continue
+        result = subprocess.run(["git", "show", f"{head_commit}:{file_path}"], cwd=project_root, text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            snapshots.append({"path": file_path, "status": status, "skipped": True, "reason": "snapshot_unavailable"})
+            continue
+        content = result.stdout
+        truncated = len(content) > 20000
+        snapshots.append({"path": file_path, "status": status, "skipped": False, "truncated": truncated, "content": content[:20000]})
+    return snapshots
+
+
+def _format_review_packet_markdown(*, base_commit: str, head_commit: str, branch: str, commits: list[str], diff_stat: str, name_status: str, full_diff: str, snapshots: list[dict[str, Any]]) -> str:
+    lines = [
+        "# AgentOffice Autonomy Review Packet",
+        "",
+        "Marker: AGENTOFFICE_AUTONOMY_REVIEW_PACKET",
+        "",
+        "## Scope",
+        "",
+        f"- branch: `{branch}`",
+        f"- base: `{base_commit}`",
+        f"- head: `{head_commit}`",
+        "",
+        "## Safety Boundaries",
+        "",
+    ]
+    lines.extend(f"- {boundary}" for boundary in SAFETY_BOUNDARIES)
+    lines.extend(["", "## Commit List", "", "```text"])
+    lines.extend(commits or ["none"])
+    lines.extend(["```", "", "## Diff Stat", "", "```text", diff_stat.rstrip() or "none", "```", "", "## Name Status", "", "```text", name_status.rstrip() or "none", "```", "", "## Full Diff", "", "```diff", full_diff.rstrip() or "none", "```", "", "## Changed File Snapshots", ""])
+    for snapshot in snapshots:
+        lines.append(f"### {snapshot['path']}")
+        lines.append("")
+        lines.append(f"- status: `{snapshot['status']}`")
+        if snapshot.get("skipped"):
+            lines.append(f"- skipped: `{snapshot['reason']}`")
+            lines.append("")
+            continue
+        lines.append(f"- truncated: `{_bool_text(bool(snapshot['truncated']))}`")
+        lines.append("")
+        lines.append("```text")
+        lines.append(str(snapshot["content"]).rstrip())
+        lines.append("```")
+        lines.append("")
+    lines.extend(["## Validation Summary", "", "Validation is supplied by the active autonomy ledger or external gate report.", "", "## Requested Review Focus", "", "- correctness of changed behavior", "- safety boundary preservation", "- deterministic output contracts", "- missing tests or operator caveats", "", "## Known Caveats", "", "- This packet is generated locally and does not call external reviewers or providers.", ""])
+    return "\n".join(lines)
 
 def _safe_run_dir(path: str, project_root: Path, *, must_exist: bool) -> Path:
     if not str(path).strip():

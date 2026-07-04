@@ -84,3 +84,21 @@ Coverage:
 - records command text, argv, exit code, stdout path, stderr path, and duration
 - appends validation records into the run ledger and updates ledger status
 - failed command results are preserved and returned as clean JSON/text failure
+
+## Milestone D - Review Packet Generator
+
+Status: implemented.
+
+Commands:
+
+`ash
+python3 -m agent_office autonomy review-packet --base <base_commit> --head HEAD --out /tmp/review-packet.md --json
+python3 -m agent_office autonomy review-packet --base <base_commit> --head HEAD --out /tmp/review-packet.md
+`
+
+Coverage:
+
+- local Markdown review bundle generation without provider calls
+- includes branch, base/head, commits, diff stat, name-status, full diff, safety boundaries, and changed file snapshots
+- rejects traversal, .env, symlink, directory, and outside-root output paths
+- missing git refs return clean CLI errors
