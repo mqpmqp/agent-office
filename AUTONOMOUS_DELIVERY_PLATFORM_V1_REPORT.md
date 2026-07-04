@@ -44,3 +44,23 @@ Coverage:
 - deterministic local JSON/text mission plans
 - phases, tasks, validation commands, stop conditions, safety boundaries, artifacts, review handoff, merge gate handoff
 - unknown goal clean CLI failure without traceback
+
+## Milestone B - Autonomous Run Ledger And Checkpoints
+
+Status: implemented.
+
+Commands:
+
+`ash
+python3 -m agent_office autonomy init --goal autonomous-delivery --path .ai/autonomy/runs/demo --json
+python3 -m agent_office autonomy status --path .ai/autonomy/runs/demo --json
+python3 -m agent_office autonomy checkpoint --path .ai/autonomy/runs/demo --name preflight --status passed --json
+python3 -m agent_office autonomy report --path .ai/autonomy/runs/demo --json
+`
+
+Coverage:
+
+- stable local ledger.json with checkpoints, artifacts, and validation_records lists
+- status transitions through allowlisted checkpoint statuses
+- path traversal, symlink, missing, malformed, and invalid ledger failures return clean CLI errors
+- project-root/temp path boundary enforced

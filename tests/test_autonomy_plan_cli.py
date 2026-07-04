@@ -83,5 +83,78 @@ class AutonomyPlanCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", first[1] + first[2] + second[1] + second[2])
 
 
+class AutonomyLedgerCliTests(unittest.TestCase):
+    maxDiff = None
+
+    def test_autonomy_ledger_init_status_checkpoint_report_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_path = root / ".ai" / "autonomy" / "runs" / "demo"
+            init = run_cli(["autonomy", "init", "--goal", "autonomous-delivery", "--path", str(run_path), "--json"], root)
+            status = run_cli(["autonomy", "status", "--path", str(run_path), "--json"], root)
+            checkpoint = run_cli(["autonomy", "checkpoint", "--path", str(run_path), "--name", "preflight", "--status", "passed", "--json"], root)
+            report = run_cli(["autonomy", "report", "--path", str(run_path), "--json"], root)
+
+        for result in [init, status, checkpoint, report]:
+            self.assertEqual(result[0], 0, result[1] + result[2])
+            self.assertNotIn("Traceback", result[1] + result[2])
+        init_payload = json.loads(init[1])
+        self.assertTrue(init_payload["ok"])
+        self.assertEqual(init_payload["action"], "init")
+        self.assertEqual(init_payload["ledger"]["goal"], "autonomous-delivery")
+        self.assertEqual(init_payload["ledger"]["status"], "running")
+        checkpoint_payload = json.loads(checkpoint[1])
+        self.assertEqual(checkpoint_payload["ledger"]["status"], "passed")
+        self.assertEqual(checkpoint_payload["checkpoint"]["name"], "preflight")
+        report_payload = json.loads(report[1])
+        self.assertEqual(report_payload["summary"]["checkpoint_count"], 1)
+        self.assertEqual(report_payload["summary"]["latest_checkpoint"]["status"], "passed")
+
+    def test_autonomy_ledger_text_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_path = root / ".ai" / "autonomy" / "runs" / "demo"
+            init = run_cli(["autonomy", "init", "--goal", "post-v1", "--path", str(run_path)], root)
+
+        self.assertEqual(init[0], 0, init[1] + init[2])
+        self.assertIn("AGENTOFFICE_AUTONOMY_RUN_LEDGER", init[1])
+        self.assertIn("action: init", init[1])
+        self.assertIn("goal: post-v1", init[1])
+        self.assertNotIn("Traceback", init[1] + init[2])
+
+    def test_autonomy_ledger_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = run_cli(["autonomy", "init", "--goal", "post-v1", "--path", "../outside", "--json"], Path(tmpdir))
+
+        self.assertEqual(result[0], 2)
+        self.assertIn("refused traversal", result[2])
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+    def test_autonomy_ledger_rejects_symlink_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            link.symlink_to(target, target_is_directory=True)
+            result = run_cli(["autonomy", "init", "--goal", "post-v1", "--path", str(link), "--json"], root)
+
+        self.assertEqual(result[0], 2)
+        self.assertIn("symlink refused", result[2])
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+    def test_autonomy_ledger_malformed_ledger_is_clean_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_path = root / ".ai" / "autonomy" / "runs" / "demo"
+            run_path.mkdir(parents=True)
+            (run_path / "ledger.json").write_text("{bad json", encoding="utf-8")
+            result = run_cli(["autonomy", "status", "--path", str(run_path), "--json"], root)
+
+        self.assertEqual(result[0], 2)
+        self.assertIn("malformed JSON", result[2])
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+
 if __name__ == "__main__":
     unittest.main()

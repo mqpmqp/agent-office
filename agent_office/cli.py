@@ -174,7 +174,16 @@ from .v1_post_release_ops import (
     verify_github_release_readback_payload,
     verify_release_archive_payload,
 )
-from .autonomy import AutonomyError, autonomy_plan_payload, format_autonomy_plan
+from .autonomy import (
+    AutonomyError,
+    autonomy_checkpoint_payload,
+    autonomy_init_payload,
+    autonomy_plan_payload,
+    autonomy_report_payload,
+    autonomy_status_payload,
+    format_autonomy_ledger,
+    format_autonomy_plan,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1633,14 +1642,30 @@ def cmd_runtime(args: argparse.Namespace) -> int:
 
 def cmd_autonomy(args: argparse.Namespace) -> int:
     action = args.autonomy_action
-    if action == "plan":
-        try:
+    try:
+        if action == "plan":
             payload = autonomy_plan_payload(args.goal)
-        except AutonomyError as exc:
-            raise AgentOfficeError(str(exc)) from exc
-        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_plan(payload))
-        return 0
-    raise AgentOfficeError("autonomy requires plan.")
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_plan(payload))
+            return 0
+        if action == "init":
+            payload = autonomy_init_payload(args.path, args.goal, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
+            return 0
+        if action == "status":
+            payload = autonomy_status_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
+            return 0
+        if action == "checkpoint":
+            payload = autonomy_checkpoint_payload(args.path, args.name, args.status, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
+            return 0
+        if action == "report":
+            payload = autonomy_report_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
+            return 0
+    except AutonomyError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, or report.")
 
 
 def cmd_v1(args: argparse.Namespace) -> int:
@@ -2199,6 +2224,25 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_plan.add_argument("--goal", required=True, help="Autonomous delivery goal to plan: release-ops, post-v1, or autonomous-delivery.")
     autonomy_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     autonomy_plan.set_defaults(func=cmd_autonomy)
+    autonomy_init = autonomy_sub.add_parser("init", help="Initialize a local autonomous run ledger.")
+    autonomy_init.add_argument("--goal", required=True, help="Autonomous delivery goal for the run ledger.")
+    autonomy_init.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_init.set_defaults(func=cmd_autonomy)
+    autonomy_status = autonomy_sub.add_parser("status", help="Read a local autonomous run ledger.")
+    autonomy_status.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_status.set_defaults(func=cmd_autonomy)
+    autonomy_checkpoint = autonomy_sub.add_parser("checkpoint", help="Append a checkpoint to a local autonomous run ledger.")
+    autonomy_checkpoint.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_checkpoint.add_argument("--name", required=True, help="Checkpoint name.")
+    autonomy_checkpoint.add_argument("--status", required=True, choices=["pending", "running", "passed", "failed", "skipped", "blocked"], help="Checkpoint status.")
+    autonomy_checkpoint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_checkpoint.set_defaults(func=cmd_autonomy)
+    autonomy_report = autonomy_sub.add_parser("report", help="Summarize a local autonomous run ledger.")
+    autonomy_report.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_report.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_report.set_defaults(func=cmd_autonomy)
 
     p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
     v1_sub = p.add_subparsers(dest="v1_action", required=True)

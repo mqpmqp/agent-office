@@ -2,10 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
 
 SCHEMA_VERSION = 1
 PLAN_PACKET_TYPE = "agentoffice_autonomy_mission_plan"
 PLAN_MARKER = "AGENTOFFICE_AUTONOMY_MISSION_PLAN"
+LEDGER_PACKET_TYPE = "agentoffice_autonomy_run_ledger"
+LEDGER_MARKER = "AGENTOFFICE_AUTONOMY_RUN_LEDGER"
+ALLOWED_LEDGER_STATUSES = {"pending", "running", "passed", "failed", "skipped", "blocked"}
 
 
 class AutonomyError(RuntimeError):
@@ -146,3 +154,183 @@ def _common_validation() -> list[str]:
 
 def _bool_text(value: bool) -> str:
     return "true" if value else "false"
+
+
+
+def autonomy_init_payload(path: str, goal: str, project_root: Path) -> dict[str, Any]:
+    run_dir = _safe_run_dir(path, project_root, must_exist=False)
+    normalized_goal = goal.strip().lower()
+    if normalized_goal not in _plans():
+        supported = ", ".join(sorted(_plans()))
+        raise AutonomyError(f"unknown autonomy goal: {goal}. supported goals: {supported}.")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ledger = {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": LEDGER_PACKET_TYPE,
+        "goal": normalized_goal,
+        "status": "running",
+        "path": str(run_dir),
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+        "checkpoints": [],
+        "artifacts": [],
+        "validation_records": [],
+    }
+    _write_ledger(run_dir, ledger)
+    return _ledger_response("init", ledger)
+
+
+def autonomy_status_payload(path: str, project_root: Path) -> dict[str, Any]:
+    run_dir = _safe_run_dir(path, project_root, must_exist=True)
+    ledger = _read_ledger(run_dir)
+    return _ledger_response("status", ledger)
+
+
+def autonomy_checkpoint_payload(path: str, name: str, status: str, project_root: Path) -> dict[str, Any]:
+    if status not in ALLOWED_LEDGER_STATUSES:
+        raise AutonomyError(f"invalid checkpoint status: {status}.")
+    if not name.strip():
+        raise AutonomyError("checkpoint name is required.")
+    run_dir = _safe_run_dir(path, project_root, must_exist=True)
+    ledger = _read_ledger(run_dir)
+    checkpoint = {"name": name.strip(), "status": status, "recorded_at": _now_iso()}
+    ledger["checkpoints"].append(checkpoint)
+    ledger["status"] = status
+    ledger["updated_at"] = checkpoint["recorded_at"]
+    _write_ledger(run_dir, ledger)
+    return _ledger_response("checkpoint", ledger, checkpoint=checkpoint)
+
+
+def autonomy_report_payload(path: str, project_root: Path) -> dict[str, Any]:
+    run_dir = _safe_run_dir(path, project_root, must_exist=True)
+    ledger = _read_ledger(run_dir)
+    summary = {
+        "checkpoint_count": len(ledger["checkpoints"]),
+        "artifact_count": len(ledger["artifacts"]),
+        "validation_record_count": len(ledger["validation_records"]),
+        "latest_checkpoint": ledger["checkpoints"][-1] if ledger["checkpoints"] else None,
+    }
+    return _ledger_response("report", ledger, summary=summary)
+
+
+def format_autonomy_ledger(payload: dict[str, Any]) -> str:
+    ledger = payload["ledger"]
+    lines = [
+        LEDGER_MARKER,
+        f"action: {payload['action']}",
+        f"goal: {ledger['goal']}",
+        f"status: {ledger['status']}",
+        f"path: {ledger['path']}",
+        f"checkpoints: {len(ledger['checkpoints'])}",
+        f"artifacts: {len(ledger['artifacts'])}",
+        f"validation_records: {len(ledger['validation_records'])}",
+    ]
+    checkpoint = payload.get("checkpoint")
+    if checkpoint:
+        lines.append(f"latest_checkpoint: {checkpoint['name']} ({checkpoint['status']})")
+    summary = payload.get("summary")
+    if summary:
+        lines.append("summary:")
+        lines.append(f"  checkpoint_count: {summary['checkpoint_count']}")
+        lines.append(f"  artifact_count: {summary['artifact_count']}")
+        lines.append(f"  validation_record_count: {summary['validation_record_count']}")
+        latest = summary.get("latest_checkpoint")
+        lines.append(f"  latest_checkpoint: {latest['name'] + ' (' + latest['status'] + ')' if latest else 'none'}")
+    return "\n".join(lines)
+
+
+def _ledger_response(action: str, ledger: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    payload = {"ok": True, "action": action, "ledger": ledger}
+    payload.update(extra)
+    return payload
+
+
+def _safe_run_dir(path: str, project_root: Path, *, must_exist: bool) -> Path:
+    if not str(path).strip():
+        raise AutonomyError("run path is required.")
+    candidate = Path(path)
+    if any(part in {"..", ""} for part in candidate.parts) or any(part == ".env" for part in candidate.parts):
+        raise AutonomyError("run path contains refused traversal or .env component.")
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    _reject_symlink_components(candidate)
+    candidate = candidate.resolve(strict=False)
+    root = project_root.resolve(strict=False)
+    tmp = Path(os.getenv("TMPDIR", "/tmp")).resolve(strict=False)
+    if not _is_relative_to(candidate, root) and not _is_relative_to(candidate, tmp):
+        raise AutonomyError("run path must stay under the project root or temp directory.")
+    current = candidate if candidate.exists() else candidate.parent
+    while current != current.parent:
+        if current.exists() and current.is_symlink():
+            raise AutonomyError("run path symlink refused.")
+        if current == root or current == tmp:
+            break
+        current = current.parent
+    if must_exist and not candidate.exists():
+        raise AutonomyError("run ledger path is missing.")
+    if candidate.exists() and not candidate.is_dir():
+        raise AutonomyError("run ledger path is not a directory.")
+    return candidate
+
+
+def _reject_symlink_components(path: Path) -> None:
+    current = path
+    candidates = []
+    while current != current.parent:
+        candidates.append(current)
+        current = current.parent
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_symlink():
+            raise AutonomyError("run path symlink refused.")
+
+
+def _ledger_path(run_dir: Path) -> Path:
+    return run_dir / "ledger.json"
+
+
+def _read_ledger(run_dir: Path) -> dict[str, Any]:
+    path = _ledger_path(run_dir)
+    if path.is_symlink():
+        raise AutonomyError("run ledger symlink refused.")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AutonomyError("run ledger file is missing.") from exc
+    except json.JSONDecodeError as exc:
+        raise AutonomyError("run ledger file is malformed JSON.") from exc
+    except OSError as exc:
+        raise AutonomyError("run ledger file is unreadable.") from exc
+    if not isinstance(data, dict):
+        raise AutonomyError("run ledger file must contain a JSON object.")
+    for key in ("schema_version", "packet_type", "goal", "status", "path", "created_at", "updated_at", "checkpoints", "artifacts", "validation_records"):
+        if key not in data:
+            raise AutonomyError(f"run ledger missing required key: {key}.")
+    if data["packet_type"] != LEDGER_PACKET_TYPE:
+        raise AutonomyError("run ledger packet type is invalid.")
+    if data["status"] not in ALLOWED_LEDGER_STATUSES:
+        raise AutonomyError("run ledger status is invalid.")
+    for key in ("checkpoints", "artifacts", "validation_records"):
+        if not isinstance(data[key], list):
+            raise AutonomyError(f"run ledger {key} must be a list.")
+    return data
+
+
+def _write_ledger(run_dir: Path, ledger: dict[str, Any]) -> None:
+    path = _ledger_path(run_dir)
+    if path.exists() and path.is_symlink():
+        raise AutonomyError("run ledger symlink refused.")
+    tmp_path = run_dir / "ledger.json.tmp"
+    tmp_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
