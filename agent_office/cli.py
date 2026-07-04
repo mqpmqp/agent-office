@@ -174,6 +174,7 @@ from .v1_post_release_ops import (
     verify_github_release_readback_payload,
     verify_release_archive_payload,
 )
+from .autonomy import AutonomyError, autonomy_plan_payload, format_autonomy_plan
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1630,6 +1631,18 @@ def cmd_runtime(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_autonomy(args: argparse.Namespace) -> int:
+    action = args.autonomy_action
+    if action == "plan":
+        try:
+            payload = autonomy_plan_payload(args.goal)
+        except AutonomyError as exc:
+            raise AgentOfficeError(str(exc)) from exc
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_plan(payload))
+        return 0
+    raise AgentOfficeError("autonomy requires plan.")
+
+
 def cmd_v1(args: argparse.Namespace) -> int:
     action = args.v1_action
     if action == "final-delivery":
@@ -2179,6 +2192,13 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_worker_dry_run_publish.add_argument("--format", choices=["json", "text"], default="json", help="Dry-run publish output format. Default: json.")
     runtime_worker_dry_run_publish.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_worker_dry_run_publish.set_defaults(func=cmd_runtime)
+
+    p = sub.add_parser("autonomy", help="Plan and operate local autonomous delivery workflows without external execution.")
+    autonomy_sub = p.add_subparsers(dest="autonomy_action", required=True)
+    autonomy_plan = autonomy_sub.add_parser("plan", help="Generate a deterministic local autonomous delivery mission plan.")
+    autonomy_plan.add_argument("--goal", required=True, help="Autonomous delivery goal to plan: release-ops, post-v1, or autonomous-delivery.")
+    autonomy_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_plan.set_defaults(func=cmd_autonomy)
 
     p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
     v1_sub = p.add_subparsers(dest="v1_action", required=True)
