@@ -141,6 +141,31 @@ python3 -m agent_office v1 verify-final-delivery --path /tmp/agentoffice-v1-fina
 
 The packet top-level contract includes `schema_version`, `packet_type`, `phase`, `status`, `repo`, `delivery`, `contracts`, `validation`, `artifacts`, `review`, `merge_gate`, `safety`, `non_goals`, and `next_actions`. Text output contains `AGENTOFFICE_V1_FINAL_DELIVERY_PACKET`; verifier text emits `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_PASS` or `AGENTOFFICE_V1_FINAL_DELIVERY_VERIFY_FAIL`.
 
+## Post-v1 Release Operations
+
+Post-v1 release operations add local-only verification surfaces for the v1.0.0 release archive and GitHub release readback evidence. These commands do not read `.env`, do not print environment variables, and do not call providers, runtimes, models, external workers, or adapters.
+
+Verify the release archive and its sidecar checksum:
+
+```bash
+python3 -m agent_office v1 verify-release-archive --archive /opt/agent-office/agentoffice-v1.0.0-final-delivery-archive.tar.gz --sha256 /opt/agent-office/agentoffice-v1.0.0-final-delivery-archive.tar.gz.sha256 --json
+python3 -m agent_office v1 verify-release-archive --archive /opt/agent-office/agentoffice-v1.0.0-final-delivery-archive.tar.gz --sha256 /opt/agent-office/agentoffice-v1.0.0-final-delivery-archive.tar.gz.sha256
+```
+
+Verify local GitHub release publish/readback evidence without making network requests:
+
+```bash
+python3 -m agent_office v1 verify-github-release-readback --dir /opt/agent-office/V1_0_0_GITHUB_RELEASE_API_LONGRUN_READBACK --json
+python3 -m agent_office v1 verify-github-release-readback --dir /opt/agent-office/V1_0_0_GITHUB_RELEASE_API_LONGRUN_READBACK
+```
+
+Print the deterministic post-v1 roadmap packet:
+
+```bash
+python3 -m agent_office v1 post-v1-roadmap --json
+python3 -m agent_office v1 post-v1-roadmap
+```
+
 Codex-only closure output files for the user-approved P49 path:
 
 - `P49_CODEX_SELF_REVIEW_OUTPUT.md`
