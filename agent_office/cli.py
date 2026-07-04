@@ -166,6 +166,14 @@ from .v1_final_delivery import (
     verify_final_delivery_packet,
     write_final_delivery_packet,
 )
+from .v1_post_release_ops import (
+    format_github_release_readback_verify,
+    format_post_v1_roadmap,
+    format_release_archive_verify,
+    post_v1_roadmap_payload,
+    verify_github_release_readback_payload,
+    verify_release_archive_payload,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1640,7 +1648,19 @@ def cmd_v1(args: argparse.Namespace) -> int:
         payload = verify_final_delivery_packet(args.path, PROJECT_ROOT)
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_final_delivery_verify(payload))
         return 0 if payload["ok"] else 2
-    raise AgentOfficeError("v1 requires final-delivery or verify-final-delivery.")
+    if action == "verify-release-archive":
+        payload = verify_release_archive_payload(args.archive, args.sha256)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_release_archive_verify(payload))
+        return 0 if payload["ok"] else 2
+    if action == "verify-github-release-readback":
+        payload = verify_github_release_readback_payload(args.dir)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_github_release_readback_verify(payload))
+        return 0 if payload["ok"] else 2
+    if action == "post-v1-roadmap":
+        payload = post_v1_roadmap_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_post_v1_roadmap(payload))
+        return 0
+    raise AgentOfficeError("v1 requires final-delivery, verify-final-delivery, verify-release-archive, verify-github-release-readback, or post-v1-roadmap.")
 
 
 def cmd_run_demo(args: argparse.Namespace) -> int:
@@ -2170,6 +2190,18 @@ def build_parser() -> argparse.ArgumentParser:
     verify_final_delivery.add_argument("--path", required=True, help="Final delivery packet JSON path to verify.")
     verify_final_delivery.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     verify_final_delivery.set_defaults(func=cmd_v1)
+    verify_release_archive = v1_sub.add_parser("verify-release-archive", help="Verify a local v1 release archive and checksum without external calls.")
+    verify_release_archive.add_argument("--archive", required=True, help="Release archive .tar.gz path to verify.")
+    verify_release_archive.add_argument("--sha256", required=True, help="Sidecar SHA256 file path for the release archive.")
+    verify_release_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    verify_release_archive.set_defaults(func=cmd_v1)
+    verify_github_readback = v1_sub.add_parser("verify-github-release-readback", help="Verify local GitHub release publish/readback evidence without network calls.")
+    verify_github_readback.add_argument("--dir", required=True, help="Readback directory containing state.json and optional release readback files.")
+    verify_github_readback.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    verify_github_readback.set_defaults(func=cmd_v1)
+    post_v1_roadmap = v1_sub.add_parser("post-v1-roadmap", help="Print the deterministic post-v1 release operations roadmap.")
+    post_v1_roadmap.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    post_v1_roadmap.set_defaults(func=cmd_v1)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
