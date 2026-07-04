@@ -303,5 +303,55 @@ class AutonomyReviewPacketCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", result[1] + result[2])
 
 
+class AutonomyMergePacketCliTests(unittest.TestCase):
+    maxDiff = None
+
+    def test_autonomy_merge_packet_positive_json_and_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base, head = make_git_repo(root)
+            subprocess.run(["git", "branch", "target", base], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "branch", "source", head], cwd=root, check=True, capture_output=True, text=True)
+            json_result = run_cli(["autonomy", "merge-packet", "--source", "source", "--target", "target", "--json"], root)
+            text_result = run_cli(["autonomy", "merge-packet", "--source", "source", "--target", "target"], root)
+
+        self.assertEqual(json_result[0], 0, json_result[1] + json_result[2])
+        payload = json.loads(json_result[1])
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["source_branch"], "source")
+        self.assertEqual(payload["target_branch"], "target")
+        self.assertEqual(payload["source_head"], head)
+        self.assertEqual(payload["target_head"], base)
+        self.assertFalse(payload["merge_performed"])
+        self.assertTrue(any("sample.txt" in item for item in payload["changed_files"]))
+        self.assertIn("git merge --no-ff --no-commit source", payload["merge_commands"])
+        self.assertEqual(text_result[0], 0, text_result[1] + text_result[2])
+        self.assertIn("AGENTOFFICE_AUTONOMY_MERGE_PACKET", text_result[1])
+        self.assertIn("merge_performed: false", text_result[1])
+        self.assertNotIn("Traceback", json_result[1] + json_result[2] + text_result[1] + text_result[2])
+
+    def test_autonomy_merge_packet_missing_source_is_clean_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base, _head = make_git_repo(root)
+            subprocess.run(["git", "branch", "target", base], cwd=root, check=True, capture_output=True, text=True)
+            result = run_cli(["autonomy", "merge-packet", "--source", "missing", "--target", "target", "--json"], root)
+
+        self.assertEqual(result[0], 2)
+        self.assertIn("merge_packet_source failed", result[2])
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+    def test_autonomy_merge_packet_missing_target_is_clean_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _base, head = make_git_repo(root)
+            subprocess.run(["git", "branch", "source", head], cwd=root, check=True, capture_output=True, text=True)
+            result = run_cli(["autonomy", "merge-packet", "--source", "source", "--target", "missing", "--json"], root)
+
+        self.assertEqual(result[0], 2)
+        self.assertIn("merge_packet_target failed", result[2])
+        self.assertNotIn("Traceback", result[1] + result[2])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -102,3 +102,21 @@ Coverage:
 - includes branch, base/head, commits, diff stat, name-status, full diff, safety boundaries, and changed file snapshots
 - rejects traversal, .env, symlink, directory, and outside-root output paths
 - missing git refs return clean CLI errors
+
+## Milestone E - Merge Gate Packet Generator
+
+Status: implemented.
+
+Commands:
+
+`ash
+python3 -m agent_office autonomy merge-packet --source phase52/autonomous-delivery-platform-v1 --target phase6/mainline --json
+python3 -m agent_office autonomy merge-packet --source phase52/autonomous-delivery-platform-v1 --target phase6/mainline
+`
+
+Coverage:
+
+- local-only source/target ref inspection
+- records source head, target head, merge-base, changed files, required validations, required reports, stop conditions, exact merge commands, post-merge validation, and rollback notes
+- does not execute merge or mutate branches
+- missing source/target refs return clean CLI errors

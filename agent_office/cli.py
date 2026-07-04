@@ -178,12 +178,14 @@ from .autonomy import (
     AutonomyError,
     autonomy_checkpoint_payload,
     autonomy_init_payload,
+    autonomy_merge_packet_payload,
     autonomy_plan_payload,
     autonomy_report_payload,
     autonomy_review_packet_payload,
     autonomy_status_payload,
     autonomy_validate_payload,
     format_autonomy_ledger,
+    format_autonomy_merge_packet,
     format_autonomy_plan,
     format_autonomy_review_packet,
     format_autonomy_validation,
@@ -1675,9 +1677,13 @@ def cmd_autonomy(args: argparse.Namespace) -> int:
             payload = autonomy_review_packet_payload(args.base, args.head, args.out, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_review_packet(payload))
             return 0
+        if action == "merge-packet":
+            payload = autonomy_merge_packet_payload(args.source, args.target, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_merge_packet(payload))
+            return 0
     except AutonomyError as exc:
         raise AgentOfficeError(str(exc)) from exc
-    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, validate, or review-packet.")
+    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, validate, review-packet, or merge-packet.")
 
 
 def cmd_v1(args: argparse.Namespace) -> int:
@@ -2266,6 +2272,11 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_review_packet.add_argument("--out", required=True, help="Review packet Markdown output path under project root or temp directory.")
     autonomy_review_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     autonomy_review_packet.set_defaults(func=cmd_autonomy)
+    autonomy_merge_packet = autonomy_sub.add_parser("merge-packet", help="Generate a local merge gate packet without merging.")
+    autonomy_merge_packet.add_argument("--source", required=True, help="Source branch or ref to merge later.")
+    autonomy_merge_packet.add_argument("--target", required=True, help="Target branch or ref for merge planning.")
+    autonomy_merge_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_merge_packet.set_defaults(func=cmd_autonomy)
 
     p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
     v1_sub = p.add_subparsers(dest="v1_action", required=True)

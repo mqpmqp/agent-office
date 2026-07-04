@@ -310,6 +310,93 @@ def format_autonomy_review_packet(payload: dict[str, Any]) -> str:
         ]
     )
 
+
+def autonomy_merge_packet_payload(source: str, target: str, project_root: Path) -> dict[str, Any]:
+    source_head = _git_capture(["rev-parse", "--verify", source], project_root, "merge_packet_source").strip()
+    target_head = _git_capture(["rev-parse", "--verify", target], project_root, "merge_packet_target").strip()
+    merge_base = _git_capture(["merge-base", target_head, source_head], project_root, "merge_packet_merge_base").strip()
+    changed_files_text = _git_capture(["diff", "--name-status", merge_base, source_head], project_root, "merge_packet_changed_files")
+    changed_files = [line for line in changed_files_text.splitlines() if line.strip()]
+    payload = {
+        "ok": True,
+        "action": "merge-packet",
+        "source_branch": source,
+        "target_branch": target,
+        "source_head": source_head,
+        "target_head": target_head,
+        "merge_base": merge_base,
+        "changed_files": changed_files,
+        "required_validations": [
+            "python3 -m compileall agent_office tests",
+            "python3 -m unittest",
+            "python3 -m unittest discover -s tests -p 'test_*.py'",
+            "python3 -m agent_office doctor --adapters",
+            "./scripts/verify.sh",
+            "git diff --check",
+        ],
+        "reports_required": [
+            "AUTONOMOUS_DELIVERY_PLATFORM_V1_REPORT.md",
+            "AUTONOMOUS_DELIVERY_PLATFORM_V1_SELF_REVIEW.md",
+            "AUTONOMOUS_DELIVERY_PLATFORM_V1_REVIEW_BUNDLE.md",
+            "AUTONOMOUS_DELIVERY_PLATFORM_V1_REVIEW_BUNDLE.md.sha256",
+        ],
+        "stop_conditions": STOP_CONDITIONS + [
+            "source or target head differs from this packet at merge time",
+            "feature branch has unpushed commits",
+            "review bundle or self-review is missing",
+        ],
+        "merge_commands": [
+            f"git checkout {target}",
+            f"git pull --ff-only origin {target}",
+            f"git merge --no-ff --no-commit {source}",
+            "python3 -m compileall agent_office tests",
+            "python3 -m unittest discover -s tests -p 'test_*.py'",
+            "git diff --check --cached",
+            f"git commit -m 'Merge {source}'",
+        ],
+        "post_merge_validation": [
+            "python3 -m compileall agent_office tests",
+            "python3 -m unittest",
+            "python3 -m unittest discover -s tests -p 'test_*.py'",
+            "git diff --check",
+        ],
+        "rollback_notes": [
+            "Before commit, abort a staged merge with git merge --abort.",
+            "After commit, revert the merge commit instead of force pushing.",
+            "Do not delete or overwrite tags or GitHub Releases during rollback.",
+        ],
+        "merge_performed": False,
+    }
+    return payload
+
+
+def format_autonomy_merge_packet(payload: dict[str, Any]) -> str:
+    lines = [
+        "AGENTOFFICE_AUTONOMY_MERGE_PACKET",
+        f"ok: {_bool_text(bool(payload['ok']))}",
+        f"source_branch: {payload['source_branch']}",
+        f"target_branch: {payload['target_branch']}",
+        f"source_head: {payload['source_head']}",
+        f"target_head: {payload['target_head']}",
+        f"merge_base: {payload['merge_base']}",
+        "changed_files:",
+    ]
+    lines.extend(f"  - {item}" for item in payload["changed_files"] or ["none"])
+    lines.append("required_validations:")
+    lines.extend(f"  - {item}" for item in payload["required_validations"])
+    lines.append("reports_required:")
+    lines.extend(f"  - {item}" for item in payload["reports_required"])
+    lines.append("stop_conditions:")
+    lines.extend(f"  - {item}" for item in payload["stop_conditions"])
+    lines.append("exact_merge_commands:")
+    lines.extend(f"  - {item}" for item in payload["merge_commands"])
+    lines.append("post_merge_validation:")
+    lines.extend(f"  - {item}" for item in payload["post_merge_validation"])
+    lines.append("rollback_notes:")
+    lines.extend(f"  - {item}" for item in payload["rollback_notes"])
+    lines.append("merge_performed: false")
+    return "\n".join(lines)
+
 def format_autonomy_ledger(payload: dict[str, Any]) -> str:
     ledger = payload["ledger"]
     lines = [
