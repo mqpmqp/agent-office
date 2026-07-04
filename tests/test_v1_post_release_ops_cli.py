@@ -247,3 +247,69 @@ class V1PostReleaseOpsCliTests(unittest.TestCase):
         self.assertIn("AGENTOFFICE_POST_V1_ROADMAP", text_result[1])
         self.assertIn("v1.0.1 hotfix lane", text_result[1])
         self.assertNotIn("Traceback", first_json[1] + first_json[2] + text_result[1] + text_result[2])
+
+    def test_release_ops_v11_surfaces_are_tokenless_and_local(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            commands = [
+                ["v1", "release-state", "--json"],
+                ["v1", "github-release-handoff", "--json"],
+                ["v1", "github-release-plan", "--json"],
+                ["v1", "release-candidate", "--version", "v1.1.0", "--json"],
+            ]
+            results = [run_cli(command, root) for command in commands]
+
+        for result in results:
+            self.assertEqual(result[0], 0, result[1] + result[2])
+            payload = json.loads(result[1])
+            self.assertFalse(payload.get("github_write_performed", False))
+            self.assertFalse(payload.get("network_required", False))
+            self.assertNotIn("Traceback", result[1] + result[2])
+        release_state = json.loads(results[0][1])
+        self.assertEqual(release_state["packet_type"], "agentoffice_v1_release_state")
+        self.assertEqual(release_state["publish_state"], "skipped")
+        self.assertEqual(release_state["github_release_status"], "skipped_no_token")
+        handoff = json.loads(results[1][1])
+        self.assertEqual(handoff["packet_type"], "agentoffice_v1_github_release_handoff")
+        self.assertIn("required_assets", handoff)
+        plan = json.loads(results[2][1])
+        self.assertEqual(plan["plan_type"], "dry_run_only")
+        candidate = json.loads(results[3][1])
+        self.assertTrue(candidate["ok"])
+        self.assertFalse(candidate["tag_created"])
+
+    def test_release_ops_v11_text_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            results = [
+                run_cli(["v1", "release-state"], root),
+                run_cli(["v1", "github-release-handoff"], root),
+                run_cli(["v1", "github-release-plan"], root),
+                run_cli(["v1", "release-candidate", "--version", "v1.1.0"], root),
+            ]
+
+        markers = [
+            "AGENTOFFICE_V1_RELEASE_STATE",
+            "AGENTOFFICE_V1_GITHUB_RELEASE_HANDOFF",
+            "AGENTOFFICE_V1_GITHUB_RELEASE_PLAN",
+            "AGENTOFFICE_V1_RELEASE_CANDIDATE",
+        ]
+        for result, marker in zip(results, markers):
+            self.assertEqual(result[0], 0, result[1] + result[2])
+            self.assertIn(marker, result[1])
+            self.assertIn("github_write_performed: false", result[1])
+            self.assertNotIn("Traceback", result[1] + result[2])
+
+    def test_release_candidate_invalid_version_is_clean_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            json_result = run_cli(["v1", "release-candidate", "--version", "1.1.0", "--json"], root)
+            text_result = run_cli(["v1", "release-candidate", "--version", "1.1.0"], root)
+
+        self.assertEqual(json_result[0], 2)
+        payload = json.loads(json_result[1])
+        self.assertFalse(payload["ok"])
+        self.assertIn("release_candidate_invalid_version", payload["errors"])
+        self.assertEqual(text_result[0], 2)
+        self.assertIn("AGENTOFFICE_V1_RELEASE_CANDIDATE_FAIL", text_result[1])
+        self.assertNotIn("Traceback", json_result[1] + json_result[2] + text_result[1] + text_result[2])

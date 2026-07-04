@@ -120,3 +120,23 @@ Coverage:
 - records source head, target head, merge-base, changed files, required validations, required reports, stop conditions, exact merge commands, post-merge validation, and rollback notes
 - does not execute merge or mutate branches
 - missing source/target refs return clean CLI errors
+
+## Milestone F - Release Operations System V1.1
+
+Status: implemented.
+
+Commands:
+
+`ash
+python3 -m agent_office v1 release-state --json
+python3 -m agent_office v1 github-release-handoff --json
+python3 -m agent_office v1 github-release-plan --json
+python3 -m agent_office v1 release-candidate --version v1.1.0 --json
+`
+
+Coverage:
+
+- tokenless release-state honesty: skipped_no_token remains skipped, not published
+- GitHub Release operator handoff and dry-run plan perform no network or GitHub writes
+- release-candidate packet does not create tags or releases
+- invalid candidate versions return clean failures

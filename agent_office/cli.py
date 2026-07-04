@@ -167,10 +167,18 @@ from .v1_final_delivery import (
     write_final_delivery_packet,
 )
 from .v1_post_release_ops import (
+    format_github_release_handoff,
+    format_github_release_plan,
     format_github_release_readback_verify,
     format_post_v1_roadmap,
     format_release_archive_verify,
+    format_release_candidate,
+    format_release_state,
+    github_release_handoff_payload,
+    github_release_plan_payload,
     post_v1_roadmap_payload,
+    release_candidate_payload,
+    release_state_payload,
     verify_github_release_readback_payload,
     verify_release_archive_payload,
 )
@@ -1716,7 +1724,23 @@ def cmd_v1(args: argparse.Namespace) -> int:
         payload = post_v1_roadmap_payload()
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_post_v1_roadmap(payload))
         return 0
-    raise AgentOfficeError("v1 requires final-delivery, verify-final-delivery, verify-release-archive, verify-github-release-readback, or post-v1-roadmap.")
+    if action == "release-state":
+        payload = release_state_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_release_state(payload))
+        return 0
+    if action == "github-release-handoff":
+        payload = github_release_handoff_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_github_release_handoff(payload))
+        return 0
+    if action == "github-release-plan":
+        payload = github_release_plan_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_github_release_plan(payload))
+        return 0
+    if action == "release-candidate":
+        payload = release_candidate_payload(args.version)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_release_candidate(payload))
+        return 0 if payload["ok"] else 2
+    raise AgentOfficeError("v1 requires final-delivery, verify-final-delivery, verify-release-archive, verify-github-release-readback, post-v1-roadmap, release-state, github-release-handoff, github-release-plan, or release-candidate.")
 
 
 def cmd_run_demo(args: argparse.Namespace) -> int:
@@ -2300,6 +2324,19 @@ def build_parser() -> argparse.ArgumentParser:
     post_v1_roadmap = v1_sub.add_parser("post-v1-roadmap", help="Print the deterministic post-v1 release operations roadmap.")
     post_v1_roadmap.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     post_v1_roadmap.set_defaults(func=cmd_v1)
+    release_state = v1_sub.add_parser("release-state", help="Print tokenless local v1 release state without network calls.")
+    release_state.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    release_state.set_defaults(func=cmd_v1)
+    github_handoff = v1_sub.add_parser("github-release-handoff", help="Print tokenless GitHub Release operator handoff guidance.")
+    github_handoff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    github_handoff.set_defaults(func=cmd_v1)
+    github_plan = v1_sub.add_parser("github-release-plan", help="Print a dry-run GitHub Release publish plan without writes.")
+    github_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    github_plan.set_defaults(func=cmd_v1)
+    release_candidate = v1_sub.add_parser("release-candidate", help="Print a local release candidate readiness packet without tagging or release writes.")
+    release_candidate.add_argument("--version", required=True, help="Candidate version, for example v1.1.0.")
+    release_candidate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    release_candidate.set_defaults(func=cmd_v1)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")

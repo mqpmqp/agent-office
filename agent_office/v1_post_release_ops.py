@@ -316,6 +316,178 @@ def format_post_v1_roadmap(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+
+def release_state_payload() -> dict[str, Any]:
+    archive = Path("/opt/agent-office/agentoffice-v1.0.0-final-delivery-archive.tar.gz")
+    sha256 = Path("/opt/agent-office/agentoffice-v1.0.0-final-delivery-archive.tar.gz.sha256")
+    readback = Path("/opt/agent-office/V1_0_0_GITHUB_RELEASE_API_LONGRUN_READBACK")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_v1_release_state",
+        "release_tag": RELEASE_TAG,
+        "release_commit": RELEASE_COMMIT,
+        "mainline_branch": MAINLINE_BRANCH,
+        "archive_present": archive.exists() and archive.is_file() and not archive.is_symlink(),
+        "sha256_present": sha256.exists() and sha256.is_file() and not sha256.is_symlink(),
+        "github_release_status": "skipped_no_token",
+        "publish_state": "skipped",
+        "release_url": None,
+        "readback_dir_present": readback.exists() and readback.is_dir() and not readback.is_symlink(),
+        "github_write_performed": False,
+        "network_required": False,
+        "token_required_for_publish": True,
+        "safety": _release_ops_safety(),
+    }
+
+
+def github_release_handoff_payload() -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_v1_github_release_handoff",
+        "release_tag": RELEASE_TAG,
+        "release_title": RELEASE_TITLE,
+        "status": "tokenless_handoff_ready",
+        "github_write_performed": False,
+        "network_required": False,
+        "operator_steps": [
+            "Confirm v1.0.0 tag points at the recorded release commit.",
+            "Verify release archive and SHA256 sidecar locally.",
+            "Create or verify the GitHub Release only from an authenticated operator session.",
+            "Upload required assets without deleting or overwriting existing release assets unless explicitly approved.",
+            "Save readback evidence and run verify-github-release-readback.",
+        ],
+        "required_assets": list(REQUIRED_RELEASE_ASSETS),
+        "safety": _release_ops_safety(),
+    }
+
+
+def github_release_plan_payload() -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_v1_github_release_plan",
+        "release_tag": RELEASE_TAG,
+        "release_title": RELEASE_TITLE,
+        "plan_type": "dry_run_only",
+        "github_write_performed": False,
+        "network_required": False,
+        "preflight": [
+            "verify tag commit matches release commit",
+            "verify archive checksum and internal SHA256SUMS",
+            "verify required release notes and reports are present",
+            "confirm token scope and operator approval before any remote write",
+        ],
+        "write_steps_when_authorized": [
+            "create draft release if it does not exist",
+            "upload required assets exactly once",
+            "read back release JSON and asset list",
+            "run local readback verifier",
+        ],
+        "stop_conditions": [
+            "missing token or explicit operator approval",
+            "existing release has conflicting assets",
+            "tag commit mismatch",
+            "partial remote state",
+        ],
+        "safety": _release_ops_safety(),
+    }
+
+
+def release_candidate_payload(version: str) -> dict[str, Any]:
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", version):
+        return {
+            "ok": False,
+            "schema_version": SCHEMA_VERSION,
+            "packet_type": "agentoffice_v1_release_candidate",
+            "version": version,
+            "errors": ["release_candidate_invalid_version"],
+        }
+    return {
+        "ok": True,
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_v1_release_candidate",
+        "version": version,
+        "base_release": RELEASE_TAG,
+        "base_commit": RELEASE_COMMIT,
+        "status": "candidate_plan_ready",
+        "github_write_performed": False,
+        "tag_created": False,
+        "network_required": False,
+        "required_validations": [
+            "python3 -m compileall agent_office tests",
+            "python3 -m unittest",
+            "python3 -m unittest discover -s tests -p 'test_*.py'",
+            "python3 -m agent_office doctor --adapters",
+            "./scripts/verify.sh",
+            "git diff --check",
+        ],
+        "required_packets": [
+            "release-state",
+            "github-release-handoff",
+            "github-release-plan",
+            "merge gate packet",
+            "review bundle",
+        ],
+        "safety": _release_ops_safety(),
+        "errors": [],
+    }
+
+
+def format_release_state(payload: dict[str, Any]) -> str:
+    return "\n".join([
+        "AGENTOFFICE_V1_RELEASE_STATE",
+        f"release_tag: {payload['release_tag']}",
+        f"release_commit: {payload['release_commit']}",
+        f"archive_present: {_bool_text(bool(payload['archive_present']))}",
+        f"sha256_present: {_bool_text(bool(payload['sha256_present']))}",
+        f"github_release_status: {payload['github_release_status']}",
+        f"publish_state: {payload['publish_state']}",
+        "github_write_performed: false",
+        "network_required: false",
+    ])
+
+
+def format_github_release_handoff(payload: dict[str, Any]) -> str:
+    lines = ["AGENTOFFICE_V1_GITHUB_RELEASE_HANDOFF", f"status: {payload['status']}", "github_write_performed: false", "operator_steps:"]
+    lines.extend(f"  - {step}" for step in payload["operator_steps"])
+    lines.append("required_assets:")
+    lines.extend(f"  - {asset}" for asset in payload["required_assets"])
+    return "\n".join(lines)
+
+
+def format_github_release_plan(payload: dict[str, Any]) -> str:
+    lines = ["AGENTOFFICE_V1_GITHUB_RELEASE_PLAN", f"plan_type: {payload['plan_type']}", "github_write_performed: false", "preflight:"]
+    lines.extend(f"  - {step}" for step in payload["preflight"])
+    lines.append("stop_conditions:")
+    lines.extend(f"  - {condition}" for condition in payload["stop_conditions"])
+    return "\n".join(lines)
+
+
+def format_release_candidate(payload: dict[str, Any]) -> str:
+    marker = "AGENTOFFICE_V1_RELEASE_CANDIDATE" if payload["ok"] else "AGENTOFFICE_V1_RELEASE_CANDIDATE_FAIL"
+    lines = [marker, f"ok: {_bool_text(bool(payload['ok']))}", f"version: {payload['version']}"]
+    if payload["ok"]:
+        lines.extend([f"base_release: {payload['base_release']}", "github_write_performed: false", "tag_created: false", "required_validations:"])
+        lines.extend(f"  - {command}" for command in payload["required_validations"])
+    else:
+        lines.append("errors:")
+        lines.extend(f"  - {error}" for error in payload["errors"])
+    return "\n".join(lines)
+
+
+def _release_ops_safety() -> dict[str, bool]:
+    return {
+        "dotenv_read": False,
+        "env_vars_printed": False,
+        "token_printed": False,
+        "github_write_performed": False,
+        "tag_created": False,
+        "tag_deleted": False,
+        "release_deleted": False,
+        "release_asset_deleted": False,
+        "network_required": False,
+        "provider_runtime_adapter_external_behavior": False,
+    }
+
 def _safe_file_path(path: str, code_prefix: str, errors: list[str]) -> Path | None:
     if not str(path).strip():
         errors.append(f"{code_prefix}_missing_path")
