@@ -1335,3 +1335,27 @@ Recovery workflow:
 3. If the recommendation is `retry_failed`, inspect validation artifacts first, then run `recover-plan --retry-failed` before any `resume --retry-failed`.
 4. If the recommendation is `inspect_blocked`, complete the manual or upstream action and generate `goal-handoff` for reviewer context.
 5. Keep merge decisions outside the runner; these commands do not merge, push, mutate tags, mutate GitHub Releases, call providers, call models, or execute arbitrary shell commands.
+
+### Local multi-agent runtime V1
+
+P55-P60 add a local-only multi-agent runtime prototype under `runtime`. It is a deterministic contract layer, not a real LLM agent system: the planner is static, memory is local JSONL, the scheduler is not a daemon, the parallel executor defaults to bounded dry-run simulation, and orchestration does not trigger providers, models, adapters, network workers, or external runtime behavior.
+
+```bash
+python3 -m agent_office runtime workspace init --workspace .ai/local-runtime/demo --run-id demo-run --json
+python3 -m agent_office runtime workspace status --workspace .ai/local-runtime/demo --json
+python3 -m agent_office runtime memory write --workspace .ai/local-runtime/demo --goal-id plan-objective --agent-role planner --kind note --content "local note" --json
+python3 -m agent_office runtime memory summarize --workspace .ai/local-runtime/demo --json
+python3 -m agent_office runtime planner --workspace .ai/local-runtime/demo --objective "ship local runtime" --json
+python3 -m agent_office runtime scheduler --workspace .ai/local-runtime/demo --json
+python3 -m agent_office runtime parallel --workspace .ai/local-runtime/demo --max-workers 2 --json
+python3 -m agent_office runtime orchestrate --workspace .ai/local-runtime/demo --objective "ship local runtime" --json
+python3 -m agent_office runtime orchestrate --workspace .ai/local-runtime/demo --resume --json
+```
+
+Operator flow:
+
+1. Initialize the workspace once with a stable `run-id`.
+2. Write local memory records only when they are safe to store in JSONL; do not put secrets in memory content.
+3. Run `planner`, inspect `scheduler`, then use `parallel` for safe bounded dry-run simulation.
+4. Use `orchestrate` to produce the reviewer packet, handoff packet, and final runtime report under the workspace.
+5. Use `orchestrate --resume` to inspect recovery state from scheduler/executor/failure ledgers.

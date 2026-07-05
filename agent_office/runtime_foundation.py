@@ -2303,6 +2303,729 @@ def runtime_worker_dry_run_publish_payload(
         _write_text(output_path, _format_dry_run_publish_text(payload))
     return payload
 
+
+LOCAL_RUNTIME_MARKER = "AGENTOFFICE_LOCAL_MULTI_AGENT_RUNTIME_V1"
+LOCAL_RUNTIME_PACKET_TYPE = "agentoffice_local_multi_agent_runtime_v1"
+LOCAL_RUNTIME_CREATED_AT = "deterministic-static-v1"
+LOCAL_GOAL_STATUSES = {"pending", "running", "completed", "failed", "skipped", "blocked"}
+LOCAL_AGENT_ROLES = {"planner", "scheduler", "executor", "reviewer", "operator"}
+
+
+def runtime_workspace_payload(*, action: str, workspace: str, run_id: str | None = None, out: str | None = None, project_root: Path) -> dict[str, Any]:
+    if action == "init":
+        required_run_id = _local_required_id(run_id, "runtime_workspace_run_id_required", "runtime workspace init requires --run-id.")
+        workspace_root = _local_workspace_path(workspace, project_root, must_exist=False)
+        if workspace_root.exists() and workspace_root.is_symlink():
+            raise RuntimeFoundationError("runtime_workspace_symlink_refused", f"Refusing workspace symlink: {workspace}")
+        if workspace_root.exists() and not workspace_root.is_dir():
+            raise RuntimeFoundationError("runtime_workspace_not_directory", f"Workspace path is not a directory: {workspace}")
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        paths = _local_workspace_files(workspace_root)
+        paths["agent_outputs"].mkdir(parents=True, exist_ok=True)
+        paths["reports"].mkdir(parents=True, exist_ok=True)
+        _touch_jsonl(paths["memory"])
+        if not paths["goal_queue"].exists():
+            _write_json(paths["goal_queue"], _local_empty_goal_queue(required_run_id))
+        if not paths["scheduler_ledger"].exists():
+            _write_json(paths["scheduler_ledger"], _local_empty_ledger("scheduler"))
+        if not paths["executor_ledger"].exists():
+            _write_json(paths["executor_ledger"], _local_empty_ledger("executor"))
+        if not paths["failure_ledger"].exists():
+            _write_json(paths["failure_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_executor_failure_ledger", "failures": []})
+        schema = _local_workspace_schema(workspace_root, required_run_id, project_root)
+        _write_json(paths["workspace"], schema)
+        return _local_base_payload("runtime workspace init", schema=schema, status="initialized")
+
+    schema, workspace_root, paths = _load_local_workspace(workspace, project_root)
+    if action == "inspect":
+        return _local_base_payload("runtime workspace inspect", schema=schema, status=_local_status_from_goals(paths))
+    if action == "status":
+        queue = _load_local_goal_queue(paths["goal_queue"], required=False)
+        scheduler = _local_scheduler_snapshot(queue)
+        payload = _local_base_payload("runtime workspace status", schema=schema, status=_local_status_from_scheduler(scheduler))
+        payload.update(
+            {
+                "goal_counts": scheduler["counts"],
+                "ready_goal_ids": [goal["goal_id"] for goal in scheduler["ready"]],
+                "blocked_goal_ids": [goal["goal_id"] for goal in scheduler["blocked"]],
+                "running_goal_ids": [goal["goal_id"] for goal in scheduler["running"]],
+                "completed_goal_ids": [goal["goal_id"] for goal in scheduler["completed"]],
+                "failed_goal_ids": [goal["goal_id"] for goal in scheduler["failed"]],
+                "skipped_goal_ids": [goal["goal_id"] for goal in scheduler["skipped"]],
+                "memory_count": len(_load_local_memory_records(paths["memory"])),
+                "next_action": scheduler["next_action"],
+            }
+        )
+        return payload
+    if action == "report":
+        payload = runtime_workspace_payload(action="status", workspace=workspace, project_root=project_root)
+        output_path = _local_output_or_default(out, paths["reports"] / "workspace-report.md", project_root, "runtime_workspace_report")
+        _write_text(output_path, _local_workspace_report_text(payload))
+        payload = dict(payload)
+        payload["command"] = "runtime workspace report"
+        payload["output_path"] = _project_relative(output_path, project_root)
+        payload["written"] = True
+        return payload
+    if action == "packet":
+        payload = runtime_workspace_payload(action="status", workspace=workspace, project_root=project_root)
+        output_path = _local_output_or_default(out, paths["handoff_packet"], project_root, "runtime_workspace_packet")
+        packet = {
+            "ok": True,
+            "schema_version": SCHEMA_VERSION,
+            "packet_type": "agentoffice_local_runtime_handoff_packet",
+            "marker": LOCAL_RUNTIME_MARKER,
+            "workspace": payload["workspace"],
+            "run_id": payload["run_id"],
+            "status": payload["status"],
+            "goal_counts": payload["goal_counts"],
+            "next_action": payload["next_action"],
+            "operator_summary": _local_operator_summary(payload),
+            "safety": _local_runtime_safety(),
+            "created_at": LOCAL_RUNTIME_CREATED_AT,
+        }
+        _write_json(output_path, packet)
+        packet["command"] = "runtime workspace packet"
+        packet["output_path"] = _project_relative(output_path, project_root)
+        packet["written"] = True
+        return packet
+    raise RuntimeFoundationError("runtime_workspace_unknown_action", f"Unsupported runtime workspace action: {action}")
+
+
+def runtime_memory_payload(
+    *,
+    action: str,
+    workspace: str,
+    project_root: Path,
+    memory_id: str | None = None,
+    goal_id: str | None = None,
+    agent_role: str | None = None,
+    kind: str | None = None,
+    content: str | None = None,
+    summary: str | None = None,
+    source_command: str | None = None,
+    source_artifact: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    schema, _, paths = _load_local_workspace(workspace, project_root)
+    records = _load_local_memory_records(paths["memory"])
+    if action == "write":
+        required_goal_id = _local_required_id(goal_id, "runtime_memory_goal_id_required", "memory write requires --goal-id.")
+        required_role = _local_agent_role(agent_role)
+        required_kind = _local_required_id(kind, "runtime_memory_kind_required", "memory write requires --kind.")
+        required_content = _local_required_text(content, "runtime_memory_content_required", "memory write requires --content.")
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "memory_id": f"mem-{len(records) + 1:04d}",
+            "run_id": str(schema["run_id"]),
+            "goal_id": required_goal_id,
+            "agent_role": required_role,
+            "kind": required_kind,
+            "content": required_content,
+            "summary": summary.strip() if summary and summary.strip() else _local_summarize_text(required_content),
+            "created_at": LOCAL_RUNTIME_CREATED_AT,
+            "source": {
+                "command": source_command or "runtime memory write",
+                "artifact": source_artifact or "",
+            },
+        }
+        _append_jsonl(paths["memory"], record)
+        payload = _local_base_payload("runtime memory write", schema=schema, status=_local_status_from_goals(paths))
+        payload.update({"record": record, "record_count": len(records) + 1})
+        return payload
+    filtered = _filter_local_memory(records, run_id=run_id, goal_id=goal_id, agent_role=agent_role)
+    if action == "list":
+        payload = _local_base_payload("runtime memory list", schema=schema, status=_local_status_from_goals(paths))
+        payload.update({"records": filtered, "record_count": len(filtered), "filters": {"run_id": run_id, "goal_id": goal_id, "agent_role": agent_role}})
+        return payload
+    if action == "inspect":
+        required_memory_id = _local_required_id(memory_id, "runtime_memory_id_required", "memory inspect requires --memory-id.")
+        for record in records:
+            if record.get("memory_id") == required_memory_id:
+                payload = _local_base_payload("runtime memory inspect", schema=schema, status=_local_status_from_goals(paths))
+                payload.update({"record": record})
+                return payload
+        raise RuntimeFoundationError("runtime_memory_missing", f"Memory record not found: {required_memory_id}")
+    if action == "summarize":
+        payload = _local_base_payload("runtime memory summarize", schema=schema, status=_local_status_from_goals(paths))
+        payload.update({"summary": _local_memory_summary(filtered), "record_count": len(filtered), "filters": {"run_id": run_id, "goal_id": goal_id, "agent_role": agent_role}})
+        return payload
+    raise RuntimeFoundationError("runtime_memory_unknown_action", f"Unsupported runtime memory action: {action}")
+
+
+def runtime_planner_payload(*, workspace: str, objective: str | None, explain: bool, project_root: Path) -> dict[str, Any]:
+    schema, _, paths = _load_local_workspace(workspace, project_root)
+    objective_text = _local_required_text(objective, "runtime_planner_objective_required", "runtime planner requires --objective.")
+    memory_records = _load_local_memory_records(paths["memory"])
+    existing = _load_local_goal_queue(paths["goal_queue"], required=False).get("goals", [])
+    goals = _local_plan_goals(objective_text)
+    graph = {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_local_plan_graph",
+        "run_id": str(schema["run_id"]),
+        "objective": objective_text,
+        "goals": goals,
+        "dependency_edges": _local_dependency_edges(goals),
+        "generated_at": LOCAL_RUNTIME_CREATED_AT,
+    }
+    _write_json(paths["goal_queue"], graph)
+    payload = _local_base_payload("runtime planner", schema=schema, status="planned")
+    payload.update(
+        {
+            "objective": objective_text,
+            "plan_graph": graph,
+            "goal_proposals": goals,
+            "dependency_edges": graph["dependency_edges"],
+            "existing_goal_count": len(existing),
+            "memory_record_count": len(memory_records),
+            "explain": explain,
+            "rationale": "static deterministic decomposition from objective into planner, scheduler, executor, and reviewer goals",
+            "safety_classification": "local_static_dry_run_only",
+            "reviewer_hints": [
+                "verify goal graph before executor dry-run",
+                "inspect scheduler/executor ledgers before handoff",
+                "do not treat dry-run executor output as real agent work",
+            ],
+            "next_action": "runtime scheduler --workspace <workspace> --json",
+        }
+    )
+    return payload
+
+
+def runtime_scheduler_payload(*, workspace: str, project_root: Path, dry_run: bool = True) -> dict[str, Any]:
+    schema, _, paths = _load_local_workspace(workspace, project_root)
+    queue = _load_local_goal_queue(paths["goal_queue"], required=True)
+    scheduler = _local_scheduler_snapshot(queue)
+    payload = _local_base_payload("runtime scheduler", schema=schema, status=_local_status_from_scheduler(scheduler), ok=not scheduler["errors"])
+    payload.update({"dry_run": dry_run, "writes_ledger": True, **scheduler})
+    _write_json(paths["scheduler_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_scheduler_ledger", "entries": [payload]})
+    return payload
+
+
+def runtime_parallel_payload(*, workspace: str, max_workers: int, project_root: Path, dry_run: bool = True, fail_goal: list[str] | None = None) -> dict[str, Any]:
+    if max_workers < 1:
+        raise RuntimeFoundationError("runtime_parallel_workers_invalid", "runtime parallel requires --max-workers >= 1.")
+    schema, _, paths = _load_local_workspace(workspace, project_root)
+    scheduler = runtime_scheduler_payload(workspace=workspace, project_root=project_root, dry_run=True)
+    failures_requested = set(fail_goal or [])
+    runnable = list(scheduler.get("ready", []))[:max_workers]
+    results: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for index, goal in enumerate(runnable, start=1):
+        goal_id = str(goal["goal_id"])
+        failed = goal_id in failures_requested or str(goal.get("simulate_result", "")) == "failed"
+        result = {
+            "goal_id": goal_id,
+            "agent_role": goal["agent_role"],
+            "worker_slot": index,
+            "status": "failed" if failed else "dry_run_completed",
+            "classification": "simulated_failure" if failed else "safe_local_simulation",
+            "shell_executed": False,
+            "provider_calls": False,
+            "model_calls": False,
+        }
+        results.append(result)
+        if failed:
+            failures.append({"goal_id": goal_id, "failure_class": "simulated_failure", "next_action": "inspect_goal_before_retry"})
+    payload = _local_base_payload("runtime parallel", schema=schema, status="failed" if failures else _local_status_from_scheduler(scheduler), ok=not scheduler.get("errors"))
+    payload.update(
+        {
+            "dry_run": dry_run,
+            "max_workers": max_workers,
+            "bounded_worker_count": min(max_workers, len(runnable)),
+            "ready_goal_count": len(scheduler.get("ready", [])),
+            "results": results,
+            "failure_ledger": failures,
+            "execution_ledger_path": schema["executor_ledger_path"],
+            "failure_ledger_path": _project_relative(paths["failure_ledger"], project_root),
+            "next_action": "runtime orchestrate --resume" if failures else scheduler["next_action"],
+        }
+    )
+    _write_json(paths["executor_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_executor_ledger", "entries": [payload]})
+    _write_json(paths["failure_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_executor_failure_ledger", "failures": failures})
+    return payload
+
+
+def runtime_orchestrate_payload(
+    *,
+    workspace: str,
+    objective: str | None,
+    run_id: str | None,
+    max_workers: int,
+    dry_run: bool,
+    resume: bool,
+    project_root: Path,
+) -> dict[str, Any]:
+    if resume:
+        schema, _, paths = _load_local_workspace(workspace, project_root)
+        scheduler = _load_optional_json(paths["scheduler_ledger"], "runtime_orchestrate_scheduler_ledger")
+        executor = _load_optional_json(paths["executor_ledger"], "runtime_orchestrate_executor_ledger")
+        failures = _load_optional_json(paths["failure_ledger"], "runtime_orchestrate_failure_ledger")
+        summary = {
+            "scheduler_entries": len(scheduler.get("entries", [])),
+            "executor_entries": len(executor.get("entries", [])),
+            "failure_count": len(failures.get("failures", [])),
+            "next_action": "inspect_failures" if failures.get("failures") else "run_orchestrate_dry_run",
+        }
+        payload = _local_base_payload("runtime orchestrate", schema=schema, status="resume_inspection")
+        payload.update({"resume": True, "dry_run": True, "recovery_summary": summary, "operator_summary": _local_operator_summary(summary), "final_report_path": None, "handoff_packet_path": schema["handoff_packet_path"]})
+        return payload
+
+    objective_text = _local_required_text(objective, "runtime_orchestrate_objective_required", "runtime orchestrate requires --objective unless --resume is used.")
+    try:
+        schema, _, paths = _load_local_workspace(workspace, project_root)
+    except RuntimeFoundationError as exc:
+        if exc.error_code != "runtime_workspace_missing" or not run_id:
+            raise
+        runtime_workspace_payload(action="init", workspace=workspace, run_id=run_id, project_root=project_root)
+        schema, _, paths = _load_local_workspace(workspace, project_root)
+    planner = runtime_planner_payload(workspace=workspace, objective=objective_text, explain=False, project_root=project_root)
+    scheduler = runtime_scheduler_payload(workspace=workspace, project_root=project_root, dry_run=True)
+    executor = runtime_parallel_payload(workspace=workspace, max_workers=max_workers, project_root=project_root, dry_run=True)
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_local_runtime_final_report",
+        "marker": LOCAL_RUNTIME_MARKER,
+        "workspace": schema["workspace"],
+        "run_id": schema["run_id"],
+        "objective": objective_text,
+        "dry_run": dry_run,
+        "planner_goal_count": len(planner["goal_proposals"]),
+        "scheduler_next_action": scheduler["next_action"],
+        "executor_result_count": len(executor["results"]),
+        "failure_count": len(executor["failure_ledger"]),
+        "operator_ready_summary": "ready_for_review" if not executor["failure_ledger"] else "needs_recovery",
+        "safety": _local_runtime_safety(),
+        "created_at": LOCAL_RUNTIME_CREATED_AT,
+    }
+    final_report_path = paths["reports"] / "final-runtime-report.json"
+    _write_json(final_report_path, report)
+    handoff = {
+        "ok": True,
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_local_runtime_orchestrator_handoff",
+        "marker": LOCAL_RUNTIME_MARKER,
+        "workspace": schema["workspace"],
+        "run_id": schema["run_id"],
+        "objective": objective_text,
+        "operator_summary": report["operator_ready_summary"],
+        "reviewer_packet": {
+            "planner": planner["plan_graph"]["packet_type"],
+            "scheduler_next_action": scheduler["next_action"],
+            "executor_results": executor["results"],
+            "final_report_path": _project_relative(final_report_path, project_root),
+        },
+        "recovery_summary": {"failure_count": report["failure_count"], "next_action": executor["next_action"]},
+        "safety": _local_runtime_safety(),
+        "created_at": LOCAL_RUNTIME_CREATED_AT,
+    }
+    _write_json(paths["handoff_packet"], handoff)
+    payload = _local_base_payload("runtime orchestrate", schema=schema, status="dry_run_complete" if not executor["failure_ledger"] else "needs_recovery", ok=not scheduler.get("errors"))
+    payload.update(
+        {
+            "objective": objective_text,
+            "dry_run": True,
+            "resume": False,
+            "planner": planner,
+            "scheduler": scheduler,
+            "executor": executor,
+            "reviewer_packet": handoff,
+            "recovery_summary": handoff["recovery_summary"],
+            "operator_ready_summary": report["operator_ready_summary"],
+            "final_report_path": _project_relative(final_report_path, project_root),
+            "handoff_packet_path": schema["handoff_packet_path"],
+        }
+    )
+    return payload
+
+
+def _local_base_payload(command: str, *, schema: dict[str, Any], status: str, ok: bool = True) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "command": command,
+        "kind": "local_multi_agent_runtime_v1",
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": LOCAL_RUNTIME_PACKET_TYPE,
+        "marker": LOCAL_RUNTIME_MARKER,
+        "workspace": schema["workspace"],
+        "run_root": schema["run_root"],
+        "run_id": schema["run_id"],
+        "status": status,
+        "paths": {key: schema[key] for key in _local_schema_path_keys()},
+        "safety": _local_runtime_safety(),
+        "created_at": LOCAL_RUNTIME_CREATED_AT,
+    }
+
+
+def _local_workspace_path(workspace: str, project_root: Path, *, must_exist: bool) -> Path:
+    raw = Path(workspace)
+    if ".env" in raw.parts:
+        raise RuntimeFoundationError("runtime_workspace_dotenv_refused", f"Refusing workspace under .env: {workspace}")
+    root = project_root.resolve(strict=True)
+    candidate = raw if raw.is_absolute() else root / raw
+    if candidate.exists() and candidate.is_symlink():
+        raise RuntimeFoundationError("runtime_workspace_symlink_refused", f"Refusing workspace symlink: {workspace}")
+    workspace_root = _workspace_path(workspace, project_root)
+    if must_exist and not workspace_root.is_dir():
+        raise RuntimeFoundationError("runtime_workspace_missing", f"Workspace does not exist: {workspace}")
+    if workspace_root.exists() and workspace_root.is_symlink():
+        raise RuntimeFoundationError("runtime_workspace_symlink_refused", f"Refusing workspace symlink: {workspace}")
+    return workspace_root
+
+
+def _local_workspace_files(workspace_root: Path) -> dict[str, Path]:
+    return {
+        "workspace": workspace_root / "workspace.json",
+        "goal_queue": workspace_root / "goal-queue.json",
+        "agent_outputs": workspace_root / "agent-outputs",
+        "memory": workspace_root / "memory.jsonl",
+        "scheduler_ledger": workspace_root / "scheduler-ledger.json",
+        "executor_ledger": workspace_root / "executor-ledger.json",
+        "failure_ledger": workspace_root / "executor-failures.json",
+        "reports": workspace_root / "reports",
+        "handoff_packet": workspace_root / "handoff-packet.json",
+    }
+
+
+def _load_local_workspace(workspace: str, project_root: Path) -> tuple[dict[str, Any], Path, dict[str, Path]]:
+    workspace_root = _local_workspace_path(workspace, project_root, must_exist=True)
+    paths = _local_workspace_files(workspace_root)
+    schema = _load_json(paths["workspace"], "runtime_workspace_manifest_missing", "Local runtime workspace manifest is missing.")
+    if schema.get("packet_type") != LOCAL_RUNTIME_PACKET_TYPE:
+        raise RuntimeFoundationError("runtime_workspace_manifest_invalid", "Local runtime workspace manifest is invalid.")
+    return schema, workspace_root, paths
+
+
+def _local_workspace_schema(workspace_root: Path, run_id: str, project_root: Path) -> dict[str, Any]:
+    paths = _local_workspace_files(workspace_root)
+    schema = {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": LOCAL_RUNTIME_PACKET_TYPE,
+        "marker": LOCAL_RUNTIME_MARKER,
+        "workspace": _project_relative(workspace_root, project_root),
+        "run_root": _project_relative(workspace_root, project_root),
+        "run_id": run_id,
+        "created_at": LOCAL_RUNTIME_CREATED_AT,
+        "status": "initialized",
+    }
+    for key in _local_schema_path_keys():
+        schema[key] = _project_relative(paths[_local_file_key_for_schema(key)], project_root)
+    return schema
+
+
+def _local_schema_path_keys() -> tuple[str, ...]:
+    return (
+        "goal_queue_path",
+        "agent_outputs_path",
+        "memory_path",
+        "scheduler_ledger_path",
+        "executor_ledger_path",
+        "reports_path",
+        "handoff_packet_path",
+    )
+
+
+def _local_file_key_for_schema(schema_key: str) -> str:
+    return {
+        "goal_queue_path": "goal_queue",
+        "agent_outputs_path": "agent_outputs",
+        "memory_path": "memory",
+        "scheduler_ledger_path": "scheduler_ledger",
+        "executor_ledger_path": "executor_ledger",
+        "reports_path": "reports",
+        "handoff_packet_path": "handoff_packet",
+    }[schema_key]
+
+
+def _local_empty_goal_queue(run_id: str) -> dict[str, Any]:
+    return {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_plan_graph", "run_id": run_id, "objective": "", "goals": [], "dependency_edges": [], "generated_at": LOCAL_RUNTIME_CREATED_AT}
+
+
+def _local_empty_ledger(name: str) -> dict[str, Any]:
+    return {"schema_version": SCHEMA_VERSION, "packet_type": f"agentoffice_local_{name}_ledger", "entries": []}
+
+
+def _local_runtime_safety() -> dict[str, Any]:
+    return {
+        "local_only": True,
+        "deterministic": True,
+        "dry_run_default": True,
+        "provider_calls": False,
+        "model_calls": False,
+        "network_calls": False,
+        "adapter_external_behavior": False,
+        "dotenv_read": False,
+        "env_vars_printed": False,
+        "daemon": False,
+        "vector_store": False,
+        "shell_mutation": False,
+    }
+
+
+def _load_local_goal_queue(path: Path, *, required: bool) -> dict[str, Any]:
+    if not path.exists():
+        if required:
+            raise RuntimeFoundationError("runtime_goal_queue_missing", "Local runtime goal queue is missing.")
+        return _local_empty_goal_queue("")
+    data = _load_json(path, "runtime_goal_queue_missing", "Local runtime goal queue is missing.")
+    goals = data.get("goals")
+    if not isinstance(goals, list):
+        raise RuntimeFoundationError("runtime_goal_queue_invalid", "Local runtime goal queue must include a goals list.")
+    return data
+
+
+def _local_plan_goals(objective: str) -> list[dict[str, Any]]:
+    specs = [
+        ("plan-objective", "planner", [], "Convert objective into a deterministic goal graph."),
+        ("inspect-workspace", "scheduler", ["plan-objective"], "Classify runnable, blocked, and terminal goals."),
+        ("simulate-execution", "executor", ["inspect-workspace"], "Run bounded local dry-run simulation for ready goals."),
+        ("review-handoff", "reviewer", ["simulate-execution"], "Create reviewer/operator handoff packet from local evidence."),
+    ]
+    return [
+        {
+            "goal_id": goal_id,
+            "objective": objective,
+            "agent_role": role,
+            "status": "pending",
+            "depends_on": depends,
+            "rationale": rationale,
+            "safety_classification": "local_static_dry_run_only",
+            "reviewer_hint": f"Review {goal_id} evidence before treating it as complete.",
+        }
+        for goal_id, role, depends, rationale in specs
+    ]
+
+
+def _local_dependency_edges(goals: list[dict[str, Any]]) -> list[dict[str, str]]:
+    edges: list[dict[str, str]] = []
+    for goal in goals:
+        for dependency in goal.get("depends_on", []):
+            edges.append({"from": str(dependency), "to": str(goal["goal_id"])})
+    return edges
+
+
+def _local_scheduler_snapshot(queue: dict[str, Any]) -> dict[str, Any]:
+    goals = [_normalize_local_goal(goal) for goal in queue.get("goals", [])]
+    by_id = {goal["goal_id"]: goal for goal in goals}
+    errors = _local_goal_graph_errors(goals, by_id)
+    ready: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    running: list[dict[str, Any]] = []
+    completed: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for goal in goals:
+        status = str(goal["status"])
+        if status == "completed":
+            completed.append(goal)
+        elif status == "failed":
+            failed.append(goal)
+        elif status == "skipped":
+            skipped.append(goal)
+        elif status == "running":
+            running.append(goal)
+        elif status == "blocked":
+            blocked.append({**goal, "reason": "explicitly_blocked"})
+        else:
+            deps = [by_id.get(dep) for dep in goal["depends_on"]]
+            if any(dep is None for dep in deps):
+                blocked.append({**goal, "reason": "missing_dependency"})
+            elif any(dep and dep["status"] == "failed" for dep in deps):
+                blocked.append({**goal, "reason": "dependency_failed"})
+            elif any(dep and dep["status"] in {"blocked", "skipped"} for dep in deps):
+                blocked.append({**goal, "reason": "dependency_blocked"})
+            elif all(dep and dep["status"] == "completed" for dep in deps):
+                ready.append({**goal, "reason": "dependencies_satisfied"})
+            else:
+                blocked.append({**goal, "reason": "waiting_dependency"})
+    counts = {status: 0 for status in ("ready", "blocked", "running", "completed", "failed", "skipped")}
+    counts.update({"ready": len(ready), "blocked": len(blocked), "running": len(running), "completed": len(completed), "failed": len(failed), "skipped": len(skipped), "total": len(goals)})
+    next_action = "repair_goal_graph" if errors else "run_ready_goals" if ready else "inspect_failed" if failed else "inspect_blocked" if blocked else "inspect_running" if running else "complete"
+    return {
+        "goal_queue": queue,
+        "ready": ready,
+        "blocked": blocked,
+        "running": running,
+        "completed": completed,
+        "failed": failed,
+        "skipped": skipped,
+        "counts": counts,
+        "errors": errors,
+        "next_action": next_action,
+        "recovery_next_action": "repair graph and rerun scheduler" if errors else "retry failed dry-run goals" if failed else "run executor dry-run" if ready else "no runnable goals",
+    }
+
+
+def _normalize_local_goal(goal: Any) -> dict[str, Any]:
+    if not isinstance(goal, dict):
+        raise RuntimeFoundationError("runtime_goal_invalid", "Each local runtime goal must be an object.")
+    goal_id = _local_required_id(str(goal.get("goal_id", "")), "runtime_goal_id_required", "Local runtime goal requires goal_id.")
+    status = str(goal.get("status", "pending"))
+    if status not in LOCAL_GOAL_STATUSES:
+        raise RuntimeFoundationError("runtime_goal_status_invalid", f"Unsupported local runtime goal status: {status}")
+    role = _local_agent_role(str(goal.get("agent_role", "executor")))
+    depends_on = goal.get("depends_on", [])
+    if not isinstance(depends_on, list) or not all(isinstance(item, str) and item.strip() for item in depends_on):
+        raise RuntimeFoundationError("runtime_goal_dependencies_invalid", "Goal depends_on must be a list of ids.")
+    return {**goal, "goal_id": goal_id, "status": status, "agent_role": role, "depends_on": sorted(set(depends_on))}
+
+
+def _local_goal_graph_errors(goals: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    for goal in goals:
+        for dependency in goal["depends_on"]:
+            if dependency not in by_id:
+                errors.append(f"missing_dependency:{goal['goal_id']}->{dependency}")
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(goal_id: str, path: list[str]) -> None:
+        if goal_id in visiting:
+            errors.append("circular_dependency:" + "->".join([*path, goal_id]))
+            return
+        if goal_id in visited or goal_id not in by_id:
+            return
+        visiting.add(goal_id)
+        for dependency in by_id[goal_id]["depends_on"]:
+            visit(dependency, [*path, goal_id])
+        visiting.remove(goal_id)
+        visited.add(goal_id)
+
+    for goal in goals:
+        visit(goal["goal_id"], [])
+    return sorted(set(errors))
+
+
+def _local_status_from_goals(paths: dict[str, Path]) -> str:
+    try:
+        queue = _load_local_goal_queue(paths["goal_queue"], required=False)
+    except RuntimeFoundationError:
+        return "invalid"
+    return _local_status_from_scheduler(_local_scheduler_snapshot(queue))
+
+
+def _local_status_from_scheduler(scheduler: dict[str, Any]) -> str:
+    if scheduler["errors"]:
+        return "invalid"
+    counts = scheduler["counts"]
+    if counts["failed"]:
+        return "failed"
+    if counts["blocked"]:
+        return "blocked"
+    if counts["running"]:
+        return "running"
+    if counts["ready"]:
+        return "ready"
+    if counts["completed"] and counts["completed"] == counts["total"]:
+        return "completed"
+    return "empty" if counts["total"] == 0 else "pending"
+
+
+def _load_local_memory_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise RuntimeFoundationError("runtime_memory_missing", "Local runtime memory file is missing.")
+    if path.is_symlink():
+        raise RuntimeFoundationError("runtime_workspace_file_symlink_refused", f"Refusing symlink file: {path.name}")
+    records: list[dict[str, Any]] = []
+    try:
+        for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            if not isinstance(data, dict):
+                raise RuntimeFoundationError("runtime_memory_jsonl_invalid", f"Memory record {index} must be an object.")
+            records.append(data)
+    except json.JSONDecodeError as exc:
+        raise RuntimeFoundationError("runtime_memory_jsonl_unreadable", f"Unable to read local runtime memory JSONL at line {index}.") from exc
+    return records
+
+
+def _filter_local_memory(records: list[dict[str, Any]], *, run_id: str | None, goal_id: str | None, agent_role: str | None) -> list[dict[str, Any]]:
+    role = _local_agent_role(agent_role) if agent_role else None
+    return [
+        record
+        for record in records
+        if (run_id is None or record.get("run_id") == run_id)
+        and (goal_id is None or record.get("goal_id") == goal_id)
+        and (role is None or record.get("agent_role") == role)
+    ]
+
+
+def _local_memory_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    by_role: dict[str, int] = {}
+    by_goal: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    for record in records:
+        by_role[str(record.get("agent_role", "unknown"))] = by_role.get(str(record.get("agent_role", "unknown")), 0) + 1
+        by_goal[str(record.get("goal_id", "unknown"))] = by_goal.get(str(record.get("goal_id", "unknown")), 0) + 1
+        by_kind[str(record.get("kind", "unknown"))] = by_kind.get(str(record.get("kind", "unknown")), 0) + 1
+    return {"by_role": dict(sorted(by_role.items())), "by_goal": dict(sorted(by_goal.items())), "by_kind": dict(sorted(by_kind.items())), "latest_memory_id": records[-1]["memory_id"] if records else None}
+
+
+def _local_workspace_report_text(payload: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Local Multi-Agent Runtime Workspace Report",
+            LOCAL_RUNTIME_MARKER,
+            f"workspace: {payload['workspace']}",
+            f"run_id: {payload['run_id']}",
+            f"status: {payload['status']}",
+            f"next_action: {payload.get('next_action', 'none')}",
+            "paths:",
+            *[f"- {key}: {value}" for key, value in payload["paths"].items()],
+            "safety:",
+            *[f"- {key}: {str(value).lower()}" for key, value in sorted(payload["safety"].items())],
+        ]
+    )
+
+
+def _local_operator_summary(payload: dict[str, Any]) -> str:
+    if "next_action" in payload:
+        return f"status={payload.get('status', 'unknown')}; next_action={payload['next_action']}"
+    return f"next_action={payload.get('next_action', 'inspect')}"
+
+
+def _local_output_or_default(out: str | None, default_path: Path, project_root: Path, code_prefix: str) -> Path:
+    if out:
+        return _safe_output_path(out, project_root, code_prefix)
+    if default_path.parent.exists() and default_path.parent.is_symlink():
+        raise RuntimeFoundationError(f"{code_prefix}_parent_symlink", f"Refusing symlink output parent: {default_path.parent}")
+    default_path.parent.mkdir(parents=True, exist_ok=True)
+    return default_path
+
+
+def _load_optional_json(path: Path, code_prefix: str) -> dict[str, Any]:
+    if not path.exists():
+        return {"schema_version": SCHEMA_VERSION, "packet_type": code_prefix, "entries": [], "failures": []}
+    return _load_json(path, f"{code_prefix}_missing", f"Missing optional local runtime JSON: {path.name}")
+
+
+def _local_required_id(value: str | None, code: str, message: str) -> str:
+    if not value or not str(value).strip():
+        raise RuntimeFoundationError(code, message)
+    text = str(value).strip()
+    if any(part in {".", ".."} for part in Path(text).parts):
+        raise RuntimeFoundationError(code.replace("required", "invalid"), f"Unsafe id: {text}")
+    return text
+
+
+def _local_required_text(value: str | None, code: str, message: str) -> str:
+    if not value or not str(value).strip():
+        raise RuntimeFoundationError(code, message)
+    return str(value).strip()
+
+
+def _local_agent_role(agent_role: str | None) -> str:
+    role = _local_required_id(agent_role, "runtime_agent_role_required", "agent role is required.")
+    if role not in LOCAL_AGENT_ROLES:
+        raise RuntimeFoundationError("runtime_agent_role_invalid", f"Unsupported local agent role: {role}")
+    return role
+
+
+def _local_summarize_text(text: str) -> str:
+    compact = " ".join(text.split())
+    return compact[:120]
+
+
 def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str, Any]:
     return {
         "ok": False,
@@ -2317,6 +3040,12 @@ def runtime_error_payload(command: str, exc: RuntimeFoundationError) -> dict[str
 def format_runtime_payload(payload: dict[str, Any]) -> str:
     command = str(payload.get("command", "runtime"))
     lines = ["AgentOffice runtime foundation", f"command: {command}"]
+    if payload.get("marker") == LOCAL_RUNTIME_MARKER:
+        lines[0] = LOCAL_RUNTIME_MARKER
+        if "run_id" in payload:
+            lines.append(f"run_id: {payload['run_id']}")
+        if "packet_type" in payload:
+            lines.append(f"packet_type: {payload['packet_type']}")
     if "workspace" in payload:
         lines.append(f"workspace: {payload['workspace']}")
     status = payload.get("workspace_status", payload.get("status"))
@@ -2354,6 +3083,22 @@ def format_runtime_payload(payload: dict[str, Any]) -> str:
         lines.append(f"memory_entries: {payload['memory_entry_count']}")
     if "latest_event_summary" in payload:
         lines.append(f"latest_event: {payload['latest_event_summary'] or '-'}")
+    if payload.get("marker") == LOCAL_RUNTIME_MARKER:
+        if "next_action" in payload:
+            lines.append(f"next_action: {payload['next_action']}")
+        if "dry_run" in payload:
+            lines.append(f"dry_run: {str(payload['dry_run']).lower()}")
+        if "memory_count" in payload:
+            lines.append(f"memory_count: {payload['memory_count']}")
+        if "record_count" in payload:
+            lines.append(f"record_count: {payload['record_count']}")
+        if "goal_counts" in payload:
+            counts = payload["goal_counts"]
+            lines.append("goals: " + " ".join(f"{key}={counts.get(key, 0)}" for key in ("total", "ready", "blocked", "running", "completed", "failed", "skipped")))
+        if "output_path" in payload:
+            lines.append(f"output_path: {payload['output_path']}")
+        if "operator_ready_summary" in payload:
+            lines.append(f"operator_ready_summary: {payload['operator_ready_summary']}")
     if payload.get("kind") == "runtime_lifecycle_packet":
         lifecycle = payload["lifecycle"]
         lines.append(f"lifecycle_status: {lifecycle['workspace_status']}")
