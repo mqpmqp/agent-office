@@ -2907,14 +2907,14 @@ def _local_status_from_scheduler(scheduler: dict[str, Any]) -> str:
     if scheduler["errors"]:
         return "invalid"
     counts = scheduler["counts"]
+    if counts["ready"]:
+        return "ready"
     if counts["failed"]:
         return "failed"
     if counts["blocked"]:
         return "blocked"
     if counts["running"]:
         return "running"
-    if counts["ready"]:
-        return "ready"
     if counts["completed"] and counts["completed"] == counts["total"]:
         return "completed"
     return "empty" if counts["total"] == 0 else "pending"

@@ -103,6 +103,8 @@ class LocalMultiAgentRuntimeCliTests(unittest.TestCase):
             bad = run_cli(["runtime", "scheduler", "--workspace", workspace, "--json"], root)
 
         self.assertEqual(result[0], 0, result[1] + result[2])
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["next_action"], "run_ready_goals")
         self.assertEqual(payload["counts"]["ready"], 1)
         self.assertEqual(payload["counts"]["blocked"], 1)
         self.assertEqual(payload["counts"]["failed"], 1)
@@ -122,9 +124,13 @@ class LocalMultiAgentRuntimeCliTests(unittest.TestCase):
             first = run_cli(args, root)
             second = run_cli(args, root)
             text = run_cli(["runtime", "planner", "--workspace", workspace, "--objective", "Ship local runtime", "--explain"], root)
+            scheduled = run_cli(["runtime", "scheduler", "--workspace", workspace, "--json"], root)
 
         self.assertEqual(first[0], 0, first[1] + first[2])
+        self.assertEqual(scheduled[0], 0, scheduled[1] + scheduled[2])
         self.assertEqual(json.loads(first[1])["plan_graph"], json.loads(second[1])["plan_graph"])
+        self.assertEqual(json.loads(scheduled[1])["status"], "ready")
+        self.assertEqual(json.loads(scheduled[1])["next_action"], "run_ready_goals")
         self.assertIn("AGENTOFFICE_LOCAL_MULTI_AGENT_RUNTIME_V1", text[1])
         self.assertIn("provider/runtime/adapter execution: not triggered", text[1])
 

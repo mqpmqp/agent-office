@@ -143,3 +143,14 @@ python3 -m unittest tests.test_runtime_foundation_cli tests.test_autonomy_execut
 ## Next Recommended Phase
 
 Add review-gated runtime evidence export and optional replay verification around P55-P60 workspace packets, still preserving local-only dry-run defaults.
+
+## Review-Fix Delta
+
+Self-review found one minor contract issue before merge-readiness: scheduler text/JSON could report overall `status=blocked` when runnable ready goals existed but downstream goals were waiting on dependencies. The detailed counts were accurate, but the top-level status conflicted with `next_action=run_ready_goals`.
+
+Fix:
+
+- `_local_status_from_scheduler` now prioritizes `ready` when runnable goals exist.
+- Focused tests assert that ready goals produce `status=ready` and `next_action=run_ready_goals`.
+
+Validation after this review-fix is recorded in `P55_P60_SELF_REVIEW_MERGE_READINESS_REPORT.md`.
