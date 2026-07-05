@@ -185,18 +185,24 @@ from .v1_post_release_ops import (
 from .autonomy_executor import (
     classify_failure_payload,
     format_classification,
+    format_goal_handoff,
     format_goal_report,
     format_goal_template,
     format_next,
     format_queue,
+    format_queue_inspect,
+    format_recovery_plan,
     format_runner,
+    goal_handoff_payload,
     goal_report_payload,
     goal_template_payload,
     queue_add_payload,
     queue_init_payload,
+    queue_inspect_payload,
     queue_next_payload,
     queue_status_payload,
     queue_validate_payload,
+    recovery_plan_payload,
     resume_payload,
     run_goal_payload,
 )
@@ -1742,6 +1748,10 @@ def cmd_autonomy(args: argparse.Namespace) -> int:
                 payload = queue_next_payload(args.path, PROJECT_ROOT)
                 print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_next(payload))
                 return 0 if payload["ok"] else 2
+            if queue_action == "inspect":
+                payload = queue_inspect_payload(args.path, PROJECT_ROOT, ledger_limit=args.ledger_limit)
+                print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_queue_inspect(payload))
+                return 0 if payload["ok"] else 2
         if action == "run-goal":
             payload = run_goal_payload(args.path, args.max_steps, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runner(payload))
@@ -1749,6 +1759,10 @@ def cmd_autonomy(args: argparse.Namespace) -> int:
         if action == "resume":
             payload = resume_payload(args.path, args.max_steps, PROJECT_ROOT, retry_failed=args.retry_failed)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runner(payload))
+            return 0 if payload["ok"] else 2
+        if action == "recover-plan":
+            payload = recovery_plan_payload(args.path, args.max_steps, PROJECT_ROOT, retry_failed=args.retry_failed, ledger_limit=args.ledger_limit)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_recovery_plan(payload))
             return 0 if payload["ok"] else 2
         if action == "classify":
             payload = classify_failure_payload(args.kind, args.attempts, args.max_attempts)
@@ -1762,9 +1776,13 @@ def cmd_autonomy(args: argparse.Namespace) -> int:
             payload = goal_report_payload(args.path, args.out, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_goal_report(payload))
             return 0
+        if action == "goal-handoff":
+            payload = goal_handoff_payload(args.path, args.out, PROJECT_ROOT, ledger_limit=args.ledger_limit)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_goal_handoff(payload))
+            return 0 if payload["ok"] else 2
     except AutonomyError as exc:
         raise AgentOfficeError(str(exc)) from exc
-    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, validate, review-packet, merge-packet, queue, run-goal, resume, classify, goal-template, or goal-report.")
+    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, validate, review-packet, merge-packet, queue, run-goal, resume, recover-plan, classify, goal-template, goal-report, or goal-handoff.")
 
 
 def cmd_v1(args: argparse.Namespace) -> int:
@@ -2402,6 +2420,11 @@ def build_parser() -> argparse.ArgumentParser:
         queue_parser.add_argument("--path", required=True, help="Project-local or temp queue directory.")
         queue_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         queue_parser.set_defaults(func=cmd_autonomy)
+    queue_inspect = queue_sub.add_parser("inspect", help="Inspect queue status, failures, recovery hints, and evidence without writing.")
+    queue_inspect.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+    queue_inspect.add_argument("--ledger-limit", type=int, default=5, help="Number of recent ledger records to include.")
+    queue_inspect.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    queue_inspect.set_defaults(func=cmd_autonomy)
     run_goal = autonomy_sub.add_parser("run-goal", help="Run ready tasks from a local goal queue using built-in allowlisted actions.")
     run_goal.add_argument("--path", required=True, help="Project-local or temp queue directory.")
     run_goal.add_argument("--max-steps", type=int, default=1, help="Maximum tasks to run.")
@@ -2413,6 +2436,13 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--retry-failed", action="store_true", help="Retry failed tasks when retry policy allows it.")
     resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     resume.set_defaults(func=cmd_autonomy)
+    recover_plan = autonomy_sub.add_parser("recover-plan", help="Explain the next resume or retry action without writing or executing tasks.")
+    recover_plan.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+    recover_plan.add_argument("--max-steps", type=int, default=1, help="Maximum tasks to include in the dry-run plan.")
+    recover_plan.add_argument("--retry-failed", action="store_true", help="Include retryable failed tasks in the dry-run plan.")
+    recover_plan.add_argument("--ledger-limit", type=int, default=5, help="Number of recent ledger records to include.")
+    recover_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    recover_plan.set_defaults(func=cmd_autonomy)
     classify = autonomy_sub.add_parser("classify", help="Classify an autonomy failure and retry policy.")
     classify.add_argument("--kind", required=True, help="Failure class.")
     classify.add_argument("--attempts", type=int, default=0, help="Current attempts.")
@@ -2428,6 +2458,12 @@ def build_parser() -> argparse.ArgumentParser:
     goal_report.add_argument("--out", required=True, help="Markdown report output path under project root or temp directory.")
     goal_report.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     goal_report.set_defaults(func=cmd_autonomy)
+    goal_handoff = autonomy_sub.add_parser("goal-handoff", help="Write an operator or reviewer handoff packet for a local goal queue.")
+    goal_handoff.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+    goal_handoff.add_argument("--out", required=True, help="Markdown handoff output path under project root or temp directory.")
+    goal_handoff.add_argument("--ledger-limit", type=int, default=5, help="Number of recent ledger records to include.")
+    goal_handoff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    goal_handoff.set_defaults(func=cmd_autonomy)
 
     p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
     v1_sub = p.add_subparsers(dest="v1_action", required=True)
