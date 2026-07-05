@@ -1263,3 +1263,53 @@ Recommended operator workflow:
 5. Run `minimal` validation after each milestone and `full` validation before review.
 6. Generate a review packet and merge packet.
 7. Review the branch; merge only after explicit human authorization and a fresh merge gate.
+
+## Autonomous Executor / Goal Runner V1
+
+AgentOffice also includes a local-only goal queue runner for deterministic operator-driven delivery loops. It uses queue JSON, dependency resolution, allowlisted built-in task kinds, validation ledgers, and review/merge packet artifacts. It does not read `.env`, print environment variables, call providers or models, create tags, create GitHub Releases, push, or merge branches.
+
+Initialize a queue from a template:
+
+```bash
+python3 -m agent_office autonomy goal-template --name feature-merge --json
+python3 -m agent_office autonomy queue init --path .ai/autonomy/queues/demo --template feature-merge --json
+python3 -m agent_office autonomy queue status --path .ai/autonomy/queues/demo --json
+python3 -m agent_office autonomy queue validate --path .ai/autonomy/queues/demo --json
+python3 -m agent_office autonomy queue next --path .ai/autonomy/queues/demo --json
+```
+
+Build a queue manually:
+
+```bash
+python3 -m agent_office autonomy queue init --path .ai/autonomy/queues/manual-demo --goal longrun-development --json
+python3 -m agent_office autonomy queue add --path .ai/autonomy/queues/manual-demo --id checkpoint --kind checkpoint --json
+python3 -m agent_office autonomy queue add --path .ai/autonomy/queues/manual-demo --id validate-minimal --kind validate-suite --suite minimal --depends-on checkpoint --json
+python3 -m agent_office autonomy queue add --path .ai/autonomy/queues/manual-demo --id review-packet --kind review-packet --depends-on validate-minimal --base <base_commit> --head HEAD --out /tmp/agentoffice-review-packet.md --json
+```
+
+Run and resume:
+
+```bash
+python3 -m agent_office autonomy run-goal --path .ai/autonomy/queues/demo --max-steps 1 --json
+python3 -m agent_office autonomy resume --path .ai/autonomy/queues/demo --max-steps 1 --json
+python3 -m agent_office autonomy resume --path .ai/autonomy/queues/demo --max-steps 1 --retry-failed --json
+```
+
+Generate operator reports:
+
+```bash
+python3 -m agent_office autonomy classify --kind validation_failed --attempts 0 --max-attempts 2 --json
+python3 -m agent_office autonomy goal-report --path .ai/autonomy/queues/demo --out /tmp/agentoffice-goal-report.md --json
+```
+
+Allowed task kinds are `checkpoint`, `noop`, `manual`, `validate-suite`, `review-packet`, `merge-packet`, `release-state`, `github-release-plan`, and `final-delivery`. There is no arbitrary command task kind. `manual` tasks intentionally block the queue until an operator records a follow-up action outside the runner. `validate-suite` tasks create a Phase52 autonomy validation ledger under the queue directory and record stdout/stderr artifacts.
+
+Recommended goal-runner operator workflow:
+
+1. Start from a feature branch, not `phase6/mainline`.
+2. Initialize a queue under `.ai/autonomy/queues/<goal-id>` from `feature-merge`, `release-cycle`, or `longrun-development`.
+3. Inspect `queue validate` and `queue next` before every run.
+4. Run one small step at a time with `run-goal --max-steps 1` until validation is stable.
+5. Use `resume` for interrupted queues; use `--retry-failed` only when `autonomy classify` reports a retryable validation failure.
+6. Generate `goal-report` plus review/merge packet artifacts for the review gate.
+7. Merge only after explicit operator authorization and a separate fresh merge gate.

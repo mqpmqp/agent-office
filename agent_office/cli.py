@@ -182,6 +182,24 @@ from .v1_post_release_ops import (
     verify_github_release_readback_payload,
     verify_release_archive_payload,
 )
+from .autonomy_executor import (
+    classify_failure_payload,
+    format_classification,
+    format_goal_report,
+    format_goal_template,
+    format_next,
+    format_queue,
+    format_runner,
+    goal_report_payload,
+    goal_template_payload,
+    queue_add_payload,
+    queue_init_payload,
+    queue_next_payload,
+    queue_status_payload,
+    queue_validate_payload,
+    resume_payload,
+    run_goal_payload,
+)
 from .autonomy import (
     AutonomyError,
     autonomy_checkpoint_payload,
@@ -1689,9 +1707,64 @@ def cmd_autonomy(args: argparse.Namespace) -> int:
             payload = autonomy_merge_packet_payload(args.source, args.target, PROJECT_ROOT)
             print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_merge_packet(payload))
             return 0
+        if action == "queue":
+            queue_action = args.queue_action
+            if queue_action == "init":
+                payload = queue_init_payload(args.path, args.goal, args.template, PROJECT_ROOT)
+                print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_queue(payload))
+                return 0
+            if queue_action == "add":
+                payload = queue_add_payload(
+                    args.path,
+                    args.id,
+                    args.kind,
+                    PROJECT_ROOT,
+                    suite=args.suite,
+                    depends_on=args.depends_on or [],
+                    max_attempts=args.max_attempts,
+                    base=args.base,
+                    head=args.head,
+                    source=args.source,
+                    target=args.target,
+                    out=args.out,
+                )
+                print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_queue(payload))
+                return 0
+            if queue_action == "status":
+                payload = queue_status_payload(args.path, PROJECT_ROOT)
+                print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_queue(payload))
+                return 0
+            if queue_action == "validate":
+                payload = queue_validate_payload(args.path, PROJECT_ROOT)
+                print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_queue(payload))
+                return 0 if payload["ok"] else 2
+            if queue_action == "next":
+                payload = queue_next_payload(args.path, PROJECT_ROOT)
+                print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_next(payload))
+                return 0 if payload["ok"] else 2
+        if action == "run-goal":
+            payload = run_goal_payload(args.path, args.max_steps, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runner(payload))
+            return 0 if payload["ok"] else 2
+        if action == "resume":
+            payload = resume_payload(args.path, args.max_steps, PROJECT_ROOT, retry_failed=args.retry_failed)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runner(payload))
+            return 0 if payload["ok"] else 2
+        if action == "classify":
+            payload = classify_failure_payload(args.kind, args.attempts, args.max_attempts)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_classification(payload))
+            return 0 if payload["ok"] else 2
+        if action == "goal-template":
+            payload = goal_template_payload(args.name)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_goal_template(payload))
+            return 0
+        if action == "goal-report":
+            payload = goal_report_payload(args.path, args.out, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_goal_report(payload))
+            return 0
     except AutonomyError as exc:
         raise AgentOfficeError(str(exc)) from exc
-    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, validate, review-packet, or merge-packet.")
+    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, validate, review-packet, merge-packet, queue, run-goal, resume, classify, goal-template, or goal-report.")
 
 
 def cmd_v1(args: argparse.Namespace) -> int:
@@ -2301,6 +2374,60 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_merge_packet.add_argument("--target", required=True, help="Target branch or ref for merge planning.")
     autonomy_merge_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     autonomy_merge_packet.set_defaults(func=cmd_autonomy)
+
+    autonomy_queue = autonomy_sub.add_parser("queue", help="Manage a local autonomous goal queue.")
+    queue_sub = autonomy_queue.add_subparsers(dest="queue_action", required=True)
+    queue_init = queue_sub.add_parser("init", help="Initialize a local goal queue.")
+    queue_init.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+    queue_init.add_argument("--goal", help="Goal name recorded in the queue.")
+    queue_init.add_argument("--template", help="Optional deterministic template to materialize.")
+    queue_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    queue_init.set_defaults(func=cmd_autonomy)
+    queue_add = queue_sub.add_parser("add", help="Add a task to a local goal queue.")
+    queue_add.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+    queue_add.add_argument("--id", required=True, help="Task id.")
+    queue_add.add_argument("--kind", required=True, help="Task kind.")
+    queue_add.add_argument("--suite", help="Validation suite for validate-suite tasks.")
+    queue_add.add_argument("--depends-on", action="append", help="Dependency task id. Repeatable.")
+    queue_add.add_argument("--max-attempts", type=int, default=1, help="Maximum attempts for retryable failures.")
+    queue_add.add_argument("--base", help="Base ref for review-packet tasks.")
+    queue_add.add_argument("--head", help="Head ref for review-packet tasks.")
+    queue_add.add_argument("--source", help="Source ref for merge-packet tasks.")
+    queue_add.add_argument("--target", help="Target ref for merge-packet tasks.")
+    queue_add.add_argument("--out", help="Output path for review-packet tasks.")
+    queue_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    queue_add.set_defaults(func=cmd_autonomy)
+    for queue_name in ("status", "validate", "next"):
+        queue_parser = queue_sub.add_parser(queue_name, help=f"Queue {queue_name}.")
+        queue_parser.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+        queue_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        queue_parser.set_defaults(func=cmd_autonomy)
+    run_goal = autonomy_sub.add_parser("run-goal", help="Run ready tasks from a local goal queue using built-in allowlisted actions.")
+    run_goal.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+    run_goal.add_argument("--max-steps", type=int, default=1, help="Maximum tasks to run.")
+    run_goal.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    run_goal.set_defaults(func=cmd_autonomy)
+    resume = autonomy_sub.add_parser("resume", help="Resume a local goal queue.")
+    resume.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+    resume.add_argument("--max-steps", type=int, default=1, help="Maximum tasks to run.")
+    resume.add_argument("--retry-failed", action="store_true", help="Retry failed tasks when retry policy allows it.")
+    resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    resume.set_defaults(func=cmd_autonomy)
+    classify = autonomy_sub.add_parser("classify", help="Classify an autonomy failure and retry policy.")
+    classify.add_argument("--kind", required=True, help="Failure class.")
+    classify.add_argument("--attempts", type=int, default=0, help="Current attempts.")
+    classify.add_argument("--max-attempts", type=int, default=1, help="Maximum attempts.")
+    classify.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    classify.set_defaults(func=cmd_autonomy)
+    goal_template = autonomy_sub.add_parser("goal-template", help="Print a deterministic goal queue template.")
+    goal_template.add_argument("--name", required=True, help="Template name.")
+    goal_template.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    goal_template.set_defaults(func=cmd_autonomy)
+    goal_report = autonomy_sub.add_parser("goal-report", help="Write a Markdown report for a local goal queue.")
+    goal_report.add_argument("--path", required=True, help="Project-local or temp queue directory.")
+    goal_report.add_argument("--out", required=True, help="Markdown report output path under project root or temp directory.")
+    goal_report.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    goal_report.set_defaults(func=cmd_autonomy)
 
     p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
     v1_sub = p.add_subparsers(dest="v1_action", required=True)
