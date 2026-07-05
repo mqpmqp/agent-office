@@ -94,3 +94,15 @@ Status: complete in implementation slice 1.
 - `python3 -m compileall agent_office tests` -> passed.
 - `python3 -m unittest discover -s tests -p 'test_*.py'` -> passed, 445 tests.
 - `git diff --check` -> passed.
+
+## Milestone J - README Operator Workflow
+
+Status: complete in documentation slice 2.
+
+- Added README operator workflow for template materialization, manual queue building, one-step run/resume, retry policy inspection, and goal report generation.
+- README repeats the safety boundary: local-only execution, no `.env`, no env printing, no provider/model calls, no tag or GitHub Release mutation, no push, and no merge.
+
+## Validation - Documentation Slice 2
+
+- `python3 -m unittest tests.test_autonomy_executor_cli -v` -> passed, 12 tests.
+- `git diff --check` -> pending rerun after EOF cleanup.
