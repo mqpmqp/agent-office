@@ -52,6 +52,12 @@ from .runtime_foundation import (
     runtime_evidence_payload,
     runtime_error_payload,
     runtime_governance_payload,
+    runtime_memory_payload,
+    runtime_orchestrate_payload,
+    runtime_parallel_payload,
+    runtime_planner_payload,
+    runtime_scheduler_payload,
+    runtime_workspace_payload,
     runtime_init_payload,
     runtime_job_payload,
     runtime_packet_payload,
@@ -1501,6 +1507,10 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         command = f"runtime job {args.job_action}"
     if action == "worker-result" and getattr(args, "worker_result_action", None):
         command = f"runtime worker-result {args.worker_result_action}"
+    if action == "workspace" and getattr(args, "workspace_action", None):
+        command = f"runtime workspace {args.workspace_action}"
+    if action == "memory" and getattr(args, "memory_action", None):
+        command = f"runtime memory {args.memory_action}"
     try:
         if action == "init":
             payload = runtime_init_payload(workspace=args.workspace, goal=args.goal, project_root=PROJECT_ROOT)
@@ -1527,6 +1537,31 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             payload = runtime_close_payload(workspace=args.workspace, out=args.out, project_root=PROJECT_ROOT)
         elif action == "governance":
             payload = runtime_governance_payload(workspace=args.workspace, closure_packet=args.closure_packet, evidence_out=args.evidence_out, evidence_format=args.format, project_root=PROJECT_ROOT)
+        elif action == "workspace":
+            payload = runtime_workspace_payload(action=args.workspace_action, workspace=args.workspace, run_id=getattr(args, "run_id", None), out=getattr(args, "out", None), project_root=PROJECT_ROOT)
+        elif action == "memory":
+            payload = runtime_memory_payload(
+                action=args.memory_action,
+                workspace=args.workspace,
+                project_root=PROJECT_ROOT,
+                memory_id=getattr(args, "memory_id", None),
+                goal_id=getattr(args, "goal_id", None),
+                agent_role=getattr(args, "agent_role", None),
+                kind=getattr(args, "kind", None),
+                content=getattr(args, "content", None),
+                summary=getattr(args, "summary", None),
+                source_command=getattr(args, "source_command", None),
+                source_artifact=getattr(args, "source_artifact", None),
+                run_id=getattr(args, "run_id", None),
+            )
+        elif action == "scheduler":
+            payload = runtime_scheduler_payload(workspace=args.workspace, project_root=PROJECT_ROOT, dry_run=True)
+        elif action == "planner":
+            payload = runtime_planner_payload(workspace=args.workspace, objective=args.objective, explain=bool(args.explain), project_root=PROJECT_ROOT)
+        elif action == "parallel":
+            payload = runtime_parallel_payload(workspace=args.workspace, max_workers=args.max_workers, project_root=PROJECT_ROOT, dry_run=True, fail_goal=list(args.fail_goal or []))
+        elif action == "orchestrate":
+            payload = runtime_orchestrate_payload(workspace=args.workspace, objective=getattr(args, "objective", None), run_id=getattr(args, "run_id", None), max_workers=args.max_workers, dry_run=True, resume=bool(args.resume), project_root=PROJECT_ROOT)
         elif action == "job":
             payload = runtime_job_payload(action=args.job_action, workspace=args.workspace, job_id=getattr(args, "job_id", None), reason=getattr(args, "reason", None), project_root=PROJECT_ROOT)
         elif action == "worker-adapter":
@@ -1680,6 +1715,8 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         return 0 if payload["evidence_ready"] else 2
     if action == "worker-result" and getattr(args, "worker_result_action", None) == "dry-run-publish":
         return 0 if payload["publish_ready"] else 2
+    if action in {"workspace", "memory", "scheduler", "planner", "parallel", "orchestrate"}:
+        return 0 if payload.get("ok", False) else 2
     return 0
 
 
@@ -2096,6 +2133,87 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_governance.add_argument("--format", choices=["json", "text"], default="json", help="Governance evidence output format. Default: json.")
     runtime_governance.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_governance.set_defaults(func=cmd_runtime)
+    runtime_workspace = runtime_sub.add_parser("workspace", help="Manage a local-only multi-agent runtime workspace.")
+    runtime_workspace_sub = runtime_workspace.add_subparsers(dest="workspace_action", required=True)
+    runtime_workspace_init = runtime_workspace_sub.add_parser("init", help="Initialize local multi-agent runtime workspace schema.")
+    runtime_workspace_init.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_workspace_init.add_argument("--run-id", required=True, help="Stable local runtime run id.")
+    runtime_workspace_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_workspace_init.set_defaults(func=cmd_runtime)
+    for workspace_action in ("inspect", "status"):
+        workspace_parser = runtime_workspace_sub.add_parser(workspace_action, help=f"Runtime workspace {workspace_action}.")
+        workspace_parser.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+        workspace_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        workspace_parser.set_defaults(func=cmd_runtime)
+    for workspace_action in ("report", "packet"):
+        workspace_parser = runtime_workspace_sub.add_parser(workspace_action, help=f"Write runtime workspace {workspace_action} output.")
+        workspace_parser.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+        workspace_parser.add_argument("--out", help="Optional project-local output path.")
+        workspace_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        workspace_parser.set_defaults(func=cmd_runtime)
+
+    runtime_memory = runtime_sub.add_parser("memory", help="Read and write local-only persistent agent memory.")
+    runtime_memory_sub = runtime_memory.add_subparsers(dest="memory_action", required=True)
+    runtime_memory_write = runtime_memory_sub.add_parser("write", help="Append one deterministic local memory record.")
+    runtime_memory_write.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_memory_write.add_argument("--goal-id", required=True, help="Goal id associated with this memory.")
+    runtime_memory_write.add_argument("--agent-role", required=True, help="Agent role: planner, scheduler, executor, reviewer, or operator.")
+    runtime_memory_write.add_argument("--kind", required=True, help="Memory kind.")
+    runtime_memory_write.add_argument("--content", required=True, help="Memory content to store locally.")
+    runtime_memory_write.add_argument("--summary", help="Optional deterministic summary. Defaults to compacted content prefix.")
+    runtime_memory_write.add_argument("--source-command", help="Source command string recorded as provenance.")
+    runtime_memory_write.add_argument("--source-artifact", help="Source artifact path recorded as provenance.")
+    runtime_memory_write.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_memory_write.set_defaults(func=cmd_runtime)
+    runtime_memory_list = runtime_memory_sub.add_parser("list", help="List local memory records with optional filters.")
+    runtime_memory_list.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_memory_list.add_argument("--run-id", help="Filter by run id.")
+    runtime_memory_list.add_argument("--goal-id", help="Filter by goal id.")
+    runtime_memory_list.add_argument("--agent-role", help="Filter by agent role.")
+    runtime_memory_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_memory_list.set_defaults(func=cmd_runtime)
+    runtime_memory_inspect = runtime_memory_sub.add_parser("inspect", help="Inspect one local memory record.")
+    runtime_memory_inspect.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_memory_inspect.add_argument("--memory-id", required=True, help="Memory id to inspect.")
+    runtime_memory_inspect.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_memory_inspect.set_defaults(func=cmd_runtime)
+    runtime_memory_summarize = runtime_memory_sub.add_parser("summarize", help="Summarize local memory records by role, goal, and kind.")
+    runtime_memory_summarize.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_memory_summarize.add_argument("--run-id", help="Filter by run id.")
+    runtime_memory_summarize.add_argument("--goal-id", help="Filter by goal id.")
+    runtime_memory_summarize.add_argument("--agent-role", help="Filter by agent role.")
+    runtime_memory_summarize.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_memory_summarize.set_defaults(func=cmd_runtime)
+
+    runtime_scheduler = runtime_sub.add_parser("scheduler", help="Classify local goal dependency graph readiness without starting workers.")
+    runtime_scheduler.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_scheduler.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_scheduler.set_defaults(func=cmd_runtime)
+
+    runtime_planner = runtime_sub.add_parser("planner", help="Generate a static deterministic local plan graph from an objective.")
+    runtime_planner.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_planner.add_argument("--objective", required=True, help="Objective to decompose into local goals.")
+    runtime_planner.add_argument("--explain", action="store_true", help="Include explanation fields in output.")
+    runtime_planner.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_planner.set_defaults(func=cmd_runtime)
+
+    runtime_parallel = runtime_sub.add_parser("parallel", help="Run bounded local dry-run executor simulation for ready goals.")
+    runtime_parallel.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_parallel.add_argument("--max-workers", type=int, default=2, help="Maximum simulated workers. Default: 2.")
+    runtime_parallel.add_argument("--fail-goal", action="append", help="Goal id to classify as simulated failure. Repeatable.")
+    runtime_parallel.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_parallel.set_defaults(func=cmd_runtime)
+
+    runtime_orchestrate = runtime_sub.add_parser("orchestrate", help="Run local planner -> scheduler -> executor -> reviewer packet -> report dry-run.")
+    runtime_orchestrate.add_argument("--workspace", required=True, help="Project-local runtime workspace path.")
+    runtime_orchestrate.add_argument("--objective", help="Objective to orchestrate. Required unless --resume is used.")
+    runtime_orchestrate.add_argument("--run-id", help="Run id to use if the workspace must be initialized.")
+    runtime_orchestrate.add_argument("--max-workers", type=int, default=2, help="Maximum simulated workers. Default: 2.")
+    runtime_orchestrate.add_argument("--dry-run", action="store_true", default=True, help="Dry-run mode is the only supported mode.")
+    runtime_orchestrate.add_argument("--resume", action="store_true", help="Inspect existing ledgers and recovery state instead of planning new goals.")
+    runtime_orchestrate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_orchestrate.set_defaults(func=cmd_runtime)
+
     runtime_job = runtime_sub.add_parser("job", help="Create and read local deterministic runtime job state.")
     runtime_job_sub = runtime_job.add_subparsers(dest="job_action", required=True)
     runtime_job_create = runtime_job_sub.add_parser("create", help="Create a local runtime job state file.")
