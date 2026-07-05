@@ -990,8 +990,99 @@ P31_ARTIFACT_REVIEW_COMPLETE
         self.assertIn("--merge-authorized", text)
         self.assertIn("--push-authorized", text)
 
+    def test_preflight_status_clean_tree_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._repo(root)
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["review", "preflight-status", "--json"])
+        payload = json.loads(stdout)
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["tracked_dirty_blockers"], [])
+        self.assertEqual(payload["untracked_allowed_artifacts"], [])
+        self.assertEqual(payload["untracked_blockers"], [])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_preflight_status_tracked_modified_file_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._repo(root)
+            (root / "README.md").write_text("modified\n", encoding="utf-8")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["review", "preflight-status", "--json"])
+        payload = json.loads(stdout)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error_code"], "review_preflight_status_blocked")
+        self.assertTrue(any("README.md" in item for item in payload["details"]["tracked_dirty_blockers"]))
+        self.assertEqual(payload["details"]["untracked_blockers"], [])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_preflight_status_untracked_artifact_report_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._repo(root)
+            (root / "P55_P60_SELF_REVIEW_MERGE_READINESS_REPORT.md").write_text("artifact\n", encoding="utf-8")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["review", "preflight-status", "--json"])
+        payload = json.loads(stdout)
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("P55_P60_SELF_REVIEW_MERGE_READINESS_REPORT.md", payload["untracked_allowed_artifacts"])
+        self.assertEqual(payload["untracked_blockers"], [])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_preflight_status_untracked_ai_directory_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._repo(root)
+            ai = root / ".ai"
+            ai.mkdir()
+            (ai / "runtime-ledger.json").write_text("{}", encoding="utf-8")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["review", "preflight-status", "--json"])
+        payload = json.loads(stdout)
+        self.assertEqual(code, 0, stderr)
+        self.assertIn(".ai/runtime-ledger.json", payload["untracked_allowed_artifacts"])
+        self.assertEqual(payload["untracked_blockers"], [])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_preflight_status_untracked_source_file_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._repo(root)
+            (root / "scratch.py").write_text("print('no')\n", encoding="utf-8")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["review", "preflight-status", "--json"])
+        payload = json.loads(stdout)
+        self.assertEqual(code, 2)
+        self.assertIn("scratch.py", payload["details"]["untracked_blockers"])
+        self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_preflight_status_mixed_allowed_artifact_and_source_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._repo(root)
+            (root / "P55_P60_LOCAL_MULTI_AGENT_RUNTIME_V1_REPORT.md").write_text("artifact\n", encoding="utf-8")
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            (tests_dir / "test_untracked.py").write_text("print('block')\n", encoding="utf-8")
+            with patch.object(cli, "PROJECT_ROOT", root):
+                code, stdout, stderr = run_cli(["review", "preflight-status", "--json"])
+                text_code, text_stdout, text_stderr = run_cli(["review", "preflight-status"])
+        payload = json.loads(stdout)
+        combined = text_stdout + text_stderr
+        self.assertEqual(code, 2)
+        self.assertEqual(text_code, 2)
+        self.assertIn("P55_P60_LOCAL_MULTI_AGENT_RUNTIME_V1_REPORT.md", payload["details"]["untracked_allowed_artifacts"])
+        self.assertIn("tests/test_untracked.py", payload["details"]["untracked_blockers"])
+        self.assertIn("tracked_dirty_blockers", combined)
+        self.assertIn("untracked_allowed_artifacts", combined)
+        self.assertIn("untracked_blockers", combined)
+        self.assertNotIn("Traceback", stdout + stderr + combined)
+
     def test_review_help_is_available(self) -> None:
-        for argv in (["review", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"], ["review", "codex-gate", "--help"], ["review", "reviewed-delivery", "--help"], ["review", "codex-deliver", "--help"]):
+        for argv in (["review", "--help"], ["review", "preflight-status", "--help"], ["review", "bundle", "--help"], ["review", "prompt", "--help"], ["review", "attest", "--help"], ["review", "merge-packet", "--help"], ["review", "codex-gate", "--help"], ["review", "reviewed-delivery", "--help"], ["review", "codex-deliver", "--help"]):
             with self.subTest(argv=argv):
                 stdout = io.StringIO()
                 stderr = io.StringIO()

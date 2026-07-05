@@ -1242,7 +1242,9 @@ def cmd_review(args: argparse.Namespace) -> int:
     action = args.review_action
     command = f"review {action}"
     try:
-        if action == "bundle":
+        if action == "preflight-status":
+            payload = review_lifecycle.review_preflight_status_payload(project_root=PROJECT_ROOT)
+        elif action == "bundle":
             payload = review_lifecycle.review_bundle_payload(
                 baseline=args.baseline,
                 head=args.head,
@@ -1359,7 +1361,10 @@ def cmd_review(args: argparse.Namespace) -> int:
         else:
             print(review_lifecycle.format_error(payload), file=sys.stderr)
         return 2
-    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else review_lifecycle.format_review_lifecycle_success(payload))
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(review_lifecycle.format_merge_gate_preflight_status(payload) if action == "preflight-status" else review_lifecycle.format_review_lifecycle_success(payload))
     return 0
 
 
@@ -2516,6 +2521,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("review", help="Generate phase lifecycle review bundles, prompts, attestations, and merge packets.")
     review_sub = p.add_subparsers(dest="review_action", required=True)
+    preflight_status = review_sub.add_parser("preflight-status", help="Classify merge-gate git status with historical artifact tolerance.")
+    preflight_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    preflight_status.set_defaults(func=cmd_review)
+
     bundle = review_sub.add_parser("bundle", help="Generate a Markdown review bundle and Claude prompt without provider calls.")
     bundle.add_argument("--baseline", required=True, help="Baseline commit for diff evidence.")
     bundle.add_argument("--head", required=True, help="Reviewed head commit.")

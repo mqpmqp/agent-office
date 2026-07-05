@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -63,6 +64,22 @@ EXPECTED_REVIEW_FIELDS = (
     "final confidence",
 )
 
+MERGE_GATE_ALLOWED_UNTRACKED_ROOT_PATTERNS = (
+    "P*_REPORT.md",
+    "P*_MERGE_GATE_REPORT.md",
+    "P*_REVIEW*.md",
+    "P*_ARTIFACT*.md",
+    "*_REPORT.md",
+    "*_REPORT*.md",
+    "*_READBACK.md",
+    "*_NOTES.md",
+    "*_STOPPED.md",
+    "*.sha256",
+    "*.tar.gz",
+)
+MERGE_GATE_ALLOWED_UNTRACKED_DIR_TOKENS = ("artifact", "bundle", "review", "evidence", "report", "validation", "archive", "readback")
+MERGE_GATE_BLOCKED_ROOT_SOURCE_FILES = ("pyproject.toml", "setup.cfg", "setup.py", "requirements.txt", "requirements-dev.txt", "tox.ini")
+
 
 @dataclass(frozen=True)
 class CaptureCommand:
@@ -112,6 +129,31 @@ def format_error(payload: dict[str, Any]) -> str:
         for key in sorted(details):
             lines.append(f"  {key}: {details[key]}")
     return "\n".join(lines)
+
+
+def review_preflight_status_payload(*, project_root: Path) -> dict[str, Any]:
+    command = "review preflight-status"
+    root = project_root.resolve()
+    status_lines = _git(root, ("status", "--porcelain", "--untracked-files=all")).stdout.splitlines()
+    classified = _classify_merge_gate_status(status_lines)
+    branch = _git(root, ("branch", "--show-current")).stdout.strip()
+    head = _git(root, ("rev-parse", "HEAD")).stdout.strip()
+    clean = not classified["tracked_dirty_blockers"] and not classified["untracked_blockers"]
+    payload = {
+        "ok": clean,
+        "command": command,
+        "branch": branch,
+        "head": head,
+        "status": "pass" if clean else "blocked",
+        **classified,
+    }
+    if not clean:
+        raise ReviewLifecycleError(
+            "review_preflight_status_blocked",
+            "merge gate preflight status has blockers",
+            payload,
+        )
+    return payload
 
 
 def review_bundle_payload(
@@ -909,6 +951,22 @@ def format_review_lifecycle_success(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_merge_gate_preflight_status(payload: dict[str, Any]) -> str:
+    return "\n".join([
+        "AgentOffice merge gate preflight status",
+        f"status: {payload['status']}",
+        f"branch: {payload['branch']}",
+        f"head: {payload['head']}",
+        "tracked_dirty_blockers:",
+        _bullet_list(payload["tracked_dirty_blockers"]),
+        "untracked_allowed_artifacts:",
+        _bullet_list(payload["untracked_allowed_artifacts"]),
+        "untracked_blockers:",
+        _bullet_list(payload["untracked_blockers"]),
+        "safety: no .env read, no env output, no provider/runtime/adapter behavior triggered",
+    ])
+
+
 def _format_reviewed_delivery_success(payload: dict[str, Any]) -> str:
     lines = [
         "AgentOffice reviewed delivery workflow complete",
@@ -1285,6 +1343,81 @@ def _codex_delivery_safety_checklist() -> list[str]:
 
 def _untracked_files(root: Path) -> list[str]:
     return [line[3:] for line in _git(root, ("status", "--short", "--untracked-files=all")).stdout.splitlines() if line.startswith("?? ")]
+
+
+def _classify_merge_gate_status(status_lines: list[str]) -> dict[str, list[str]]:
+    tracked_dirty_blockers: list[str] = []
+    untracked_allowed_artifacts: list[str] = []
+    untracked_blockers: list[str] = []
+    for line in status_lines:
+        if line.startswith("?? "):
+            path = line[3:]
+            if _is_allowed_merge_gate_untracked_artifact(path):
+                untracked_allowed_artifacts.append(path)
+            else:
+                untracked_blockers.append(path)
+            continue
+        if line.strip():
+            tracked_dirty_blockers.append(line)
+    return {
+        "tracked_dirty_blockers": tracked_dirty_blockers,
+        "untracked_allowed_artifacts": untracked_allowed_artifacts,
+        "untracked_blockers": untracked_blockers,
+    }
+
+
+def _is_allowed_merge_gate_untracked_artifact(path: str) -> bool:
+    normalized = _normalize_git_status_path(path).rstrip("/")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+    if parts[0] == ".ai":
+        return True
+    if _is_repo_source_path_blocker(parts):
+        return False
+    if len(parts) > 1 and _has_allowed_artifact_directory(parts[:-1]):
+        return True
+    name = parts[-1]
+    if any(fnmatch.fnmatchcase(name, pattern) for pattern in MERGE_GATE_ALLOWED_UNTRACKED_ROOT_PATTERNS):
+        return True
+    if path.endswith("/") and _has_allowed_artifact_directory([name]):
+        return True
+    return False
+
+
+def _normalize_git_status_path(path: str) -> str:
+    normalized = path.strip('"')
+    for suffix in ("\\r", "\\n", "\r", "\n"):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+    return normalized
+
+
+def _has_allowed_artifact_directory(parts: list[str]) -> bool:
+    for part in parts:
+        lower = part.lower()
+        if any(token in lower for token in MERGE_GATE_ALLOWED_UNTRACKED_DIR_TOKENS):
+            return True
+    return False
+
+
+def _is_repo_source_path_blocker(parts: list[str]) -> bool:
+    first = parts[0]
+    if first == "agent_office":
+        return True
+    if first == "tests" and len(parts) > 1 and parts[-1].endswith(".py"):
+        return True
+    if first == "scripts":
+        return True
+    if len(parts) == 1:
+        name = parts[0]
+        if name.endswith(".py"):
+            return True
+        if name in MERGE_GATE_BLOCKED_ROOT_SOURCE_FILES:
+            return True
+        if name.endswith((".toml", ".cfg", ".ini", ".yaml", ".yml")):
+            return True
+    return False
 
 
 def _codex_deliver_markdown(payload: dict[str, Any]) -> str:
