@@ -1313,3 +1313,25 @@ Recommended goal-runner operator workflow:
 5. Use `resume` for interrupted queues; use `--retry-failed` only when `autonomy classify` reports a retryable validation failure.
 6. Generate `goal-report` plus review/merge packet artifacts for the review gate.
 7. Merge only after explicit operator authorization and a separate fresh merge gate.
+
+### Observability and recovery UX
+
+Use these local-only commands when a goal queue is already running and the operator needs to decide whether to resume, retry, inspect, or hand off the queue for review:
+
+```bash
+python3 -m agent_office autonomy queue inspect --path .ai/autonomy/queues/demo --json
+python3 -m agent_office autonomy queue inspect --path .ai/autonomy/queues/demo
+python3 -m agent_office autonomy recover-plan --path .ai/autonomy/queues/demo --json
+python3 -m agent_office autonomy recover-plan --path .ai/autonomy/queues/demo --retry-failed --json
+python3 -m agent_office autonomy goal-handoff --path .ai/autonomy/queues/demo --out /tmp/agentoffice-goal-handoff.md --json
+```
+
+`queue inspect` is read-only and summarizes task counts, ready tasks, blocked tasks, failed tasks, retryable failures, recent ledger records, artifact evidence, and the recommended next operator action. `recover-plan` is a dry-run explanation: it does not write the queue and does not execute tasks. `goal-handoff` writes a deterministic Markdown packet for an operator or reviewer with the queue summary, recommended commands, recovery hints, evidence paths, and ledger tail.
+
+Recovery workflow:
+
+1. Run `queue inspect` after any blocked or failed runner result.
+2. If the recommendation is `resume`, run one small `resume --max-steps 1` step.
+3. If the recommendation is `retry_failed`, inspect validation artifacts first, then run `recover-plan --retry-failed` before any `resume --retry-failed`.
+4. If the recommendation is `inspect_blocked`, complete the manual or upstream action and generate `goal-handoff` for reviewer context.
+5. Keep merge decisions outside the runner; these commands do not merge, push, mutate tags, mutate GitHub Releases, call providers, call models, or execute arbitrary shell commands.

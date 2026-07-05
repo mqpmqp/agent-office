@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -25,6 +26,9 @@ NEXT_MARKER = "AGENTOFFICE_AUTONOMY_QUEUE_NEXT"
 RUNNER_MARKER = "AGENTOFFICE_AUTONOMY_GOAL_RUNNER"
 TEMPLATE_MARKER = "AGENTOFFICE_AUTONOMY_GOAL_TEMPLATE"
 REPORT_MARKER = "AGENTOFFICE_AUTONOMY_GOAL_REPORT"
+INSPECT_MARKER = "AGENTOFFICE_AUTONOMY_QUEUE_INSPECT"
+RECOVERY_MARKER = "AGENTOFFICE_AUTONOMY_RECOVERY_PLAN"
+HANDOFF_MARKER = "AGENTOFFICE_AUTONOMY_GOAL_HANDOFF"
 CLASSIFY_MARKER = "AGENTOFFICE_AUTONOMY_FAILURE_CLASSIFICATION"
 
 TASK_STATUSES = {"pending", "running", "passed", "failed", "skipped", "blocked"}
@@ -153,6 +157,59 @@ def queue_next_payload(path: str, project_root: Path) -> dict[str, Any]:
     return {"ok": not resolver["errors"], "action": "next", "queue": queue, **resolver}
 
 
+def queue_inspect_payload(path: str, project_root: Path, *, ledger_limit: int = 5) -> dict[str, Any]:
+    queue_dir = _safe_queue_dir(path, project_root, must_exist=True)
+    queue = _read_queue(queue_dir)
+    snapshot = _observability_snapshot(queue, ledger_limit=max(0, ledger_limit))
+    return {"ok": not snapshot["resolver"]["errors"], "action": "inspect", **snapshot}
+
+
+def recovery_plan_payload(path: str, max_steps: int, project_root: Path, *, retry_failed: bool = False, ledger_limit: int = 5) -> dict[str, Any]:
+    queue_dir = _safe_queue_dir(path, project_root, must_exist=True)
+    queue = _read_queue(queue_dir)
+    snapshot = _observability_snapshot(queue, ledger_limit=max(0, ledger_limit))
+    candidates = list(snapshot["ready"] or [])
+    if retry_failed:
+        candidates.extend(snapshot["retryable_failed"] or [])
+    would_run = candidates[: max(0, max_steps)]
+    return {
+        "ok": not snapshot["resolver"]["errors"],
+        "action": "recover-plan",
+        "dry_run": True,
+        "writes_queue": False,
+        "executes_tasks": False,
+        "provider_calls": False,
+        "retry_failed": retry_failed,
+        "max_steps": max_steps,
+        "would_run": would_run,
+        "safe_to_resume": bool(would_run and not snapshot["resolver"]["errors"]),
+        "operator_action_required": bool(snapshot["blocked"] and not would_run),
+        **snapshot,
+        "packet_type": "agentoffice_autonomy_recovery_plan",
+    }
+
+
+def goal_handoff_payload(path: str, out: str, project_root: Path, *, ledger_limit: int = 5) -> dict[str, Any]:
+    queue_dir = _safe_queue_dir(path, project_root, must_exist=True)
+    queue = _read_queue(queue_dir)
+    out_path = _safe_output_file(out, project_root)
+    snapshot = _observability_snapshot(queue, ledger_limit=max(0, ledger_limit))
+    markdown = _format_handoff_markdown(snapshot)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and out_path.is_symlink():
+        raise AutonomyError("goal handoff output symlink refused.")
+    out_path.write_text(markdown, encoding="utf-8")
+    return {
+        "ok": not snapshot["resolver"]["errors"],
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_autonomy_goal_handoff",
+        "action": "goal-handoff",
+        "out": str(out_path),
+        "next_action": snapshot["resolver"]["next_action"],
+        "recommendation": snapshot["recommendation"],
+    }
+
+
 def classify_failure_payload(kind: str, attempts: int = 0, max_attempts: int = 1) -> dict[str, Any]:
     failure = kind if kind in FAILURE_CLASSES else "unknown"
     retryable = failure == "validation_failed" and attempts < max_attempts
@@ -257,6 +314,55 @@ def format_next(payload: dict[str, Any]) -> str:
     lines.append("errors:")
     lines.extend(f"  - {error}" for error in payload.get("errors", []) or ["none"])
     return "\n".join(lines)
+
+
+def format_queue_inspect(payload: dict[str, Any]) -> str:
+    recommendation = payload["recommendation"]
+    lines = [
+        INSPECT_MARKER,
+        f"ok: {_bool_text(bool(payload['ok']))}",
+        f"goal: {payload['queue']['goal']}",
+        f"queue_status: {payload['queue']['status']}",
+        f"next_action: {payload['resolver']['next_action']}",
+        f"recommended_action: {recommendation['action']}",
+    ]
+    lines.append("summary:")
+    for key, value in payload["summary"].items():
+        lines.append(f"  {key}: {value}")
+    lines.append(f"ready: {_format_id_list(payload['ready'])}")
+    lines.append(f"failed: {_format_id_list(payload['failed'])}")
+    lines.append(f"blocked: {_format_id_list(payload['blocked'])}")
+    lines.append(f"resumable: {_format_id_list(payload['resumable'])}")
+    lines.append("recovery:")
+    for item in payload["failures"] or [{"id": "none", "failure_class": "none", "recovery_hint": "none"}]:
+        lines.append(f"  - {item['id']}: {item['failure_class']} | {item['recovery_hint']}")
+    lines.append("artifacts:")
+    for item in payload["evidence"]["artifact_types"] or [{"type": "none", "count": 0}]:
+        lines.append(f"  - {item['type']}: {item['count']}")
+    return "\n".join(lines)
+
+
+def format_recovery_plan(payload: dict[str, Any]) -> str:
+    lines = [
+        RECOVERY_MARKER,
+        f"ok: {_bool_text(bool(payload['ok']))}",
+        "dry_run: true",
+        "writes_queue: false",
+        "executes_tasks: false",
+        f"recommended_action: {payload['recommendation']['action']}",
+        f"safe_to_resume: {_bool_text(bool(payload['safe_to_resume']))}",
+        f"operator_action_required: {_bool_text(bool(payload['operator_action_required']))}",
+        "would_run:",
+    ]
+    lines.extend(f"  - {item['id']}: {item['reason']}" for item in payload["would_run"] or [{"id": "none", "reason": "none"}])
+    lines.append("commands:")
+    for command in payload["recommendation"].get("commands", []) or ["none"]:
+        lines.append(f"  - {command}")
+    return "\n".join(lines)
+
+
+def format_goal_handoff(payload: dict[str, Any]) -> str:
+    return "\n".join([HANDOFF_MARKER, f"ok: {_bool_text(bool(payload['ok']))}", f"out: {payload['out']}", f"next_action: {payload['next_action']}", f"recommended_action: {payload['recommendation']['action']}"])
 
 
 def format_runner(payload: dict[str, Any]) -> str:
@@ -476,7 +582,14 @@ def _format_goal_report_markdown(queue: dict[str, Any], resolver: dict[str, Any]
     for task in queue["tasks"]:
         failure = (task.get("last_error") or {}).get("class") if isinstance(task.get("last_error"), dict) else ""
         lines.append(f"| {task['id']} | {task['kind']} | {task['status']} | {task['attempts']}/{task['max_attempts']} | {failure or ''} |")
-    lines.extend(["", "## Dependency Graph Summary", "", f"- next_action: `{resolver['next_action']}`", f"- ready_tasks: `{', '.join(task['id'] for task in resolver['ready_tasks']) or 'none'}`", f"- blocked_tasks: `{', '.join(task['id'] for task in resolver['blocked_tasks']) or 'none'}`", "", "## Artifacts", ""])
+    diagnostics = [_task_diagnostic(task) for task in queue["tasks"]]
+    failures = [item for item in diagnostics if item["failure_class"] != "none" or item["status"] in {"failed", "blocked"}]
+    lines.extend(["", "## Dependency Graph Summary", "", f"- next_action: `{resolver['next_action']}`", f"- ready_tasks: `{', '.join(task['id'] for task in resolver['ready_tasks']) or 'none'}`", f"- blocked_tasks: `{', '.join(task['id'] for task in resolver['blocked_tasks']) or 'none'}`", "", "## Recovery Hints", ""])
+    if failures:
+        lines.extend(f"- `{item['id']}`: {item['failure_class']} - {item['recovery_hint']}" for item in failures)
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Artifacts", ""])
     if queue["artifacts"]:
         lines.extend(f"- `{artifact['path']}` ({artifact['type']})" for artifact in queue["artifacts"])
     else:
@@ -563,6 +676,198 @@ def _queue_response(action: str, queue: dict[str, Any], **extra: Any) -> dict[st
     payload = {"ok": True, "action": action, "queue": queue}
     payload.update(extra)
     return payload
+
+
+def _observability_snapshot(queue: dict[str, Any], *, ledger_limit: int) -> dict[str, Any]:
+    observed = deepcopy(queue)
+    resolver = _resolve_next(observed)
+    observed["status"] = _overall_status(observed)
+    diagnostics = [_task_diagnostic(task) for task in observed["tasks"]]
+    ready = [_action_item(task["id"], "ready", _resume_command(observed["path"])) for task in resolver["ready_tasks"]]
+    retryable_failed = [_action_item(item["id"], "retryable_failure", _retry_command(observed["path"])) for item in diagnostics if item["status"] == "failed" and item["retryable"]]
+    failures = [item for item in diagnostics if item["failure_class"] != "none" or item["status"] in {"failed", "blocked"}]
+    blocked_ids = {item["id"] for item in resolver["blocked_tasks"]}
+    blocked = [_action_item(item["id"], item.get("reason", "blocked"), _inspect_command(observed["path"])) for item in resolver["blocked_tasks"]]
+    for item in diagnostics:
+        if item["status"] == "blocked" and item["id"] not in blocked_ids:
+            blocked.append(_action_item(item["id"], item["failure_class"], _inspect_command(observed["path"])))
+    completed = [_action_item(item["id"], "passed", _inspect_command(observed["path"])) for item in diagnostics if item["status"] == "passed"]
+    failed = [_action_item(item["id"], item["failure_class"], _inspect_command(observed["path"])) for item in diagnostics if item["status"] == "failed"]
+    resumable = ready + retryable_failed
+    recommendation = _recommendation(observed, resolver, ready, retryable_failed, blocked)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": "agentoffice_autonomy_queue_observability",
+        "queue": observed,
+        "summary": _queue_summary(observed),
+        "resolver": resolver,
+        "tasks": diagnostics,
+        "completed": completed,
+        "ready": ready,
+        "failed": failed,
+        "blocked": blocked,
+        "retryable_failed": retryable_failed,
+        "resumable": resumable,
+        "failures": failures,
+        "evidence": _evidence_summary(observed),
+        "ledger_tail": _ledger_tail(observed, ledger_limit),
+        "recommendation": recommendation,
+    }
+
+
+def _task_diagnostic(task: dict[str, Any]) -> dict[str, Any]:
+    error = task.get("last_error") if isinstance(task.get("last_error"), dict) else {}
+    failure = str(error.get("class") or "none")
+    message = str(error.get("message") or "")
+    retryable = False
+    if failure != "none":
+        retryable = bool(classify_failure_payload(failure, int(task.get("attempts") or 0), int(task.get("max_attempts") or 1))["retryable"])
+    artifacts = [str(artifact.get("path")) for artifact in task.get("artifacts", []) if isinstance(artifact, dict) and artifact.get("path")]
+    return {
+        "id": task["id"],
+        "kind": task["kind"],
+        "status": task["status"],
+        "attempts": task["attempts"],
+        "max_attempts": task["max_attempts"],
+        "depends_on": list(task.get("depends_on") or []),
+        "failure_class": failure,
+        "message": message,
+        "retryable": retryable,
+        "recovery_hint": _recovery_hint(failure, task["status"], retryable),
+        "artifact_count": len(artifacts),
+        "evidence_paths": artifacts,
+    }
+
+
+def _recovery_hint(failure: str, status: str, retryable: bool) -> str:
+    if failure == "validation_failed":
+        return "Inspect validation stdout/stderr artifacts, fix the failing command, then resume with --retry-failed while attempts remain." if retryable else "Inspect validation stdout/stderr artifacts and rerun from a fresh queue or manually reset attempts after review."
+    if failure == "manual_block":
+        return "Complete the required operator action, then update or replace the manual task before resuming."
+    if failure == "dependency_failed":
+        return "Inspect and repair the failed upstream task before downstream tasks can run."
+    if failure in {"dependency_cycle", "missing_dependency", "invalid_queue", "malformed_json"}:
+        return "Fix the queue JSON or dependency graph, then rerun queue validate."
+    if failure in {"unsafe_path", "symlink_refused"}:
+        return "Use a project-local or temp path without traversal, .env components, or symlinks."
+    if failure == "partial_remote_state":
+        return "Refresh static readback evidence before retrying this local-only step."
+    if status == "running":
+        return "Run resume to recover an interrupted running task as failed before deciding whether to retry."
+    if status == "blocked":
+        return "Inspect the blocking reason and upstream tasks before resuming."
+    if status == "failed":
+        return "Inspect the task ledger and artifacts before deciding whether to retry or recreate the queue."
+    return "No recovery action required."
+
+
+def _recommendation(queue: dict[str, Any], resolver: dict[str, Any], ready: list[dict[str, Any]], retryable_failed: list[dict[str, Any]], blocked: list[dict[str, Any]]) -> dict[str, Any]:
+    path = queue["path"]
+    if resolver["errors"]:
+        return {"action": "fix_queue", "reason": "resolver_errors", "commands": [_validate_command(path), _inspect_command(path)]}
+    if retryable_failed:
+        return {"action": "retry_failed", "reason": "retryable_failed_tasks", "commands": [_retry_command(path), _inspect_command(path)]}
+    if ready:
+        return {"action": "resume", "reason": "ready_tasks", "commands": [_resume_command(path), _inspect_command(path)]}
+    if blocked:
+        return {"action": "inspect_blocked", "reason": "blocked_tasks", "commands": [_inspect_command(path), _handoff_command(path)]}
+    if queue["status"] == "passed":
+        return {"action": "complete", "reason": "all_tasks_passed", "commands": [_handoff_command(path)]}
+    return {"action": "inspect", "reason": "no_ready_tasks", "commands": [_inspect_command(path)]}
+
+
+def _evidence_summary(queue: dict[str, Any]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    paths = []
+    for artifact in queue.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        artifact_type = str(artifact.get("type") or "unknown")
+        counts[artifact_type] = counts.get(artifact_type, 0) + 1
+        if artifact.get("path"):
+            paths.append({"type": artifact_type, "path": str(artifact["path"])})
+    return {"artifact_count": len(paths), "artifact_types": [{"type": key, "count": counts[key]} for key in sorted(counts)], "artifacts": paths}
+
+
+def _ledger_tail(queue: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    ledger = list(queue.get("ledger") or [])
+    if limit <= 0:
+        return []
+    return ledger[-limit:]
+
+
+def _action_item(task_id: str, reason: str, command: str) -> dict[str, Any]:
+    return {"id": task_id, "reason": reason, "command": command}
+
+
+def _resume_command(path: str) -> str:
+    return f"python3 -m agent_office autonomy resume --path {path} --max-steps 1"
+
+
+def _retry_command(path: str) -> str:
+    return f"python3 -m agent_office autonomy resume --path {path} --max-steps 1 --retry-failed"
+
+
+def _inspect_command(path: str) -> str:
+    return f"python3 -m agent_office autonomy queue inspect --path {path}"
+
+
+def _validate_command(path: str) -> str:
+    return f"python3 -m agent_office autonomy queue validate --path {path}"
+
+
+def _handoff_command(path: str) -> str:
+    return f"python3 -m agent_office autonomy goal-handoff --path {path} --out /tmp/agentoffice-goal-handoff.md"
+
+
+def _format_id_list(items: list[dict[str, Any]]) -> str:
+    return ", ".join(str(item["id"]) for item in items) if items else "none"
+
+
+def _format_handoff_markdown(snapshot: dict[str, Any]) -> str:
+    queue = snapshot["queue"]
+    recommendation = snapshot["recommendation"]
+    lines = [
+        "# AgentOffice Autonomy Goal Handoff",
+        "",
+        f"Marker: {HANDOFF_MARKER}",
+        "",
+        "## Summary",
+        "",
+        f"- goal: `{queue['goal']}`",
+        f"- queue path: `{queue['path']}`",
+        f"- queue status: `{queue['status']}`",
+        f"- next action: `{snapshot['resolver']['next_action']}`",
+        f"- recommended action: `{recommendation['action']}`",
+        "",
+        "## Recommended Commands",
+        "",
+    ]
+    lines.extend(f"- `{command}`" for command in recommendation.get("commands", []) or ["none"])
+    lines.extend(["", "## Task Status", "", "| id | kind | status | attempts | failure | retryable |", "| --- | --- | --- | --- | --- | --- |"] )
+    for task in snapshot["tasks"]:
+        lines.append(f"| {task['id']} | {task['kind']} | {task['status']} | {task['attempts']}/{task['max_attempts']} | {task['failure_class']} | {_bool_text(bool(task['retryable']))} |")
+    lines.extend(["", "## Recovery Hints", ""] )
+    if snapshot["failures"]:
+        lines.extend(f"- `{item['id']}`: {item['failure_class']} - {item['recovery_hint']}" for item in snapshot["failures"])
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Evidence", ""] )
+    if snapshot["evidence"]["artifacts"]:
+        lines.extend(f"- `{item['path']}` ({item['type']})" for item in snapshot["evidence"]["artifacts"])
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Ledger Tail", ""] )
+    if snapshot["ledger_tail"]:
+        for record in snapshot["ledger_tail"]:
+            task_id = record.get("task_id") or record.get("event") or "unknown"
+            status = record.get("status_after") or record.get("status") or "unknown"
+            failure = record.get("failure_class") or "none"
+            lines.append(f"- `{task_id}`: `{status}` failure=`{failure}`")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Safety", "", "This handoff is local-only. It does not merge, push, mutate tags, mutate GitHub Releases, call providers, call models, or execute arbitrary shell commands.", ""] )
+    return "\n".join(lines)
 
 
 def _queue_summary(queue: dict[str, Any]) -> dict[str, int]:

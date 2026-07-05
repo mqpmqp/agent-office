@@ -252,5 +252,122 @@ class AutonomyRunnerTemplateReportCliTests(unittest.TestCase):
         self.assertTrue(any(artifact["type"] == "github-release-plan" for artifact in payload["queue"]["artifacts"]))
 
 
+class AutonomyObservabilityRecoveryCliTests(unittest.TestCase):
+    maxDiff = None
+
+    def _observability_queue(self, root: Path) -> Path:
+        queue = root / "queue"
+        result = run_cli(["autonomy", "queue", "init", "--path", str(queue), "--goal", "observability", "--json"], root)
+        self.assertEqual(result[0], 0, result[1] + result[2])
+        data = json.loads((queue / "queue.json").read_text(encoding="utf-8"))
+        data["tasks"] = [
+            {"id": "done", "kind": "checkpoint", "status": "passed", "depends_on": [], "attempts": 1, "max_attempts": 1, "created_at": None, "updated_at": None, "artifacts": [{"type": "checkpoint", "path": str(queue / "artifacts" / "done" / "result.json")}], "last_error": None},
+            {"id": "retry-validation", "kind": "validate-suite", "status": "failed", "depends_on": ["done"], "attempts": 1, "max_attempts": 2, "created_at": None, "updated_at": None, "artifacts": [{"type": "validation_stdout", "path": str(queue / "validation" / "stdout.txt")}], "last_error": {"class": "validation_failed", "message": "minimal suite failed"}, "suite": "minimal"},
+            {"id": "manual-approval", "kind": "manual", "status": "blocked", "depends_on": ["done"], "attempts": 1, "max_attempts": 1, "created_at": None, "updated_at": None, "artifacts": [], "last_error": {"class": "manual_block", "message": "operator approval required"}},
+            {"id": "downstream", "kind": "noop", "status": "pending", "depends_on": ["retry-validation"], "attempts": 0, "max_attempts": 1, "created_at": None, "updated_at": None, "artifacts": [], "last_error": None},
+        ]
+        data["ledger"] = [
+            {"task_id": "done", "status_after": "passed", "failure_class": None},
+            {"task_id": "retry-validation", "status_after": "failed", "failure_class": "validation_failed"},
+            {"task_id": "manual-approval", "status_after": "blocked", "failure_class": "manual_block"},
+        ]
+        data["artifacts"] = [{"type": "validation_stdout", "path": str(queue / "validation" / "stdout.txt")}]
+        (queue / "queue.json").write_text(json.dumps(data), encoding="utf-8")
+        return queue
+
+    def test_queue_inspect_json_contract_classifies_failed_blocked_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            queue = self._observability_queue(root)
+            result = run_cli(["autonomy", "queue", "inspect", "--path", str(queue), "--ledger-limit", "2", "--json"], root)
+
+        self.assertEqual(result[0], 0, result[1] + result[2])
+        payload = json.loads(result[1])
+        self.assertEqual(payload["packet_type"], "agentoffice_autonomy_queue_observability")
+        self.assertEqual(payload["action"], "inspect")
+        self.assertEqual(payload["recommendation"]["action"], "retry_failed")
+        self.assertEqual([item["id"] for item in payload["retryable_failed"]], ["retry-validation"])
+        self.assertIn("retry-validation", [item["id"] for item in payload["resumable"]])
+        self.assertIn("manual-approval", [item["id"] for item in payload["blocked"]])
+        self.assertEqual(len(payload["ledger_tail"]), 2)
+        self.assertTrue(any(item["failure_class"] == "validation_failed" for item in payload["failures"]))
+
+    def test_queue_inspect_and_recover_plan_text_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            queue = self._observability_queue(root)
+            inspect_text = run_cli(["autonomy", "queue", "inspect", "--path", str(queue)], root)
+            plan_text = run_cli(["autonomy", "recover-plan", "--path", str(queue), "--retry-failed"], root)
+
+        self.assertEqual(inspect_text[0], 0, inspect_text[1] + inspect_text[2])
+        self.assertEqual(plan_text[0], 0, plan_text[1] + plan_text[2])
+        self.assertIn("AGENTOFFICE_AUTONOMY_QUEUE_INSPECT", inspect_text[1])
+        self.assertIn("recommended_action: retry_failed", inspect_text[1])
+        self.assertIn("AGENTOFFICE_AUTONOMY_RECOVERY_PLAN", plan_text[1])
+        self.assertIn("dry_run: true", plan_text[1])
+        self.assertIn("writes_queue: false", plan_text[1])
+
+    def test_recover_plan_dry_run_does_not_modify_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            queue = self._observability_queue(root)
+            before = (queue / "queue.json").read_text(encoding="utf-8")
+            result = run_cli(["autonomy", "recover-plan", "--path", str(queue), "--retry-failed", "--max-steps", "1", "--json"], root)
+            after = (queue / "queue.json").read_text(encoding="utf-8")
+
+        self.assertEqual(result[0], 0, result[1] + result[2])
+        payload = json.loads(result[1])
+        self.assertEqual(payload["packet_type"], "agentoffice_autonomy_recovery_plan")
+        self.assertTrue(payload["dry_run"])
+        self.assertFalse(payload["writes_queue"])
+        self.assertFalse(payload["executes_tasks"])
+        self.assertEqual([item["id"] for item in payload["would_run"]], ["retry-validation"])
+        self.assertEqual(before, after)
+
+    def test_goal_handoff_writes_operator_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            queue = self._observability_queue(root)
+            out = root / "handoff.md"
+            result = run_cli(["autonomy", "goal-handoff", "--path", str(queue), "--out", str(out), "--json"], root)
+            text = out.read_text(encoding="utf-8")
+
+        self.assertEqual(result[0], 0, result[1] + result[2])
+        payload = json.loads(result[1])
+        self.assertEqual(payload["packet_type"], "agentoffice_autonomy_goal_handoff")
+        self.assertEqual(payload["action"], "goal-handoff")
+        self.assertIn("AGENTOFFICE_AUTONOMY_GOAL_HANDOFF", text)
+        self.assertIn("retry-validation", text)
+        self.assertIn("Recovery Hints", text)
+
+    def test_observability_missing_and_malformed_paths_are_clean_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            missing = run_cli(["autonomy", "queue", "inspect", "--path", str(root / "missing"), "--json"], root)
+            bad = root / "bad"
+            bad.mkdir()
+            (bad / "queue.json").write_text("{bad", encoding="utf-8")
+            malformed = run_cli(["autonomy", "recover-plan", "--path", str(bad), "--json"], root)
+
+        self.assertEqual(missing[0], 2)
+        self.assertIn("invalid_queue", missing[2])
+        self.assertEqual(malformed[0], 2)
+        self.assertIn("malformed_json", malformed[2])
+        self.assertNotIn("Traceback", missing[1] + missing[2] + malformed[1] + malformed[2])
+
+    def test_goal_report_includes_recovery_hints_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            queue = self._observability_queue(root)
+            out = root / "goal-report.md"
+            result = run_cli(["autonomy", "goal-report", "--path", str(queue), "--out", str(out), "--json"], root)
+            text = out.read_text(encoding="utf-8")
+
+        self.assertEqual(result[0], 0, result[1] + result[2])
+        self.assertIn("AgentOffice Autonomy Goal Report", text)
+        self.assertIn("Recovery Hints", text)
+        self.assertIn("validation_failed", text)
+
+
 if __name__ == "__main__":
     unittest.main()
