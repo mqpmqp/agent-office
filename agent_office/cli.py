@@ -167,12 +167,36 @@ from .v1_final_delivery import (
     write_final_delivery_packet,
 )
 from .v1_post_release_ops import (
+    format_github_release_handoff,
+    format_github_release_plan,
     format_github_release_readback_verify,
     format_post_v1_roadmap,
     format_release_archive_verify,
+    format_release_candidate,
+    format_release_state,
+    github_release_handoff_payload,
+    github_release_plan_payload,
     post_v1_roadmap_payload,
+    release_candidate_payload,
+    release_state_payload,
     verify_github_release_readback_payload,
     verify_release_archive_payload,
+)
+from .autonomy import (
+    AutonomyError,
+    autonomy_checkpoint_payload,
+    autonomy_init_payload,
+    autonomy_merge_packet_payload,
+    autonomy_plan_payload,
+    autonomy_report_payload,
+    autonomy_review_packet_payload,
+    autonomy_status_payload,
+    autonomy_validate_payload,
+    format_autonomy_ledger,
+    format_autonomy_merge_packet,
+    format_autonomy_plan,
+    format_autonomy_review_packet,
+    format_autonomy_validation,
 )
 
 
@@ -1630,6 +1654,46 @@ def cmd_runtime(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_autonomy(args: argparse.Namespace) -> int:
+    action = args.autonomy_action
+    try:
+        if action == "plan":
+            payload = autonomy_plan_payload(args.goal)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_plan(payload))
+            return 0
+        if action == "init":
+            payload = autonomy_init_payload(args.path, args.goal, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
+            return 0
+        if action == "status":
+            payload = autonomy_status_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
+            return 0
+        if action == "checkpoint":
+            payload = autonomy_checkpoint_payload(args.path, args.name, args.status, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
+            return 0
+        if action == "report":
+            payload = autonomy_report_payload(args.path, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_ledger(payload))
+            return 0
+        if action == "validate":
+            payload = autonomy_validate_payload(args.path, args.suite, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_validation(payload))
+            return 0 if payload["ok"] else 2
+        if action == "review-packet":
+            payload = autonomy_review_packet_payload(args.base, args.head, args.out, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_review_packet(payload))
+            return 0
+        if action == "merge-packet":
+            payload = autonomy_merge_packet_payload(args.source, args.target, PROJECT_ROOT)
+            print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_autonomy_merge_packet(payload))
+            return 0
+    except AutonomyError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+    raise AgentOfficeError("autonomy requires plan, init, status, checkpoint, report, validate, review-packet, or merge-packet.")
+
+
 def cmd_v1(args: argparse.Namespace) -> int:
     action = args.v1_action
     if action == "final-delivery":
@@ -1660,7 +1724,23 @@ def cmd_v1(args: argparse.Namespace) -> int:
         payload = post_v1_roadmap_payload()
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_post_v1_roadmap(payload))
         return 0
-    raise AgentOfficeError("v1 requires final-delivery, verify-final-delivery, verify-release-archive, verify-github-release-readback, or post-v1-roadmap.")
+    if action == "release-state":
+        payload = release_state_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_release_state(payload))
+        return 0
+    if action == "github-release-handoff":
+        payload = github_release_handoff_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_github_release_handoff(payload))
+        return 0
+    if action == "github-release-plan":
+        payload = github_release_plan_payload()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_github_release_plan(payload))
+        return 0
+    if action == "release-candidate":
+        payload = release_candidate_payload(args.version)
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_release_candidate(payload))
+        return 0 if payload["ok"] else 2
+    raise AgentOfficeError("v1 requires final-delivery, verify-final-delivery, verify-release-archive, verify-github-release-readback, post-v1-roadmap, release-state, github-release-handoff, github-release-plan, or release-candidate.")
 
 
 def cmd_run_demo(args: argparse.Namespace) -> int:
@@ -2180,6 +2260,48 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_worker_dry_run_publish.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     runtime_worker_dry_run_publish.set_defaults(func=cmd_runtime)
 
+    p = sub.add_parser("autonomy", help="Plan and operate local autonomous delivery workflows without external execution.")
+    autonomy_sub = p.add_subparsers(dest="autonomy_action", required=True)
+    autonomy_plan = autonomy_sub.add_parser("plan", help="Generate a deterministic local autonomous delivery mission plan.")
+    autonomy_plan.add_argument("--goal", required=True, help="Autonomous delivery goal to plan: release-ops, post-v1, or autonomous-delivery.")
+    autonomy_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_plan.set_defaults(func=cmd_autonomy)
+    autonomy_init = autonomy_sub.add_parser("init", help="Initialize a local autonomous run ledger.")
+    autonomy_init.add_argument("--goal", required=True, help="Autonomous delivery goal for the run ledger.")
+    autonomy_init.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_init.set_defaults(func=cmd_autonomy)
+    autonomy_status = autonomy_sub.add_parser("status", help="Read a local autonomous run ledger.")
+    autonomy_status.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_status.set_defaults(func=cmd_autonomy)
+    autonomy_checkpoint = autonomy_sub.add_parser("checkpoint", help="Append a checkpoint to a local autonomous run ledger.")
+    autonomy_checkpoint.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_checkpoint.add_argument("--name", required=True, help="Checkpoint name.")
+    autonomy_checkpoint.add_argument("--status", required=True, choices=["pending", "running", "passed", "failed", "skipped", "blocked"], help="Checkpoint status.")
+    autonomy_checkpoint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_checkpoint.set_defaults(func=cmd_autonomy)
+    autonomy_report = autonomy_sub.add_parser("report", help="Summarize a local autonomous run ledger.")
+    autonomy_report.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_report.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_report.set_defaults(func=cmd_autonomy)
+    autonomy_validate = autonomy_sub.add_parser("validate", help="Run an allowlisted local validation suite and record transcripts.")
+    autonomy_validate.add_argument("--path", required=True, help="Project-local or temp run ledger directory.")
+    autonomy_validate.add_argument("--suite", required=True, help="Validation suite: minimal, release, or full.")
+    autonomy_validate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_validate.set_defaults(func=cmd_autonomy)
+    autonomy_review_packet = autonomy_sub.add_parser("review-packet", help="Generate a local Markdown review packet from a commit range.")
+    autonomy_review_packet.add_argument("--base", required=True, help="Base commit or ref for diff evidence.")
+    autonomy_review_packet.add_argument("--head", required=True, help="Head commit or ref for diff evidence.")
+    autonomy_review_packet.add_argument("--out", required=True, help="Review packet Markdown output path under project root or temp directory.")
+    autonomy_review_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_review_packet.set_defaults(func=cmd_autonomy)
+    autonomy_merge_packet = autonomy_sub.add_parser("merge-packet", help="Generate a local merge gate packet without merging.")
+    autonomy_merge_packet.add_argument("--source", required=True, help="Source branch or ref to merge later.")
+    autonomy_merge_packet.add_argument("--target", required=True, help="Target branch or ref for merge planning.")
+    autonomy_merge_packet.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    autonomy_merge_packet.set_defaults(func=cmd_autonomy)
+
     p = sub.add_parser("v1", help="Generate and verify AgentOffice v1 final delivery packets without external execution.")
     v1_sub = p.add_subparsers(dest="v1_action", required=True)
     final_delivery = v1_sub.add_parser("final-delivery", help="Generate the deterministic AgentOffice v1 final delivery packet.")
@@ -2202,6 +2324,19 @@ def build_parser() -> argparse.ArgumentParser:
     post_v1_roadmap = v1_sub.add_parser("post-v1-roadmap", help="Print the deterministic post-v1 release operations roadmap.")
     post_v1_roadmap.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     post_v1_roadmap.set_defaults(func=cmd_v1)
+    release_state = v1_sub.add_parser("release-state", help="Print tokenless local v1 release state without network calls.")
+    release_state.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    release_state.set_defaults(func=cmd_v1)
+    github_handoff = v1_sub.add_parser("github-release-handoff", help="Print tokenless GitHub Release operator handoff guidance.")
+    github_handoff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    github_handoff.set_defaults(func=cmd_v1)
+    github_plan = v1_sub.add_parser("github-release-plan", help="Print a dry-run GitHub Release publish plan without writes.")
+    github_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    github_plan.set_defaults(func=cmd_v1)
+    release_candidate = v1_sub.add_parser("release-candidate", help="Print a local release candidate readiness packet without tagging or release writes.")
+    release_candidate.add_argument("--version", required=True, help="Candidate version, for example v1.1.0.")
+    release_candidate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    release_candidate.set_defaults(func=cmd_v1)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
