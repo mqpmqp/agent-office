@@ -133,9 +133,15 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
     def test_baseline_framework_runtime_cli_help_contract(self) -> None:
         help_cases = [
             (["--help"], "framework-runtime"),
-            (["framework-runtime", "--help"], "resume"),
+            (["framework-runtime", "--help"], "job"),
             (["framework-runtime", "resume", "--help"], "--workspace-id"),
             (["framework-runtime", "evidence", "--help"], "--format"),
+            (["framework-runtime", "job", "--help"], "cancel"),
+            (["framework-runtime", "job", "create", "--help"], "--objective"),
+            (["framework-runtime", "job", "list", "--help"], "--run-id"),
+            (["framework-runtime", "job", "show", "--help"], "--job-id"),
+            (["framework-runtime", "job", "cancel", "--help"], "--reason"),
+            (["framework-runtime", "job", "fail", "--help"], "--reason"),
         ]
         for argv, expected in help_cases:
             stdout = io.StringIO()
@@ -277,6 +283,131 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
             self.assertEqual(exit_code, 2)
             self.assertEqual(stdout, "")
             self.assertIn("Invalid UTF-8", stderr)
+            self.assertNotIn("Traceback", stderr)
+
+
+    def test_job_lifecycle_create_list_show_json_and_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_workspace(base, "ws-demo")
+            create_run(base, "ws-demo", "run-demo")
+
+            create_args = [
+                "framework-runtime",
+                "job",
+                "create",
+                "--workspace-id",
+                "ws-demo",
+                "--run-id",
+                "run-demo",
+                "--job-id",
+                "job-a",
+                "--objective",
+                "Build local job lifecycle",
+                "--metadata",
+                "owner=codex",
+                "--metadata",
+                "priority=wp2",
+                "--evidence-ref",
+                ".ai/workspaces/ws-demo/runs/run-demo/evidence/framework_runtime_evidence.json",
+                "--root",
+                tmp,
+                "--json",
+            ]
+            exit_code, stdout, stderr = run_cli(create_args)
+            self.assertEqual(exit_code, 0, stderr)
+            job = json.loads(stdout)
+            self.assertEqual(job["kind"], "agentoffice.framework_runtime_job")
+            self.assertEqual(job["status"], "pending")
+            self.assertEqual(job["created_at"], "transition-0001")
+            self.assertEqual(job["updated_at"], "transition-0001")
+            self.assertEqual(job["metadata"], {"owner": "codex", "priority": "wp2"})
+            self.assertEqual(job["evidence_refs"], [".ai/workspaces/ws-demo/runs/run-demo/evidence/framework_runtime_evidence.json"])
+            self.assertFalse(job["provider_calls"])
+            self.assertFalse(job["network_calls"])
+            self.assertFalse(job["external_worker_calls"])
+            self.assertEqual(job["transition_log"][0]["action"], "create")
+            self.assertTrue((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "jobs" / "job-a.json").is_file())
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "list", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            listing = json.loads(stdout)
+            self.assertEqual(listing["kind"], "agentoffice.framework_runtime_job_list")
+            self.assertEqual(listing["job_count"], 1)
+            self.assertEqual(listing["jobs"][0]["job_id"], "job-a")
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "show", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--job-id", "job-a", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            shown = json.loads(stdout)
+            self.assertEqual(shown["evidence_refs"], job["evidence_refs"])
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "show", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--job-id", "job-a", "--root", tmp
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            self.assertIn("job ws-demo/run-demo/job-a status=pending", stdout)
+            self.assertIn("local_static=true", stdout)
+
+    def test_job_lifecycle_cancel_fail_and_error_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_workspace(base, "ws-demo")
+            create_run(base, "ws-demo", "run-demo")
+
+            for job_id in ("cancel-me", "fail-me"):
+                exit_code, stdout, stderr = run_cli([
+                    "framework-runtime", "job", "create", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--job-id", job_id,
+                    "--objective", f"Objective for {job_id}", "--root", tmp, "--json"
+                ])
+                self.assertEqual(exit_code, 0, stderr)
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "cancel", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--job-id", "cancel-me",
+                "--reason", "operator stopped", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            cancelled = json.loads(stdout)
+            self.assertEqual(cancelled["status"], "cancelled")
+            self.assertEqual(cancelled["updated_at"], "transition-0002")
+            self.assertEqual(cancelled["transition_log"][-1]["reason"], "operator stopped")
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "fail", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--job-id", "fail-me",
+                "--reason", "local failure", "--root", tmp
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            self.assertIn("status=failed", stdout)
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "cancel", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--job-id", "cancel-me",
+                "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stderr, "")
+            error = json.loads(stdout)
+            self.assertEqual(error["kind"], "agentoffice.framework_runtime_job_error")
+            self.assertEqual(error["action"], "cancel")
+            self.assertIn("terminal", error["error"])
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "show", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--job-id", "missing",
+                "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stderr, "")
+            self.assertIn("Job not found", json.loads(stdout)["error"])
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "show", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--job-id", "missing",
+                "--root", tmp
+            ])
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("Job not found", stderr)
             self.assertNotIn("Traceback", stderr)
 
     def test_baseline_existing_slice_commands_and_legacy_packet_still_work(self) -> None:

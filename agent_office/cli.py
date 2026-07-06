@@ -141,18 +141,23 @@ from .packet_result import (
 )
 from .framework_runtime import (
     FrameworkRuntimeError,
+    create_job_payload as framework_runtime_create_job_payload,
     dispatch_payload,
     evidence_payload as framework_runtime_evidence_payload,
     format_framework_runtime_payload,
     inspect_payload as framework_runtime_inspect_payload,
+    job_error_payload as framework_runtime_job_error_payload,
     judge_payload as framework_runtime_judge_payload,
+    list_jobs_payload as framework_runtime_list_jobs_payload,
     list_runs_payload as framework_runtime_list_runs_payload,
+    read_job_payload as framework_runtime_read_job_payload,
     replay_payload as framework_runtime_replay_payload,
     resume_payload as framework_runtime_resume_payload,
     review_payload as framework_runtime_review_payload,
     review_id_for_task,
     result_id_for_task,
     run_status_payload as framework_runtime_status_payload,
+    transition_job_payload as framework_runtime_transition_job_payload,
     worker_contract_payload,
 )
 from .profiles import (
@@ -1282,9 +1287,22 @@ def cmd_actor_result(args: argparse.Namespace) -> int:
     return 0
 
 
+def parse_key_value_metadata(items: list[str] | None) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise FrameworkRuntimeError("Job metadata must use KEY=VALUE entries.")
+        key, value = item.split("=", 1)
+        if not key:
+            raise FrameworkRuntimeError("Job metadata key must not be empty.")
+        metadata[key] = value
+    return metadata
+
+
 def cmd_framework_runtime(args: argparse.Namespace) -> int:
+    action = args.framework_runtime_action
+    job_action = getattr(args, "framework_runtime_job_action", None)
     try:
-        action = args.framework_runtime_action
         if action == "workers":
             payload = worker_contract_payload()
         elif action == "dispatch":
@@ -1307,9 +1325,31 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
             payload = framework_runtime_replay_payload(Path(args.root), args.workspace_id, args.run_id)
         elif action == "evidence":
             payload = framework_runtime_evidence_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.format)
+        elif action == "job":
+            if job_action == "create":
+                payload = framework_runtime_create_job_payload(
+                    Path(args.root),
+                    args.workspace_id,
+                    args.run_id,
+                    args.job_id,
+                    args.objective,
+                    parse_key_value_metadata(args.metadata),
+                    args.evidence_ref,
+                )
+            elif job_action == "list":
+                payload = framework_runtime_list_jobs_payload(Path(args.root), args.workspace_id, args.run_id)
+            elif job_action == "show":
+                payload = framework_runtime_read_job_payload(Path(args.root), args.workspace_id, args.run_id, args.job_id)
+            elif job_action in {"cancel", "fail"}:
+                payload = framework_runtime_transition_job_payload(Path(args.root), args.workspace_id, args.run_id, args.job_id, job_action, args.reason)
+            else:
+                raise AgentOfficeError("framework-runtime job requires a supported action.")
         else:
             raise AgentOfficeError("framework-runtime requires a supported action.")
     except FrameworkRuntimeError as exc:
+        if action == "job" and getattr(args, "json", False):
+            print(json.dumps(framework_runtime_job_error_payload(str(exc), job_action), indent=2, ensure_ascii=False))
+            return 2
         raise AgentOfficeError(str(exc)) from exc
 
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_framework_runtime_payload(payload))
@@ -2327,6 +2367,35 @@ def build_parser() -> argparse.ArgumentParser:
     add_framework_runtime_run_args(framework_runtime_evidence)
     framework_runtime_evidence.add_argument("--format", choices=["json", "text"], default="json", help="Evidence artifact format. Default: json.")
     framework_runtime_evidence.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_job = framework_runtime_sub.add_parser("job", help="Manage local static framework runtime jobs.")
+    framework_runtime_job_sub = framework_runtime_job.add_subparsers(dest="framework_runtime_job_action", required=True)
+
+    def add_framework_runtime_job_run_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+        parser.add_argument("--run-id", required=True, help="Stable run id.")
+        parser.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    framework_runtime_job_create = framework_runtime_job_sub.add_parser("create", help="Create a local static framework runtime job.")
+    add_framework_runtime_job_run_args(framework_runtime_job_create)
+    framework_runtime_job_create.add_argument("--job-id", required=True, help="Stable job id.")
+    framework_runtime_job_create.add_argument("--objective", required=True, help="Local static job objective.")
+    framework_runtime_job_create.add_argument("--metadata", action="append", help="Optional KEY=VALUE metadata entry. Repeatable.")
+    framework_runtime_job_create.add_argument("--evidence-ref", action="append", help="Optional local evidence reference. Repeatable.")
+    framework_runtime_job_create.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_job_list = framework_runtime_job_sub.add_parser("list", help="List local static framework runtime jobs for a run.")
+    add_framework_runtime_job_run_args(framework_runtime_job_list)
+    framework_runtime_job_list.set_defaults(func=cmd_framework_runtime)
+
+    for job_action in ("show", "cancel", "fail"):
+        job_parser = framework_runtime_job_sub.add_parser(job_action, help=f"{job_action.capitalize()} a local static framework runtime job.")
+        add_framework_runtime_job_run_args(job_parser)
+        job_parser.add_argument("--job-id", required=True, help="Stable job id.")
+        if job_action in {"cancel", "fail"}:
+            job_parser.add_argument("--reason", default=f"job {job_action}ed", help="Deterministic transition reason.")
+        job_parser.set_defaults(func=cmd_framework_runtime)
 
     p = sub.add_parser("orchestrate", help="Create and inspect static auditable multi-agent orchestration artifacts.")
     orch_sub = p.add_subparsers(dest="orchestrate_action", required=True)

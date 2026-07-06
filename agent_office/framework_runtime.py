@@ -29,6 +29,8 @@ from .workspace_store import (
 
 
 TERMINAL_TASK_STATUSES = {"accepted", "rejected", "skipped"}
+JOB_STATUSES = {"pending", "running", "succeeded", "failed", "cancelled"}
+TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
 LOCAL_WORKER_NAME = "local_echo_worker"
 REVIEW_STUB_NAME = "local_review_stub"
 JUDGE_STUB_NAME = "local_judge_stub"
@@ -62,6 +64,7 @@ def runtime_contract_status() -> dict[str, Any]:
             "resume",
             "replay",
             "evidence_export",
+            "job_lifecycle",
         ],
     }
 
@@ -267,6 +270,126 @@ def list_json_objects(path: Path) -> list[dict[str, Any]]:
     for child in sorted(path.glob("*.json")):
         items.append(read_runtime_json_child(path, child))
     return items
+
+
+def jobs_dir(root: Path, workspace_id: str, run_id: str) -> Path:
+    return ensure_runtime_run(root, workspace_id, run_id) / "jobs"
+
+
+def job_path(root: Path, workspace_id: str, run_id: str, job_id: str) -> Path:
+    job_id = validate_runtime_id(job_id, "job_id")
+    return jobs_dir(root, workspace_id, run_id) / f"{job_id}.json"
+
+
+def job_transition_stamp(sequence: int) -> str:
+    return f"transition-{sequence:04d}"
+
+
+def job_transition_entry(sequence: int, action: str, from_status: str | None, to_status: str, reason: str) -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "stamp": job_transition_stamp(sequence),
+        "action": action,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+    }
+
+
+def normalize_job_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
+    return dict(sorted((metadata or {}).items()))
+
+
+def normalize_evidence_refs(evidence_refs: list[str] | None) -> list[str]:
+    return sorted(dict.fromkeys(evidence_refs or []))
+
+
+def create_job_payload(root: Path, workspace_id: str, run_id: str, job_id: str, objective: str, metadata: dict[str, str] | None = None, evidence_refs: list[str] | None = None) -> dict[str, Any]:
+    root = safe_root(root)
+    job_id = validate_runtime_id(job_id, "job_id")
+    if not objective.strip():
+        raise FrameworkRuntimeError("Job objective must not be empty.")
+    target = job_path(root, workspace_id, run_id, job_id)
+    if target.exists():
+        raise FrameworkRuntimeError(f"Job already exists: {job_id}")
+    transition = job_transition_entry(1, "create", None, "pending", "job created")
+    payload = {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_job",
+        "workspace_id": validate_runtime_id(workspace_id, "workspace_id"),
+        "run_id": validate_runtime_id(run_id, "run_id"),
+        "job_id": job_id,
+        "status": "pending",
+        "created_at": transition["stamp"],
+        "updated_at": transition["stamp"],
+        "objective": objective,
+        "metadata": normalize_job_metadata(metadata),
+        "evidence_refs": normalize_evidence_refs(evidence_refs),
+        "transition_log": [transition],
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "external_worker_calls": False,
+    }
+    write_json_atomic(target, payload)
+    return payload
+
+
+def read_job_payload(root: Path, workspace_id: str, run_id: str, job_id: str) -> dict[str, Any]:
+    target = job_path(root, workspace_id, run_id, job_id)
+    if not target.exists():
+        raise FrameworkRuntimeError(f"Job not found: {job_id}")
+    try:
+        return read_json(target)
+    except WorkspaceStoreError as exc:
+        raise FrameworkRuntimeError(str(exc)) from exc
+
+
+def list_jobs_payload(root: Path, workspace_id: str, run_id: str) -> dict[str, Any]:
+    rows = list_json_objects(jobs_dir(root, workspace_id, run_id))
+    rows.sort(key=lambda item: str(item.get("job_id", "")))
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_job_list",
+        "workspace_id": validate_runtime_id(workspace_id, "workspace_id"),
+        "run_id": validate_runtime_id(run_id, "run_id"),
+        "jobs": rows,
+        "job_count": len(rows),
+        "local_static": True,
+        "provider_calls": False,
+    }
+
+
+def transition_job_payload(root: Path, workspace_id: str, run_id: str, job_id: str, action: str, reason: str) -> dict[str, Any]:
+    if action not in {"cancel", "fail"}:
+        raise FrameworkRuntimeError(f"Unsupported job transition: {action}")
+    payload = read_job_payload(root, workspace_id, run_id, job_id)
+    old_status = str(payload.get("status", ""))
+    if old_status in TERMINAL_JOB_STATUSES:
+        raise FrameworkRuntimeError(f"Job {job_id} is terminal and cannot be {action}ed: {old_status}")
+    if old_status not in {"pending", "running"}:
+        raise FrameworkRuntimeError(f"Job {job_id} cannot be {action}ed from status: {old_status}")
+    new_status = "cancelled" if action == "cancel" else "failed"
+    log = list(payload.get("transition_log", []))
+    sequence = len(log) + 1
+    transition = job_transition_entry(sequence, action, old_status, new_status, reason or f"job {action}ed")
+    log.append(transition)
+    payload["status"] = new_status
+    payload["updated_at"] = transition["stamp"]
+    payload["transition_log"] = log
+    write_json_atomic(job_path(root, workspace_id, run_id, job_id), payload)
+    return payload
+
+
+def job_error_payload(message: str, action: str | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_job_error",
+        "action": action,
+        "error": message,
+        "local_static": True,
+        "provider_calls": False,
+    }
 
 
 def dispatch_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, task_id: str | None = None) -> dict[str, Any]:
@@ -679,4 +802,15 @@ def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
         return f"replay {payload['workspace_id']}/{payload['run_id']} events={payload['event_count']} read_only=true"
     if kind == "agentoffice.framework_runtime_evidence_export":
         return f"evidence {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} format={payload['format']} path={payload['artifact_path']} local_stub=true"
+    if kind == "agentoffice.framework_runtime_job":
+        return f"job {payload['workspace_id']}/{payload['run_id']}/{payload['job_id']} status={payload['status']} evidence_refs={len(payload['evidence_refs'])} local_static=true"
+    if kind == "agentoffice.framework_runtime_job_list":
+        if not payload["jobs"]:
+            return f"jobs {payload['workspace_id']}/{payload['run_id']}: none"
+        return "\n".join(
+            f"job {job['workspace_id']}/{job['run_id']}/{job['job_id']} status={job['status']} evidence_refs={len(job['evidence_refs'])}"
+            for job in payload["jobs"]
+        )
+    if kind == "agentoffice.framework_runtime_job_error":
+        return f"job error action={payload.get('action') or 'unknown'} error={payload['error']}"
     return json.dumps(payload, indent=2, ensure_ascii=False)
