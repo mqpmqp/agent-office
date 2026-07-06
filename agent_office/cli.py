@@ -14,6 +14,7 @@ from .adapters.base import AdapterError, AdapterInvocation, AdapterResult, mask_
 from .adapters.mock import MockAdapter
 from .adapters.modes import adapter_for_role, load_adapter_mode_config, validate_adapter_mode
 from .adapters.registry import get_adapter
+from .framework_status import render_framework_status_json, render_framework_status_text
 from .doctor import (
     bool_text,
     collect_doctor,
@@ -730,6 +731,14 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_adapters(args: argparse.Namespace) -> int:
     print(format_adapters(PROJECT_ROOT))
+    return 0
+
+
+def cmd_framework_status(args: argparse.Namespace) -> int:
+    if args.json:
+        print(render_framework_status_json())
+    else:
+        print(render_framework_status_text())
     return 0
 
 
@@ -2029,6 +2038,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("adapters", help="List supported adapters without executing them.")
     p.set_defaults(func=cmd_adapters)
+
+    p = sub.add_parser("framework-status", help="Print the FUGU-like framework reset contract without provider calls or env reads.")
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p.set_defaults(func=cmd_framework_status)
 
     p = sub.add_parser("profiles", help="List provider profiles without executing providers.")
     p.add_argument("--name", help="Show one provider profile by name.")
