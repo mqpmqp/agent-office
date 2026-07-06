@@ -202,6 +202,66 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertIn("Invalid root", stderr)
             self.assertNotIn("Traceback", stderr)
 
+    def test_runtime_status_and_evidence_reject_symlinked_json_children(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            init_graph_run(tmp)
+            outside = Path(outside_tmp) / "outside.json"
+            outside.write_text('{"kind":"outside_secret","value":"dummy"}\n', encoding="utf-8")
+            packets = Path(tmp) / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "packets"
+            symlink_path = packets / "leak.json"
+            try:
+                os.symlink(outside, symlink_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink not available: {exc}")
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("Refusing to read symlink JSON file", stderr)
+            self.assertNotIn("outside_secret", stdout + stderr)
+            self.assertNotIn("Traceback", stderr)
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "evidence", "--format", "json", "--json"))
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("Refusing to read symlink JSON file", stderr)
+            self.assertNotIn("outside_secret", stdout + stderr)
+            self.assertNotIn("Traceback", stderr)
+
+    def test_non_utf8_json_state_errors_are_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            init_graph_run(tmp)
+            graph_path = Path(tmp) / ".ai" / "workspaces" / "ws-demo" / "goals" / "goal-demo" / "task_graph.json"
+            graph_path.write_bytes(b"\xff")
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("Invalid UTF-8", stderr)
+            self.assertNotIn("Traceback", stderr)
+
+    def test_non_utf8_event_log_errors_are_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            init_graph_run(tmp)
+            event_path = Path(tmp) / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "events.jsonl"
+            event_path.write_bytes(b"\xff")
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime",
+                "replay",
+                "--workspace-id",
+                "ws-demo",
+                "--run-id",
+                "run-demo",
+                "--root",
+                tmp,
+                "--json",
+            ])
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("Invalid UTF-8", stderr)
+            self.assertNotIn("Traceback", stderr)
+
     def test_existing_slice_commands_and_legacy_packet_still_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             exit_code, stdout, stderr = run_cli(["workspace", "init", "--workspace-id", "ws-demo", "--root", tmp, "--json"])

@@ -62,6 +62,8 @@ def read_json(path: Path) -> dict[str, Any]:
             payload = json.load(handle)
     except FileNotFoundError as exc:
         raise WorkspaceStoreError(f"Missing file: {path}") from exc
+    except UnicodeDecodeError as exc:
+        raise WorkspaceStoreError(f"Invalid UTF-8 in {path}: {exc.reason}") from exc
     except json.JSONDecodeError as exc:
         raise WorkspaceStoreError(f"Invalid JSON in {path}: {exc.msg}") from exc
     if not isinstance(payload, dict):

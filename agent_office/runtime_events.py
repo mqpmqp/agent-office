@@ -39,18 +39,21 @@ def read_events(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     events: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise RuntimeEventLogError(f"Invalid event JSON at line {line_number}: {exc.msg}") from exc
-            if not isinstance(payload, dict):
-                raise RuntimeEventLogError(f"Expected event object at line {line_number}")
-            events.append(payload)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeEventLogError(f"Invalid event JSON at line {line_number}: {exc.msg}") from exc
+                if not isinstance(payload, dict):
+                    raise RuntimeEventLogError(f"Expected event object at line {line_number}")
+                events.append(payload)
+    except UnicodeDecodeError as exc:
+        raise RuntimeEventLogError(f"Invalid UTF-8 in {path}: {exc.reason}") from exc
     return events
 
 

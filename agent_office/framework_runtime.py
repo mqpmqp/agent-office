@@ -238,15 +238,34 @@ def read_judge(root: Path, workspace_id: str, run_id: str, judge_id: str) -> dic
         raise FrameworkRuntimeError(str(exc)) from exc
 
 
+def read_runtime_json_child(parent: Path, child: Path) -> dict[str, Any]:
+    if child.is_symlink():
+        raise FrameworkRuntimeError(f"Refusing to read symlink JSON file: {child}")
+    if not child.is_file():
+        raise FrameworkRuntimeError(f"Refusing to read non-file JSON path: {child}")
+    try:
+        parent_resolved = parent.resolve()
+        child_resolved = child.resolve()
+    except OSError as exc:
+        raise FrameworkRuntimeError(f"Invalid JSON path: {child}: {exc}") from exc
+    if child_resolved.parent != parent_resolved:
+        raise FrameworkRuntimeError(f"Refusing to read JSON file outside runtime directory: {child}")
+    try:
+        return read_json(child)
+    except WorkspaceStoreError as exc:
+        raise FrameworkRuntimeError(str(exc)) from exc
+
+
 def list_json_objects(path: Path) -> list[dict[str, Any]]:
+    if path.is_symlink():
+        raise FrameworkRuntimeError(f"Refusing to read symlink JSON directory: {path}")
     if not path.exists():
         return []
+    if not path.is_dir():
+        raise FrameworkRuntimeError(f"Refusing to read non-directory JSON path: {path}")
     items: list[dict[str, Any]] = []
     for child in sorted(path.glob("*.json")):
-        try:
-            items.append(read_json(child))
-        except WorkspaceStoreError as exc:
-            raise FrameworkRuntimeError(str(exc)) from exc
+        items.append(read_runtime_json_child(path, child))
     return items
 
 
