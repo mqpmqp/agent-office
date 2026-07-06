@@ -64,8 +64,8 @@ def runtime_args(root: str, action: str, *extra: str) -> list[str]:
     ]
 
 
-class FrameworkRuntimeTrunkTest(unittest.TestCase):
-    def test_dispatch_review_judge_happy_path_json(self) -> None:
+class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
+    def test_baseline_dispatch_review_judge_happy_path_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             init_graph_run(tmp)
 
@@ -99,7 +99,7 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertEqual(status["tasks"][1]["status"], "created")
             self.assertGreaterEqual(len(status["events"]), 6)
 
-    def test_resume_completes_incomplete_run_and_replay_evidence(self) -> None:
+    def test_baseline_resume_replay_and_evidence_smoke_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             init_graph_run(tmp)
 
@@ -130,7 +130,24 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("evidence ws-demo/run-demo/goal-demo format=text", stdout)
 
-    def test_repeated_review_does_not_regress_terminal_task(self) -> None:
+    def test_baseline_framework_runtime_cli_help_contract(self) -> None:
+        help_cases = [
+            (["--help"], "framework-runtime"),
+            (["framework-runtime", "--help"], "resume"),
+            (["framework-runtime", "resume", "--help"], "--workspace-id"),
+            (["framework-runtime", "evidence", "--help"], "--format"),
+        ]
+        for argv, expected in help_cases:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main(argv)
+            self.assertEqual(cm.exception.code, 0)
+            self.assertIn(expected, stdout.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_baseline_repeated_review_does_not_regress_terminal_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             init_graph_run(tmp)
             run_cli(runtime_args(tmp, "dispatch", "--task-id", "task-a", "--json"))
@@ -147,7 +164,7 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(json.loads(stdout)["tasks"][0]["status"], "accepted")
 
-    def test_list_inspect_workers_and_text_output(self) -> None:
+    def test_baseline_list_inspect_workers_and_text_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             init_graph_run(tmp)
             run_cli(runtime_args(tmp, "resume", "--json"))
@@ -165,7 +182,7 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("inspect task=task-a status=accepted", stdout)
 
-    def test_structured_errors_and_traversal_rejection(self) -> None:
+    def test_baseline_structured_errors_and_traversal_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             exit_code, stdout, stderr = run_cli(runtime_args(tmp, "dispatch", "--json"))
             self.assertEqual(exit_code, 2)
@@ -202,7 +219,7 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertIn("Invalid root", stderr)
             self.assertNotIn("Traceback", stderr)
 
-    def test_runtime_status_and_evidence_reject_symlinked_json_children(self) -> None:
+    def test_baseline_status_and_evidence_reject_symlinked_json_children(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
             init_graph_run(tmp)
             outside = Path(outside_tmp) / "outside.json"
@@ -228,7 +245,7 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertNotIn("outside_secret", stdout + stderr)
             self.assertNotIn("Traceback", stderr)
 
-    def test_non_utf8_json_state_errors_are_structured(self) -> None:
+    def test_baseline_non_utf8_json_state_errors_are_structured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             init_graph_run(tmp)
             graph_path = Path(tmp) / ".ai" / "workspaces" / "ws-demo" / "goals" / "goal-demo" / "task_graph.json"
@@ -240,7 +257,7 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertIn("Invalid UTF-8", stderr)
             self.assertNotIn("Traceback", stderr)
 
-    def test_non_utf8_event_log_errors_are_structured(self) -> None:
+    def test_baseline_non_utf8_event_log_errors_are_structured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             init_graph_run(tmp)
             event_path = Path(tmp) / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "events.jsonl"
@@ -262,7 +279,7 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertIn("Invalid UTF-8", stderr)
             self.assertNotIn("Traceback", stderr)
 
-    def test_existing_slice_commands_and_legacy_packet_still_work(self) -> None:
+    def test_baseline_existing_slice_commands_and_legacy_packet_still_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             exit_code, stdout, stderr = run_cli(["workspace", "init", "--workspace-id", "ws-demo", "--root", tmp, "--json"])
             self.assertEqual(exit_code, 0)
@@ -289,7 +306,7 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("execution_enabled", json.loads(stdout))
 
-    def test_framework_runtime_command_does_not_read_environment(self) -> None:
+    def test_baseline_framework_runtime_command_does_not_read_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             init_graph_run(tmp)
             args = argparse.Namespace(

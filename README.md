@@ -38,9 +38,35 @@ python3 -m agent_office orchestrate inspect --path /tmp/ao-orch --json
 python3 -m agent_office orchestrate validate --path /tmp/ao-orch --json
 ```
 
-## Framework Runtime Trunk
+## Framework Runtime Trunk Baseline
 
-The framework runtime trunk connects the workspace store, run metadata, task graph, packets, actor results, runtime events, review stub, judge stub, replay, resume, and evidence export into one local dogfood loop. It is deterministic and local-only: no `.env` reads, no environment printing, no provider/model calls, no network requests, and no external adapters.
+Current mainline baseline: the framework runtime trunk is available as a deterministic, local-only dogfood loop. It connects the workspace store, run metadata, task graph, packets, actor results, runtime events, local worker stub, review stub, judge stub, status, inspect, list, resume, replay, and evidence export.
+
+Available CLI surfaces:
+
+- `workspace`: initialize deterministic workspaces and runs.
+- `task-graph`: create and inspect deterministic framework task graphs.
+- `packet`: emit framework task packets without provider execution.
+- `actor-result`: intake and list saved actor results without provider execution.
+- `framework-runtime`: run the trunk loop with `workers`, `dispatch`, `review`, `judge`, `status`, `resume`, `inspect`, `list`, `replay`, and `evidence`.
+- `runtime`: broader local runtime-foundation commands. These remain separate from the framework-runtime trunk baseline.
+
+Safety boundary: Framework Runtime trunk commands are local/static only unless a future work package explicitly authorizes a broader mode. The current baseline must not read `.env`, print environment variables, call providers or models, make network requests, connect to real Codex/Claude/provider workers, or execute external adapters.
+
+Minimal baseline smoke path:
+
+```bash
+ROOT=/tmp/agentoffice-runtime-trunk-smoke
+python3 -m agent_office workspace init --workspace-id ws-demo --root "$ROOT" --json
+python3 -m agent_office workspace run-create --workspace-id ws-demo --run-id run-demo --root "$ROOT" --json
+python3 -m agent_office task-graph create --workspace-id ws-demo --goal-id goal-demo --root "$ROOT" --json
+python3 -m agent_office framework-runtime resume --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root "$ROOT" --json
+python3 -m agent_office framework-runtime status --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root "$ROOT"
+python3 -m agent_office framework-runtime replay --workspace-id ws-demo --run-id run-demo --root "$ROOT" --json
+python3 -m agent_office framework-runtime evidence --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root "$ROOT" --format json --json
+```
+
+Expanded step-by-step path:
 
 ```bash
 python3 -m agent_office workspace init --workspace-id ws-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
@@ -57,6 +83,14 @@ python3 -m agent_office framework-runtime workers --json
 ```
 
 `framework-runtime evidence` writes the evidence artifact under the run evidence directory and includes run, task, packet, actor-result, event, review, judge, worker-contract, replay, and local-only safety evidence.
+
+Baseline report index:
+
+- `AGENTOFFICE_FRAMEWORK_RUNTIME_TRUNK_BATCH_REPORT.md`: original trunk batch implementation report.
+- `FRAMEWORK_RUNTIME_TRUNK_BATCH_REVIEW_FIX_REPORT.md`: review-fix hardening report for symlink and UTF-8 read failures.
+- `FRAMEWORK_RUNTIME_WP1_BASELINE_CONSOLIDATION_REPORT.md`: current WP1 baseline consolidation report.
+
+Next work package path: WP2 Job Lifecycle Core. WP2 should start from this baseline and add job lifecycle behavior only through an explicit plan, preserving the local/static safety boundary until broader execution is explicitly authorized.
 
 ## Runtime Foundation Slice
 
