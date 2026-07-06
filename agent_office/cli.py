@@ -22,6 +22,12 @@ from .workspace_store import (
     init_workspace,
     inspect_workspace,
 )
+from .runtime_events import (
+    RuntimeEventLogError,
+    append_event,
+    format_runtime_event_payload,
+    list_events_payload,
+)
 from .doctor import (
     bool_text,
     collect_doctor,
@@ -764,6 +770,22 @@ def cmd_workspace(args: argparse.Namespace) -> int:
         raise AgentOfficeError(str(exc)) from exc
 
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_workspace_payload(payload))
+    return 0
+
+
+def cmd_runtime_event(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    try:
+        if args.runtime_event_action == "append":
+            payload = append_event(root, args.workspace_id, args.run_id, args.event_type, args.actor)
+        elif args.runtime_event_action == "list":
+            payload = list_events_payload(root, args.workspace_id, args.run_id)
+        else:
+            raise AgentOfficeError("runtime-event requires append or list.")
+    except RuntimeEventLogError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runtime_event_payload(payload))
     return 0
 
 
@@ -2833,6 +2855,23 @@ def build_parser() -> argparse.ArgumentParser:
         _add_repeatable_root_arg(lifecycle_parser)
         lifecycle_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         lifecycle_parser.set_defaults(func=cmd_review_artifact)
+
+    p = sub.add_parser("runtime-event", help="Append and list deterministic runtime events inside a workspace run.")
+    runtime_event_sub = p.add_subparsers(dest="runtime_event_action", required=True)
+    runtime_event_append = runtime_event_sub.add_parser("append", help="Append one runtime event to an existing workspace run.")
+    runtime_event_append.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    runtime_event_append.add_argument("--run-id", required=True, help="Stable run id.")
+    runtime_event_append.add_argument("--event-type", required=True, help="Stable event type, for example run.created.")
+    runtime_event_append.add_argument("--actor", required=True, help="Stable actor name, for example runtime.")
+    runtime_event_append.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    runtime_event_append.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_event_append.set_defaults(func=cmd_runtime_event)
+    runtime_event_list = runtime_event_sub.add_parser("list", help="List runtime events for an existing workspace run.")
+    runtime_event_list.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    runtime_event_list.add_argument("--run-id", required=True, help="Stable run id.")
+    runtime_event_list.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    runtime_event_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    runtime_event_list.set_defaults(func=cmd_runtime_event)
 
     p = sub.add_parser("workspace", help="Manage deterministic framework workspaces and runs without provider calls.")
     workspace_sub = p.add_subparsers(dest="workspace_action", required=True)
