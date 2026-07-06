@@ -130,6 +130,15 @@ from .packets import (
     execution_packet_payload,
     packet_contract_validation_payload,
 )
+from .packet_result import (
+    PacketResultError,
+    emit_packet,
+    format_actor_result_payload,
+    format_packet_result_payload,
+    intake_actor_result,
+    list_actor_results_payload,
+    list_packets_payload,
+)
 from .profiles import (
     ALLOWED_ROLES,
     ProfileError,
@@ -1207,6 +1216,25 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_packet(args: argparse.Namespace) -> int:
+    action = getattr(args, "packet_action", None)
+    if action:
+        root = Path(args.root)
+        try:
+            if action == "emit":
+                payload = emit_packet(root, args.workspace_id, args.run_id, args.goal_id, args.task_id)
+            elif action == "list":
+                payload = list_packets_payload(root, args.workspace_id, args.run_id)
+            else:
+                raise AgentOfficeError("packet requires emit, list, or legacy packet options.")
+        except PacketResultError as exc:
+            raise AgentOfficeError(str(exc)) from exc
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_packet_result_payload(payload))
+        return 0
+
+    for field in ("objective", "profile", "actor"):
+        if getattr(args, field, None) is None:
+            raise AgentOfficeError(f"packet legacy mode requires --{field.replace('_', '-')}. Use `packet emit` for framework packets.")
+
     validate = bool(getattr(args, "validate", False))
     try:
         if validate:
@@ -1219,6 +1247,22 @@ def cmd_packet(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_packet_contract_validation(payload))
         return 0 if payload["valid"] else 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_execution_packet(payload))
+    return 0
+
+
+def cmd_actor_result(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    try:
+        if args.actor_result_action == "intake":
+            payload = intake_actor_result(root, args.workspace_id, args.run_id, args.packet_id, args.actor, args.status, args.summary)
+        elif args.actor_result_action == "list":
+            payload = list_actor_results_payload(root, args.workspace_id, args.run_id)
+        else:
+            raise AgentOfficeError("actor-result requires intake or list.")
+    except PacketResultError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_actor_result_payload(payload))
     return 0
 
 
@@ -2134,13 +2178,47 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_plan)
 
 
-    p = sub.add_parser("packet", help="Build a static execution packet for an actor without executing providers.")
-    p.add_argument("--objective", required=True, help="Objective id to package, for example P6-10.")
-    p.add_argument("--profile", required=True, help="Provider profile name to use for the static packet.")
-    p.add_argument("--actor", required=True, help="Packet actor: codex, reviewer, or judge.")
+    p = sub.add_parser("packet", help="Build legacy static packets or framework task packets without executing providers.")
+    p.add_argument("--objective", help="Legacy packet objective id, for example P6-10.")
+    p.add_argument("--profile", help="Legacy provider profile name to use for the static packet.")
+    p.add_argument("--actor", help="Legacy packet actor: codex, reviewer, or judge.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p.add_argument("--validate", action="store_true", help="Validate the static packet contract without executing it.")
+    p.add_argument("--validate", action="store_true", help="Validate the legacy static packet contract without executing it.")
+    packet_sub = p.add_subparsers(dest="packet_action")
+    packet_emit = packet_sub.add_parser("emit", help="Emit one framework task packet from an existing task graph.")
+    packet_emit.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    packet_emit.add_argument("--run-id", required=True, help="Stable run id.")
+    packet_emit.add_argument("--goal-id", required=True, help="Stable goal id.")
+    packet_emit.add_argument("--task-id", required=True, help="Stable task id from the task graph.")
+    packet_emit.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    packet_emit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    packet_emit.set_defaults(func=cmd_packet)
+    packet_list = packet_sub.add_parser("list", help="List framework task packets stored under a run.")
+    packet_list.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    packet_list.add_argument("--run-id", required=True, help="Stable run id.")
+    packet_list.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    packet_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    packet_list.set_defaults(func=cmd_packet)
     p.set_defaults(func=cmd_packet)
+
+    p = sub.add_parser("actor-result", help="Intake and list framework actor results without provider execution.")
+    actor_result_sub = p.add_subparsers(dest="actor_result_action", required=True)
+    actor_result_intake = actor_result_sub.add_parser("intake", help="Store one actor result for an emitted framework packet.")
+    actor_result_intake.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    actor_result_intake.add_argument("--run-id", required=True, help="Stable run id.")
+    actor_result_intake.add_argument("--packet-id", required=True, help="Stable packet id to attach the result to.")
+    actor_result_intake.add_argument("--actor", required=True, help="Stable actor name, for example manual.")
+    actor_result_intake.add_argument("--status", required=True, help="Stable result status, for example completed.")
+    actor_result_intake.add_argument("--summary", required=True, help="Short result summary.")
+    actor_result_intake.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    actor_result_intake.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    actor_result_intake.set_defaults(func=cmd_actor_result)
+    actor_result_list = actor_result_sub.add_parser("list", help="List actor results stored under a run.")
+    actor_result_list.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    actor_result_list.add_argument("--run-id", required=True, help="Stable run id.")
+    actor_result_list.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    actor_result_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    actor_result_list.set_defaults(func=cmd_actor_result)
 
     p = sub.add_parser("orchestrate", help="Create and inspect static auditable multi-agent orchestration artifacts.")
     orch_sub = p.add_subparsers(dest="orchestrate_action", required=True)
