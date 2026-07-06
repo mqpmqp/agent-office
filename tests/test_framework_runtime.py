@@ -262,6 +262,77 @@ class FrameworkRuntimeTrunkTest(unittest.TestCase):
             self.assertIn("Invalid UTF-8", stderr)
             self.assertNotIn("Traceback", stderr)
 
+
+    def test_framework_runtime_public_cli_smoke_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            setup_commands = [
+                ["workspace", "init", "--workspace-id", "ws-demo", "--root", tmp, "--json"],
+                ["workspace", "run-create", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--root", tmp, "--json"],
+                ["task-graph", "create", "--workspace-id", "ws-demo", "--goal-id", "goal-demo", "--root", tmp, "--json"],
+            ]
+            for command in setup_commands:
+                exit_code, stdout, stderr = run_cli(command)
+                self.assertEqual(exit_code, 0, stderr)
+                self.assertNotIn("Traceback", stdout + stderr)
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "resume", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            resume = json.loads(stdout)
+            self.assertTrue(resume["complete"])
+            self.assertEqual(resume["incomplete_tasks"], [])
+            self.assertNotIn("Traceback", stdout + stderr)
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "status"))
+            self.assertEqual(exit_code, 0, stderr)
+            self.assertIn("complete=true", stdout)
+            self.assertIn("local_stub=true", stdout)
+
+            exit_code, stdout, stderr = run_cli(["framework-runtime", "replay", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--root", tmp, "--json"])
+            self.assertEqual(exit_code, 0, stderr)
+            replay = json.loads(stdout)
+            self.assertEqual(replay["kind"], "agentoffice.framework_runtime_replay")
+            self.assertTrue(replay["read_only"])
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "evidence", "--format", "text", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            evidence = json.loads(stdout)
+            self.assertEqual(evidence["format"], "text")
+            self.assertTrue(Path(evidence["artifact_path"]).is_file())
+
+    def test_framework_runtime_cli_help_smoke_surface(self) -> None:
+        for command, expected in [
+            (["framework-runtime", "--help"], "resume"),
+            (["framework-runtime", "resume", "--help"], "--workspace-id"),
+            (["framework-runtime", "evidence", "--help"], "--format"),
+        ]:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main(command)
+            self.assertEqual(cm.exception.code, 0)
+            self.assertIn(expected, stdout.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_framework_runtime_cli_negative_path_is_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            init_graph_run(tmp)
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime",
+                "replay",
+                "--workspace-id",
+                "ws-demo",
+                "--run-id",
+                "missing-run",
+                "--root",
+                tmp,
+                "--json",
+            ])
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("Run not found", stderr)
+            self.assertNotIn("Traceback", stderr)
+
     def test_existing_slice_commands_and_legacy_packet_still_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             exit_code, stdout, stderr = run_cli(["workspace", "init", "--workspace-id", "ws-demo", "--root", tmp, "--json"])

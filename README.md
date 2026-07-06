@@ -58,6 +58,21 @@ python3 -m agent_office framework-runtime workers --json
 
 `framework-runtime evidence` writes the evidence artifact under the run evidence directory and includes run, task, packet, actor-result, event, review, judge, worker-contract, replay, and local-only safety evidence.
 
+A shorter end-to-end smoke path can use `resume` after the workspace, run, and task graph exist. It dispatches, reviews, and judges all ready tasks with deterministic local stubs, then lets `status`, `replay`, and `evidence` read back the result:
+
+```bash
+ROOT=/tmp/agentoffice-runtime-trunk-smoke
+python3 -m agent_office workspace init --workspace-id ws-demo --root "$ROOT" --json
+python3 -m agent_office workspace run-create --workspace-id ws-demo --run-id run-demo --root "$ROOT" --json
+python3 -m agent_office task-graph create --workspace-id ws-demo --goal-id goal-demo --root "$ROOT" --json
+python3 -m agent_office framework-runtime resume --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root "$ROOT" --json
+python3 -m agent_office framework-runtime status --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root "$ROOT"
+python3 -m agent_office framework-runtime replay --workspace-id ws-demo --run-id run-demo --root "$ROOT" --json
+python3 -m agent_office framework-runtime evidence --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root "$ROOT" --format text --json
+```
+
+The smoke path is intentionally local-only. It should not read `.env`, print environment variables, call models or providers, make network requests, or execute external adapters.
+
 ## Runtime Foundation Slice
 
 The runtime foundation slice is local, deterministic, and static. It writes only a project-local workspace manifest, task graph, JSONL memory/events, and local/static task results. It does not read `.env`, print environment values, call providers, call models, start daemons, run background workers, or execute external adapters.
