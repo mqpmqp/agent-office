@@ -16,7 +16,7 @@ Review-fix merge:
 
 Continuation branch:
 - branch: framework/runtime-trunk-batch-codex-closure
-- head: 533c0e82cfacad9f6ecc8de655e5f9aaea5ca7c9
+- head: final-pushed-head-recorded-in-handoff-output
 
 Changed files:
 - README.md
