@@ -48,7 +48,7 @@ Available CLI surfaces:
 - `task-graph`: create and inspect deterministic framework task graphs.
 - `packet`: emit framework task packets without provider execution.
 - `actor-result`: intake and list saved actor results without provider execution.
-- `framework-runtime`: run the trunk loop with `workers`, `dispatch`, `review`, `judge`, `status`, `resume`, `inspect`, `list`, `replay`, and `evidence`.
+- `framework-runtime`: run the trunk loop with `workers`, `dispatch`, `review`, `judge`, `status`, `resume`, `inspect`, `list`, `replay`, `evidence`, and local/static `job` lifecycle commands.
 - `runtime`: broader local runtime-foundation commands. These remain separate from the framework-runtime trunk baseline.
 
 Safety boundary: Framework Runtime trunk commands are local/static only unless a future work package explicitly authorizes a broader mode. The current baseline must not read `.env`, print environment variables, call providers or models, make network requests, connect to real Codex/Claude/provider workers, or execute external adapters.
@@ -84,13 +84,26 @@ python3 -m agent_office framework-runtime workers --json
 
 `framework-runtime evidence` writes the evidence artifact under the run evidence directory and includes run, task, packet, actor-result, event, review, judge, worker-contract, replay, and local-only safety evidence.
 
+WP2 Job Lifecycle Core adds local/static job state under each run at `.ai/workspaces/<workspace-id>/runs/<run-id>/jobs/<job-id>.json`. Jobs do not start workers, schedule background tasks, connect to providers, or call Codex/Claude. They are deterministic JSON records with `job_id`, `status`, `created_at`, `updated_at`, `objective`, `metadata`, `evidence_refs`, and `transition_log`. Supported statuses are `pending`, `running`, `succeeded`, `failed`, and `cancelled`; this WP exposes create/list/show/cancel/fail only.
+
+```bash
+python3 -m agent_office framework-runtime job create --workspace-id ws-demo --run-id run-demo --job-id job-demo --objective "Review local evidence" --metadata owner=codex --evidence-ref .ai/workspaces/ws-demo/runs/run-demo/evidence/framework_runtime_evidence.json --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime job list --workspace-id ws-demo --run-id run-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime job show --workspace-id ws-demo --run-id run-demo --job-id job-demo --root /tmp/agentoffice-runtime-trunk-smoke
+python3 -m agent_office framework-runtime job cancel --workspace-id ws-demo --run-id run-demo --job-id job-demo --reason "operator stopped" --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime job fail --workspace-id ws-demo --run-id run-demo --job-id job-demo --reason "local failure" --root /tmp/agentoffice-runtime-trunk-smoke --json
+```
+
+Invalid job transitions return stable non-zero CLI behavior. With `--json`, job user errors return an `agentoffice.framework_runtime_job_error` payload instead of a traceback.
+
 Baseline report index:
 
 - `AGENTOFFICE_FRAMEWORK_RUNTIME_TRUNK_BATCH_REPORT.md`: original trunk batch implementation report.
 - `FRAMEWORK_RUNTIME_TRUNK_BATCH_REVIEW_FIX_REPORT.md`: review-fix hardening report for symlink and UTF-8 read failures.
 - `FRAMEWORK_RUNTIME_WP1_BASELINE_CONSOLIDATION_REPORT.md`: current WP1 baseline consolidation report.
+- `FRAMEWORK_RUNTIME_WP2_JOB_LIFECYCLE_CORE_REPORT.md`: WP2 local/static job lifecycle core report.
 
-Next work package path: WP2 Job Lifecycle Core. WP2 should start from this baseline and add job lifecycle behavior only through an explicit plan, preserving the local/static safety boundary until broader execution is explicitly authorized.
+After WP2, future Framework Runtime work packages should start from this local/static job lifecycle baseline and keep the safety boundary unless broader execution is explicitly authorized.
 
 ## Runtime Foundation Slice
 
