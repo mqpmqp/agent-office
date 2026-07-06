@@ -6,6 +6,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agent_office.runtime_kernel import executor as runtime_executor
+from agent_office.runtime_kernel import kernel as runtime_kernel
+from agent_office.runtime_kernel import scheduler as runtime_scheduler
+from agent_office.runtime_kernel.event_log import EventLogError, append_event, ensure_event_log
+
 
 SCHEMA_VERSION = 1
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -2324,6 +2329,7 @@ def runtime_workspace_payload(*, action: str, workspace: str, run_id: str | None
         paths["agent_outputs"].mkdir(parents=True, exist_ok=True)
         paths["reports"].mkdir(parents=True, exist_ok=True)
         _touch_jsonl(paths["memory"])
+        ensure_event_log(paths["event_log"])
         if not paths["goal_queue"].exists():
             _write_json(paths["goal_queue"], _local_empty_goal_queue(required_run_id))
         if not paths["scheduler_ledger"].exists():
@@ -2334,14 +2340,15 @@ def runtime_workspace_payload(*, action: str, workspace: str, run_id: str | None
             _write_json(paths["failure_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_executor_failure_ledger", "failures": []})
         schema = _local_workspace_schema(workspace_root, required_run_id, project_root)
         _write_json(paths["workspace"], schema)
+        if not _local_kernel_events(paths, required_run_id):
+            append_event(paths["event_log"], run_id=required_run_id, event_type="RUN_CREATED", payload={"workspace": schema["workspace"], "objective": "", "artifact_root": schema["run_root"]})
         return _local_base_payload("runtime workspace init", schema=schema, status="initialized")
 
     schema, workspace_root, paths = _load_local_workspace(workspace, project_root)
     if action == "inspect":
-        return _local_base_payload("runtime workspace inspect", schema=schema, status=_local_status_from_goals(paths))
+        return _local_base_payload("runtime workspace inspect", schema=schema, status=_local_status_from_kernel(paths, str(schema["run_id"])))
     if action == "status":
-        queue = _load_local_goal_queue(paths["goal_queue"], required=False)
-        scheduler = _local_scheduler_snapshot(queue)
+        scheduler = _local_kernel_scheduler(paths, str(schema["run_id"]))
         payload = _local_base_payload("runtime workspace status", schema=schema, status=_local_status_from_scheduler(scheduler))
         payload.update(
             {
@@ -2352,7 +2359,7 @@ def runtime_workspace_payload(*, action: str, workspace: str, run_id: str | None
                 "completed_goal_ids": [goal["goal_id"] for goal in scheduler["completed"]],
                 "failed_goal_ids": [goal["goal_id"] for goal in scheduler["failed"]],
                 "skipped_goal_ids": [goal["goal_id"] for goal in scheduler["skipped"]],
-                "memory_count": len(_load_local_memory_records(paths["memory"])),
+                "memory_count": len(_local_memory_projection(paths, str(schema["run_id"]))),
                 "next_action": scheduler["next_action"],
             }
         )
@@ -2407,7 +2414,7 @@ def runtime_memory_payload(
     run_id: str | None = None,
 ) -> dict[str, Any]:
     schema, _, paths = _load_local_workspace(workspace, project_root)
-    records = _load_local_memory_records(paths["memory"])
+    records = _local_memory_projection(paths, str(schema["run_id"]))
     if action == "write":
         required_goal_id = _local_required_id(goal_id, "runtime_memory_goal_id_required", "memory write requires --goal-id.")
         required_role = _local_agent_role(agent_role)
@@ -2428,25 +2435,26 @@ def runtime_memory_payload(
                 "artifact": source_artifact or "",
             },
         }
-        _append_jsonl(paths["memory"], record)
-        payload = _local_base_payload("runtime memory write", schema=schema, status=_local_status_from_goals(paths))
+        append_event(paths["event_log"], run_id=str(schema["run_id"]), event_type="MEMORY_RECORDED", payload=record)
+        _write_memory_projection(paths, str(schema["run_id"]))
+        payload = _local_base_payload("runtime memory write", schema=schema, status=_local_status_from_kernel(paths, str(schema["run_id"])))
         payload.update({"record": record, "record_count": len(records) + 1})
         return payload
     filtered = _filter_local_memory(records, run_id=run_id, goal_id=goal_id, agent_role=agent_role)
     if action == "list":
-        payload = _local_base_payload("runtime memory list", schema=schema, status=_local_status_from_goals(paths))
+        payload = _local_base_payload("runtime memory list", schema=schema, status=_local_status_from_kernel(paths, str(schema["run_id"])))
         payload.update({"records": filtered, "record_count": len(filtered), "filters": {"run_id": run_id, "goal_id": goal_id, "agent_role": agent_role}})
         return payload
     if action == "inspect":
         required_memory_id = _local_required_id(memory_id, "runtime_memory_id_required", "memory inspect requires --memory-id.")
         for record in records:
             if record.get("memory_id") == required_memory_id:
-                payload = _local_base_payload("runtime memory inspect", schema=schema, status=_local_status_from_goals(paths))
+                payload = _local_base_payload("runtime memory inspect", schema=schema, status=_local_status_from_kernel(paths, str(schema["run_id"])))
                 payload.update({"record": record})
                 return payload
         raise RuntimeFoundationError("runtime_memory_missing", f"Memory record not found: {required_memory_id}")
     if action == "summarize":
-        payload = _local_base_payload("runtime memory summarize", schema=schema, status=_local_status_from_goals(paths))
+        payload = _local_base_payload("runtime memory summarize", schema=schema, status=_local_status_from_kernel(paths, str(schema["run_id"])))
         payload.update({"summary": _local_memory_summary(filtered), "record_count": len(filtered), "filters": {"run_id": run_id, "goal_id": goal_id, "agent_role": agent_role}})
         return payload
     raise RuntimeFoundationError("runtime_memory_unknown_action", f"Unsupported runtime memory action: {action}")
@@ -2455,8 +2463,8 @@ def runtime_memory_payload(
 def runtime_planner_payload(*, workspace: str, objective: str | None, explain: bool, project_root: Path) -> dict[str, Any]:
     schema, _, paths = _load_local_workspace(workspace, project_root)
     objective_text = _local_required_text(objective, "runtime_planner_objective_required", "runtime planner requires --objective.")
-    memory_records = _load_local_memory_records(paths["memory"])
-    existing = _load_local_goal_queue(paths["goal_queue"], required=False).get("goals", [])
+    memory_records = _local_memory_projection(paths, str(schema["run_id"]))
+    existing = list(_local_kernel_state(paths, str(schema["run_id"])).get("tasks", {}).values())
     goals = _local_plan_goals(objective_text)
     graph = {
         "schema_version": SCHEMA_VERSION,
@@ -2468,6 +2476,9 @@ def runtime_planner_payload(*, workspace: str, objective: str | None, explain: b
         "generated_at": LOCAL_RUNTIME_CREATED_AT,
     }
     _write_json(paths["goal_queue"], graph)
+    append_event(paths["event_log"], run_id=str(schema["run_id"]), event_type="RUN_CREATED", payload={"workspace": schema["workspace"], "objective": objective_text, "artifact_root": schema["run_root"]})
+    for goal in goals:
+        append_event(paths["event_log"], run_id=str(schema["run_id"]), event_type="TASK_DEFINED", payload=goal)
     payload = _local_base_payload("runtime planner", schema=schema, status="planned")
     payload.update(
         {
@@ -2485,7 +2496,7 @@ def runtime_planner_payload(*, workspace: str, objective: str | None, explain: b
                 "inspect scheduler/executor ledgers before handoff",
                 "do not treat dry-run executor output as real agent work",
             ],
-            "next_action": "runtime scheduler --workspace <workspace> --json",
+            "next_action": runtime_kernel.get_next_actions(_local_kernel_state(paths, str(schema["run_id"])))["next_action"],
         }
     )
     return payload
@@ -2493,11 +2504,10 @@ def runtime_planner_payload(*, workspace: str, objective: str | None, explain: b
 
 def runtime_scheduler_payload(*, workspace: str, project_root: Path, dry_run: bool = True) -> dict[str, Any]:
     schema, _, paths = _load_local_workspace(workspace, project_root)
-    queue = _load_local_goal_queue(paths["goal_queue"], required=True)
-    scheduler = _local_scheduler_snapshot(queue)
+    scheduler = _local_kernel_scheduler(paths, str(schema["run_id"]))
     payload = _local_base_payload("runtime scheduler", schema=schema, status=_local_status_from_scheduler(scheduler), ok=not scheduler["errors"])
-    payload.update({"dry_run": dry_run, "writes_ledger": True, **scheduler})
-    _write_json(paths["scheduler_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_scheduler_ledger", "entries": [payload]})
+    payload.update({"dry_run": dry_run, "writes_ledger": False, "projection_cache_path": schema["scheduler_ledger_path"], **scheduler})
+    _write_json(paths["scheduler_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_scheduler_projection_cache", "canonical_source": "events.jsonl", "entries": [payload]})
     return payload
 
 
@@ -2513,6 +2523,7 @@ def runtime_parallel_payload(*, workspace: str, max_workers: int, project_root: 
     for index, goal in enumerate(runnable, start=1):
         goal_id = str(goal["goal_id"])
         failed = goal_id in failures_requested or str(goal.get("simulate_result", "")) == "failed"
+        runtime_executor.execute(paths["event_log"], run_id=str(schema["run_id"]), task=goal, worker_slot=index, fail=failed)
         result = {
             "goal_id": goal_id,
             "agent_role": goal["agent_role"],
@@ -2537,11 +2548,11 @@ def runtime_parallel_payload(*, workspace: str, max_workers: int, project_root: 
             "failure_ledger": failures,
             "execution_ledger_path": schema["executor_ledger_path"],
             "failure_ledger_path": _project_relative(paths["failure_ledger"], project_root),
-            "next_action": "runtime orchestrate --resume" if failures else scheduler["next_action"],
+            "next_action": "runtime orchestrate --resume" if failures else runtime_kernel.get_next_actions(_local_kernel_state(paths, str(schema["run_id"])))["next_action"],
         }
     )
-    _write_json(paths["executor_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_executor_ledger", "entries": [payload]})
-    _write_json(paths["failure_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_executor_failure_ledger", "failures": failures})
+    _write_json(paths["executor_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_executor_projection_cache", "canonical_source": "events.jsonl", "entries": [payload]})
+    _write_json(paths["failure_ledger"], {"schema_version": SCHEMA_VERSION, "packet_type": "agentoffice_local_executor_failure_projection_cache", "canonical_source": "events.jsonl", "failures": failures})
     return payload
 
 
@@ -2564,7 +2575,7 @@ def runtime_orchestrate_payload(
             "scheduler_entries": len(scheduler.get("entries", [])),
             "executor_entries": len(executor.get("entries", [])),
             "failure_count": len(failures.get("failures", [])),
-            "next_action": "inspect_failures" if failures.get("failures") else "run_orchestrate_dry_run",
+            "next_action": runtime_kernel.get_next_actions(_local_kernel_state(paths, str(schema["run_id"])))["next_action"],
         }
         payload = _local_base_payload("runtime orchestrate", schema=schema, status="resume_inspection")
         payload.update({"resume": True, "dry_run": True, "recovery_summary": summary, "operator_summary": _local_operator_summary(summary), "final_report_path": None, "handoff_packet_path": schema["handoff_packet_path"]})
@@ -2678,6 +2689,7 @@ def _local_workspace_files(workspace_root: Path) -> dict[str, Path]:
         "goal_queue": workspace_root / "goal-queue.json",
         "agent_outputs": workspace_root / "agent-outputs",
         "memory": workspace_root / "memory.jsonl",
+        "event_log": workspace_root / "events.jsonl",
         "scheduler_ledger": workspace_root / "scheduler-ledger.json",
         "executor_ledger": workspace_root / "executor-ledger.json",
         "failure_ledger": workspace_root / "executor-failures.json",
@@ -2717,6 +2729,7 @@ def _local_schema_path_keys() -> tuple[str, ...]:
         "goal_queue_path",
         "agent_outputs_path",
         "memory_path",
+        "event_log_path",
         "scheduler_ledger_path",
         "executor_ledger_path",
         "reports_path",
@@ -2729,6 +2742,7 @@ def _local_file_key_for_schema(schema_key: str) -> str:
         "goal_queue_path": "goal_queue",
         "agent_outputs_path": "agent_outputs",
         "memory_path": "memory",
+        "event_log_path": "event_log",
         "scheduler_ledger_path": "scheduler_ledger",
         "executor_ledger_path": "executor_ledger",
         "reports_path": "reports",
@@ -2901,6 +2915,42 @@ def _local_status_from_goals(paths: dict[str, Path]) -> str:
     except RuntimeFoundationError:
         return "invalid"
     return _local_status_from_scheduler(_local_scheduler_snapshot(queue))
+
+
+def _local_status_from_kernel(paths: dict[str, Path], run_id: str) -> str:
+    try:
+        return _local_status_from_scheduler(_local_kernel_scheduler(paths, run_id))
+    except (RuntimeFoundationError, EventLogError):
+        return "invalid"
+
+
+def _local_kernel_events(paths: dict[str, Path], run_id: str) -> list[dict[str, Any]]:
+    from agent_office.runtime_kernel.event_log import read_events_by_run_id
+    try:
+        return read_events_by_run_id(paths["event_log"], run_id)
+    except EventLogError as exc:
+        raise RuntimeFoundationError(exc.error_code, str(exc)) from exc
+
+
+def _local_kernel_state(paths: dict[str, Path], run_id: str) -> dict[str, Any]:
+    try:
+        return runtime_kernel.get_state(paths["event_log"], run_id)
+    except EventLogError as exc:
+        raise RuntimeFoundationError(exc.error_code, str(exc)) from exc
+
+
+def _local_kernel_scheduler(paths: dict[str, Path], run_id: str) -> dict[str, Any]:
+    return runtime_scheduler.view(_local_kernel_state(paths, run_id))
+
+
+def _local_memory_projection(paths: dict[str, Path], run_id: str) -> list[dict[str, Any]]:
+    state = _local_kernel_state(paths, run_id)
+    return list(state.get("memory", []))
+
+
+def _write_memory_projection(paths: dict[str, Path], run_id: str) -> None:
+    records = _local_memory_projection(paths, run_id)
+    paths["memory"].write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8")
 
 
 def _local_status_from_scheduler(scheduler: dict[str, Any]) -> str:

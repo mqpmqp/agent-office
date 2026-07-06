@@ -1338,7 +1338,7 @@ Recovery workflow:
 
 ### Local multi-agent runtime V1
 
-P55-P60 add a local-only multi-agent runtime prototype under `runtime`. It is a deterministic contract layer, not a real LLM agent system: the planner is static, memory is local JSONL, the scheduler is not a daemon, the parallel executor defaults to bounded dry-run simulation, and orchestration does not trigger providers, models, adapters, network workers, or external runtime behavior.
+P55-P60 now run through a local-only event-sourced runtime kernel under `runtime`. The canonical runtime rule is `state = reduce(event_log)`: `events.jsonl` is the single source of truth, while workspace files, `goal-queue.json`, `memory.jsonl`, `scheduler-ledger.json`, and `executor-ledger.json` are compatibility artifacts or projection caches. The planner is a compile-time static plan compiler, not a runtime brain. The scheduler is a pure projection from reduced state, the executor is the only mutator and only emits events, and `next_action` comes from the kernel reducer. Orchestration is a compatibility/manual sequence helper; it does not create a competing controller and does not trigger providers, models, adapters, network workers, or external runtime behavior.
 
 ```bash
 python3 -m agent_office runtime workspace init --workspace .ai/local-runtime/demo --run-id demo-run --json
@@ -1354,8 +1354,8 @@ python3 -m agent_office runtime orchestrate --workspace .ai/local-runtime/demo -
 
 Operator flow:
 
-1. Initialize the workspace once with a stable `run-id`.
-2. Write local memory records only when they are safe to store in JSONL; do not put secrets in memory content.
-3. Run `planner`, inspect `scheduler`, then use `parallel` for safe bounded dry-run simulation.
-4. Use `orchestrate` to produce the reviewer packet, handoff packet, and final runtime report under the workspace.
-5. Use `orchestrate --resume` to inspect recovery state from scheduler/executor/failure ledgers.
+1. Initialize the workspace once with a stable `run-id`; this appends `RUN_CREATED` to `events.jsonl`.
+2. Write local memory only through `runtime memory write`; it appends `MEMORY_RECORDED`, and `memory.jsonl` is a projection cache. Do not put secrets in memory content.
+3. Run `planner` to append static `TASK_DEFINED` events, inspect `scheduler` as a pure projection, then use `parallel` for safe bounded dry-run simulation.
+4. Use `orchestrate` only as a compatibility/manual sequence helper to produce reviewer and handoff artifacts under the workspace.
+5. Use `orchestrate --resume` to inspect projection caches and kernel-derived next action; ledgers are not canonical state.

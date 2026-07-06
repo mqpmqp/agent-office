@@ -68,38 +68,27 @@ class LocalMultiAgentRuntimeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = self._workspace(root)
-            queue = root / ".ai" / "local-runtime" / "demo" / "goal-queue.json"
-            queue.write_text(json.dumps({
-                "schema_version": 1,
-                "packet_type": "agentoffice_local_plan_graph",
-                "run_id": "run-demo",
-                "objective": "classification",
-                "goals": [
-                    {"goal_id": "done", "agent_role": "planner", "status": "completed", "depends_on": []},
-                    {"goal_id": "ready", "agent_role": "executor", "status": "pending", "depends_on": ["done"]},
-                    {"goal_id": "failed", "agent_role": "executor", "status": "failed", "depends_on": []},
-                    {"goal_id": "blocked", "agent_role": "reviewer", "status": "pending", "depends_on": ["failed"]},
-                    {"goal_id": "skipped", "agent_role": "reviewer", "status": "skipped", "depends_on": []},
-                    {"goal_id": "running", "agent_role": "scheduler", "status": "running", "depends_on": []},
-                ],
-                "dependency_edges": [],
-                "generated_at": "deterministic-static-v1",
-            }), encoding="utf-8")
+            events = root / ".ai" / "local-runtime" / "demo" / "events.jsonl"
+            for event_type, goal_id, status, depends_on in [
+                ("TASK_DEFINED", "done", "pending", []),
+                ("TASK_COMPLETED", "done", "completed", []),
+                ("TASK_DEFINED", "ready", "pending", ["done"]),
+                ("TASK_DEFINED", "failed", "pending", []),
+                ("TASK_FAILED", "failed", "failed", []),
+                ("TASK_DEFINED", "blocked", "pending", ["failed"]),
+                ("TASK_DEFINED", "skipped", "pending", []),
+                ("TASK_SKIPPED", "skipped", "skipped", []),
+                ("TASK_DEFINED", "running", "pending", []),
+                ("TASK_STARTED", "running", "running", []),
+            ]:
+                with events.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"event_id": f"test-{goal_id}-{event_type}", "run_id": "run-demo", "type": event_type, "payload": {"goal_id": goal_id, "agent_role": "executor", "status": status, "depends_on": depends_on}, "created_at": "deterministic-static-v1"}, sort_keys=True) + "\n")
             result = run_cli(["runtime", "scheduler", "--workspace", workspace, "--json"], root)
             payload = json.loads(result[1])
-            queue.write_text(json.dumps({
-                "schema_version": 1,
-                "packet_type": "agentoffice_local_plan_graph",
-                "run_id": "run-demo",
-                "objective": "bad",
-                "goals": [
-                    {"goal_id": "a", "agent_role": "planner", "status": "pending", "depends_on": ["b"]},
-                    {"goal_id": "b", "agent_role": "executor", "status": "pending", "depends_on": ["a"]},
-                    {"goal_id": "c", "agent_role": "executor", "status": "pending", "depends_on": ["missing"]},
-                ],
-                "dependency_edges": [],
-                "generated_at": "deterministic-static-v1",
-            }), encoding="utf-8")
+            events.write_text(json.dumps({"event_id": "evt-000001", "run_id": "run-demo", "type": "RUN_CREATED", "payload": {"workspace": workspace}, "created_at": "deterministic-static-v1"}) + "\n", encoding="utf-8")
+            for goal_id, depends_on in [("a", ["b"]), ("b", ["a"]), ("c", ["missing"])]:
+                with events.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"event_id": f"bad-{goal_id}", "run_id": "run-demo", "type": "TASK_DEFINED", "payload": {"goal_id": goal_id, "agent_role": "executor", "status": "pending", "depends_on": depends_on}, "created_at": "deterministic-static-v1"}, sort_keys=True) + "\n")
             bad = run_cli(["runtime", "scheduler", "--workspace", workspace, "--json"], root)
 
         self.assertEqual(result[0], 0, result[1] + result[2])
@@ -139,19 +128,14 @@ class LocalMultiAgentRuntimeCliTests(unittest.TestCase):
             root = Path(tmpdir)
             workspace = self._workspace(root)
             run_cli(["runtime", "planner", "--workspace", workspace, "--objective", "Parallel dry-run", "--json"], root)
-            queue = root / ".ai" / "local-runtime" / "demo" / "goal-queue.json"
-            data = json.loads(queue.read_text(encoding="utf-8"))
-            for goal in data["goals"]:
-                goal["depends_on"] = []
-            queue.write_text(json.dumps(data), encoding="utf-8")
-            result = run_cli(["runtime", "parallel", "--workspace", workspace, "--max-workers", "2", "--fail-goal", "inspect-workspace", "--json"], root)
+            result = run_cli(["runtime", "parallel", "--workspace", workspace, "--max-workers", "2", "--fail-goal", "plan-objective", "--json"], root)
             payload = json.loads(result[1])
             failure_ledger = json.loads((root / ".ai" / "local-runtime" / "demo" / "executor-failures.json").read_text(encoding="utf-8"))
 
         self.assertEqual(result[0], 0, result[1] + result[2])
         self.assertTrue(payload["dry_run"])
         self.assertLessEqual(len(payload["results"]), 2)
-        self.assertEqual(failure_ledger["failures"][0]["goal_id"], "inspect-workspace")
+        self.assertEqual(failure_ledger["failures"][0]["goal_id"], "plan-objective")
 
     def test_orchestrator_dry_run_resume_and_packets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -183,8 +167,8 @@ class LocalMultiAgentRuntimeCliTests(unittest.TestCase):
             link.symlink_to(target, target_is_directory=True)
             symlink = run_cli(["runtime", "workspace", "init", "--workspace", str(link), "--run-id", "bad", "--json"], root)
             workspace = self._workspace(root)
-            memory = root / ".ai" / "local-runtime" / "demo" / "memory.jsonl"
-            memory.write_text("{bad\n", encoding="utf-8")
+            events = root / ".ai" / "local-runtime" / "demo" / "events.jsonl"
+            events.write_text("{bad\n", encoding="utf-8")
             bad_json = run_cli(["runtime", "memory", "list", "--workspace", workspace, "--json"], root)
 
         for result in (missing, traversal, symlink, bad_json):
@@ -193,7 +177,7 @@ class LocalMultiAgentRuntimeCliTests(unittest.TestCase):
         self.assertIn("runtime_workspace_missing", missing[1])
         self.assertIn("runtime_workspace_path_traversal", traversal[1])
         self.assertIn("runtime_workspace_symlink_refused", symlink[1])
-        self.assertIn("runtime_memory_jsonl_unreadable", bad_json[1])
+        self.assertIn("runtime_event_log_jsonl_unreadable", bad_json[1])
 
 
 if __name__ == "__main__":
