@@ -38,6 +38,26 @@ python3 -m agent_office orchestrate inspect --path /tmp/ao-orch --json
 python3 -m agent_office orchestrate validate --path /tmp/ao-orch --json
 ```
 
+## Framework Runtime Trunk
+
+The framework runtime trunk connects the workspace store, run metadata, task graph, packets, actor results, runtime events, review stub, judge stub, replay, resume, and evidence export into one local dogfood loop. It is deterministic and local-only: no `.env` reads, no environment printing, no provider/model calls, no network requests, and no external adapters.
+
+```bash
+python3 -m agent_office workspace init --workspace-id ws-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office workspace run-create --workspace-id ws-demo --run-id run-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office task-graph create --workspace-id ws-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime dispatch --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --task-id task-a --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime review --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --result-id res_task-a --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime judge --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --review-id rev_task-a --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime resume --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime status --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime replay --workspace-id ws-demo --run-id run-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime evidence --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --format json --json
+python3 -m agent_office framework-runtime workers --json
+```
+
+`framework-runtime evidence` writes the evidence artifact under the run evidence directory and includes run, task, packet, actor-result, event, review, judge, worker-contract, replay, and local-only safety evidence.
+
 ## Runtime Foundation Slice
 
 The runtime foundation slice is local, deterministic, and static. It writes only a project-local workspace manifest, task graph, JSONL memory/events, and local/static task results. It does not read `.env`, print environment values, call providers, call models, start daemons, run background workers, or execute external adapters.

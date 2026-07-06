@@ -50,6 +50,7 @@ EXPECTED_KEYS = (
     "trading_bot_scope",
     "core_objects",
     "next_slices",
+    "runtime_trunk",
 )
 
 EXPECTED_CORE_OBJECTS = [
@@ -92,6 +93,9 @@ class FrameworkStatusSchemaTest(unittest.TestCase):
         self.assertEqual(status["runtime_model"], "deterministic_cli_tick_first")
         self.assertEqual(status["core_objects"], EXPECTED_CORE_OBJECTS)
         self.assertEqual(status["next_slices"], EXPECTED_NEXT_SLICES)
+        self.assertEqual(status["runtime_trunk"]["status"], "available")
+        self.assertEqual(status["runtime_trunk"]["worker_adapters"], ["local_echo_worker"])
+        self.assertIs(status["runtime_trunk"]["provider_calls_enabled"], False)
 
     def test_safety_invariants_are_false(self) -> None:
         status = build_framework_status()
@@ -115,6 +119,7 @@ class FrameworkStatusCliTest(unittest.TestCase):
         self.assertIs(payload["trading_bot_scope"], False)
         self.assertEqual(payload["core_objects"], EXPECTED_CORE_OBJECTS)
         self.assertEqual(payload["next_slices"], EXPECTED_NEXT_SLICES)
+        self.assertEqual(payload["runtime_trunk"]["status"], "available")
 
     def test_text_output_names_architecture_target(self) -> None:
         exit_code, stdout, stderr = run_cli(["framework-status"])
@@ -123,6 +128,7 @@ class FrameworkStatusCliTest(unittest.TestCase):
         self.assertIn("local-first multi-agent office runtime", stdout)
         self.assertIn("framework_reset", stdout)
         self.assertIn("provider calls enabled: False", stdout)
+        self.assertIn("runtime trunk: available", stdout)
 
     def test_command_does_not_read_environment(self) -> None:
         for json_flag in (True, False):

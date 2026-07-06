@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from . import framework_types as ft
+from .framework_runtime import runtime_contract_status
 
 
 def build_framework_status() -> dict[str, object]:
@@ -24,6 +25,7 @@ def build_framework_status() -> dict[str, object]:
         "trading_bot_scope": False,
         "core_objects": list(ft.CORE_OBJECTS),
         "next_slices": list(ft.NEXT_SLICES),
+        "runtime_trunk": runtime_contract_status(),
     }
 
 
@@ -42,6 +44,9 @@ def render_framework_status_text() -> str:
         f"trading bot scope: {status['trading_bot_scope']}",
         "core objects: " + ", ".join(status["core_objects"]),
         "next slices: " + ", ".join(status["next_slices"]),
+        f"runtime trunk: {status['runtime_trunk']['status']}",
+        f"runtime worker adapters: {', '.join(status['runtime_trunk']['worker_adapters'])}",
+        "runtime trunk provider calls enabled: False",
         "docs: docs/AGENTOFFICE_FUGU_LIKE_FRAMEWORK.md",
     ]
     return "\n".join(lines)
