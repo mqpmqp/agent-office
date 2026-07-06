@@ -28,6 +28,12 @@ from .runtime_events import (
     format_runtime_event_payload,
     list_events_payload,
 )
+from .task_graph import (
+    TaskGraphError,
+    create_goal_graph,
+    format_task_graph_payload,
+    ready_tasks_payload,
+)
 from .doctor import (
     bool_text,
     collect_doctor,
@@ -786,6 +792,22 @@ def cmd_runtime_event(args: argparse.Namespace) -> int:
         raise AgentOfficeError(str(exc)) from exc
 
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_runtime_event_payload(payload))
+    return 0
+
+
+def cmd_task_graph(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    try:
+        if args.task_graph_action == "create":
+            payload = create_goal_graph(root, args.workspace_id, args.goal_id)
+        elif args.task_graph_action == "ready":
+            payload = ready_tasks_payload(root, args.workspace_id, args.goal_id)
+        else:
+            raise AgentOfficeError("task-graph requires create or ready.")
+    except TaskGraphError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_task_graph_payload(payload))
     return 0
 
 
@@ -2855,6 +2877,21 @@ def build_parser() -> argparse.ArgumentParser:
         _add_repeatable_root_arg(lifecycle_parser)
         lifecycle_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         lifecycle_parser.set_defaults(func=cmd_review_artifact)
+
+    p = sub.add_parser("task-graph", help="Create and inspect deterministic framework task graphs without scheduling workers.")
+    task_graph_sub = p.add_subparsers(dest="task_graph_action", required=True)
+    task_graph_create = task_graph_sub.add_parser("create", help="Create a framework goal and minimal task graph.")
+    task_graph_create.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    task_graph_create.add_argument("--goal-id", required=True, help="Stable goal id.")
+    task_graph_create.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    task_graph_create.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    task_graph_create.set_defaults(func=cmd_task_graph)
+    task_graph_ready = task_graph_sub.add_parser("ready", help="Compute ready tasks and blocked reasons for a framework goal.")
+    task_graph_ready.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    task_graph_ready.add_argument("--goal-id", required=True, help="Stable goal id.")
+    task_graph_ready.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    task_graph_ready.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    task_graph_ready.set_defaults(func=cmd_task_graph)
 
     p = sub.add_parser("runtime-event", help="Append and list deterministic runtime events inside a workspace run.")
     runtime_event_sub = p.add_subparsers(dest="runtime_event_action", required=True)
