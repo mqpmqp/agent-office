@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import tempfile
@@ -9,6 +9,7 @@ from agent_office.runtime_kernel.event_log import EventLogError, append_event, e
 from agent_office.runtime_kernel.executor import execute
 from agent_office.runtime_kernel.kernel import get_next_actions, get_state, replay
 from agent_office.runtime_kernel.scheduler import view
+from agent_office.runtime_kernel.validator import validate_event
 
 
 class RuntimeKernelTests(unittest.TestCase):
@@ -74,6 +75,17 @@ class RuntimeKernelTests(unittest.TestCase):
             self.assertEqual([event["type"] for event in events], ["TASK_STARTED", "TASK_COMPLETED"])
             self.assertNotIn("next_action", events[-1]["payload"])
             self.assertEqual(get_state(path, "run-a")["tasks"]["plan"]["status"], "completed")
+
+    def test_invalid_event_type_raises_stable_error(self) -> None:
+        with self.assertRaises(EventLogError) as error:
+            validate_event({
+                "event_id": "evt-invalid",
+                "run_id": "run-a",
+                "type": "NOT_A_RUNTIME_EVENT",
+                "payload": {},
+            })
+
+        self.assertEqual(error.exception.error_code, "runtime_event_type_invalid")
 
     def test_missing_bad_json_and_symlink_event_log_fail_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

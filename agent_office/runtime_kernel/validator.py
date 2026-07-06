@@ -13,7 +13,7 @@ def validate_event(event: dict[str, Any]) -> None:
         if field not in event:
             raise EventLogError('runtime_event_invalid', f'Runtime event missing field: {field}')
     if event['type'] not in EVENT_TYPES:
-        raise EventLogError('runtime_event_type_invalid', f'Unsupported runtime event type: {event[ type]}')
+        raise EventLogError('runtime_event_type_invalid', f'Unsupported runtime event type: {event["type"]}')
     if not isinstance(event['payload'], dict):
         raise EventLogError('runtime_event_payload_invalid', 'Runtime event payload must be an object.')
 
