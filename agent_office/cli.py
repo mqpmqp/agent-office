@@ -15,6 +15,13 @@ from .adapters.mock import MockAdapter
 from .adapters.modes import adapter_for_role, load_adapter_mode_config, validate_adapter_mode
 from .adapters.registry import get_adapter
 from .framework_status import render_framework_status_json, render_framework_status_text
+from .workspace_store import (
+    WorkspaceStoreError,
+    create_run,
+    format_workspace_payload,
+    init_workspace,
+    inspect_workspace,
+)
 from .doctor import (
     bool_text,
     collect_doctor,
@@ -739,6 +746,24 @@ def cmd_framework_status(args: argparse.Namespace) -> int:
         print(render_framework_status_json())
     else:
         print(render_framework_status_text())
+    return 0
+
+
+def cmd_workspace(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    try:
+        if args.workspace_action == "init":
+            payload = init_workspace(root, args.workspace_id)
+        elif args.workspace_action == "inspect":
+            payload = inspect_workspace(root, args.workspace_id)
+        elif args.workspace_action == "run-create":
+            payload = create_run(root, args.workspace_id, args.run_id)
+        else:
+            raise AgentOfficeError("workspace requires init, inspect, or run-create.")
+    except WorkspaceStoreError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_workspace_payload(payload))
     return 0
 
 
@@ -2808,6 +2833,25 @@ def build_parser() -> argparse.ArgumentParser:
         _add_repeatable_root_arg(lifecycle_parser)
         lifecycle_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         lifecycle_parser.set_defaults(func=cmd_review_artifact)
+
+    p = sub.add_parser("workspace", help="Manage deterministic framework workspaces and runs without provider calls.")
+    workspace_sub = p.add_subparsers(dest="workspace_action", required=True)
+    workspace_init = workspace_sub.add_parser("init", help="Initialize a framework workspace store.")
+    workspace_init.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    workspace_init.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    workspace_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    workspace_init.set_defaults(func=cmd_workspace)
+    workspace_inspect = workspace_sub.add_parser("inspect", help="Inspect a framework workspace store.")
+    workspace_inspect.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    workspace_inspect.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    workspace_inspect.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    workspace_inspect.set_defaults(func=cmd_workspace)
+    workspace_run_create = workspace_sub.add_parser("run-create", help="Create a framework run directory inside a workspace.")
+    workspace_run_create.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    workspace_run_create.add_argument("--run-id", required=True, help="Stable run id.")
+    workspace_run_create.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    workspace_run_create.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    workspace_run_create.set_defaults(func=cmd_workspace)
 
     p = sub.add_parser("doctor", help="Check AgentOffice adapter configuration without executing real adapters.")
     p.add_argument("--adapter", choices=["mock", "codex", "gemini", "grok", "claude"], help="Limit adapter diagnostics to one adapter.")
