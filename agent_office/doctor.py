@@ -12,6 +12,7 @@ from typing import Any
 
 from .adapters.modes import adapter_mode_rows, collect_adapter_mode_status, format_adapter_mode_table
 from .adapters.registry import adapter_catalog
+from .framework_runtime import runtime_contract_status
 from .profiles import ProfileError, profile_plans_payload
 
 
@@ -113,6 +114,7 @@ def collect_doctor(project_root: Path, adapter_filter: str | None = None) -> dic
             "adapters": mode_status,
         },
         "profiles": collect_profile_plan_audit(),
+        "framework_runtime": runtime_contract_status(),
         "safe": {
             "env_file_read": False,
             "real_adapter_executed": False,
@@ -269,8 +271,16 @@ def format_doctor(report: dict[str, Any]) -> str:
     lines.append("- profile plan audit:")
     for line in format_profile_plan_audit(report["profiles"]).splitlines():
         lines.append(f"  {line}")
+    runtime = report["framework_runtime"]
     lines.extend(
         [
+            "- framework runtime trunk:",
+            f"  - status: {runtime['status']}",
+            f"  - worker_adapters: {', '.join(runtime['worker_adapters'])}",
+            f"  - provider_calls_enabled: {bool_text(runtime['provider_calls_enabled'])}",
+            f"  - env_reads_allowed: {bool_text(runtime['env_reads_allowed'])}",
+            f"  - network_calls_enabled: {bool_text(runtime['network_calls_enabled'])}",
+            "  - review_judge: local stub / no external provider",
             "- safety:",
             f"  - env_file_read: {bool_text(report['safe']['env_file_read'])}",
             f"  - real_adapter_executed: {bool_text(report['safe']['real_adapter_executed'])}",

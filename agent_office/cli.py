@@ -139,6 +139,22 @@ from .packet_result import (
     list_actor_results_payload,
     list_packets_payload,
 )
+from .framework_runtime import (
+    FrameworkRuntimeError,
+    dispatch_payload,
+    evidence_payload as framework_runtime_evidence_payload,
+    format_framework_runtime_payload,
+    inspect_payload as framework_runtime_inspect_payload,
+    judge_payload as framework_runtime_judge_payload,
+    list_runs_payload as framework_runtime_list_runs_payload,
+    replay_payload as framework_runtime_replay_payload,
+    resume_payload as framework_runtime_resume_payload,
+    review_payload as framework_runtime_review_payload,
+    review_id_for_task,
+    result_id_for_task,
+    run_status_payload as framework_runtime_status_payload,
+    worker_contract_payload,
+)
 from .profiles import (
     ALLOWED_ROLES,
     ProfileError,
@@ -1266,6 +1282,40 @@ def cmd_actor_result(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_framework_runtime(args: argparse.Namespace) -> int:
+    try:
+        action = args.framework_runtime_action
+        if action == "workers":
+            payload = worker_contract_payload()
+        elif action == "dispatch":
+            payload = dispatch_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.task_id)
+        elif action == "review":
+            result_id = args.result_id or result_id_for_task(args.task_id)
+            payload = framework_runtime_review_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, result_id)
+        elif action == "judge":
+            review_id = args.review_id or review_id_for_task(args.task_id)
+            payload = framework_runtime_judge_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, review_id)
+        elif action == "status":
+            payload = framework_runtime_status_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+        elif action == "list":
+            payload = framework_runtime_list_runs_payload(Path(args.root), args.workspace_id)
+        elif action == "inspect":
+            payload = framework_runtime_inspect_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.task_id)
+        elif action == "resume":
+            payload = framework_runtime_resume_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+        elif action == "replay":
+            payload = framework_runtime_replay_payload(Path(args.root), args.workspace_id, args.run_id)
+        elif action == "evidence":
+            payload = framework_runtime_evidence_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.format)
+        else:
+            raise AgentOfficeError("framework-runtime requires a supported action.")
+    except FrameworkRuntimeError as exc:
+        raise AgentOfficeError(str(exc)) from exc
+
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_framework_runtime_payload(payload))
+    return 0
+
+
 def cmd_run_bundle(args: argparse.Namespace) -> int:
     action = getattr(args, "bundle_action", None)
     try:
@@ -2219,6 +2269,64 @@ def build_parser() -> argparse.ArgumentParser:
     actor_result_list.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
     actor_result_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     actor_result_list.set_defaults(func=cmd_actor_result)
+
+    p = sub.add_parser("framework-runtime", help="Run the deterministic framework runtime trunk without providers or external adapters.")
+    framework_runtime_sub = p.add_subparsers(dest="framework_runtime_action", required=True)
+    framework_runtime_workers = framework_runtime_sub.add_parser("workers", help="List local framework runtime worker adapter contracts.")
+    framework_runtime_workers.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    framework_runtime_workers.set_defaults(func=cmd_framework_runtime)
+
+    def add_framework_runtime_run_args(parser: argparse.ArgumentParser, *, goal: bool = True) -> None:
+        parser.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+        parser.add_argument("--run-id", required=True, help="Stable run id.")
+        if goal:
+            parser.add_argument("--goal-id", required=True, help="Stable goal id.")
+        parser.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    framework_runtime_dispatch = framework_runtime_sub.add_parser("dispatch", help="Dispatch one ready task to the local deterministic worker.")
+    add_framework_runtime_run_args(framework_runtime_dispatch)
+    framework_runtime_dispatch.add_argument("--task-id", help="Ready task id to dispatch. Defaults to the first ready task.")
+    framework_runtime_dispatch.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_review = framework_runtime_sub.add_parser("review", help="Intake a deterministic local review stub for an actor result.")
+    add_framework_runtime_run_args(framework_runtime_review)
+    review_selector = framework_runtime_review.add_mutually_exclusive_group(required=True)
+    review_selector.add_argument("--result-id", help="Actor result id to review.")
+    review_selector.add_argument("--task-id", help="Task id whose actor result should be reviewed.")
+    framework_runtime_review.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_judge = framework_runtime_sub.add_parser("judge", help="Intake a deterministic local judge stub for a review result.")
+    add_framework_runtime_run_args(framework_runtime_judge)
+    judge_selector = framework_runtime_judge.add_mutually_exclusive_group(required=True)
+    judge_selector.add_argument("--review-id", help="Review id to judge.")
+    judge_selector.add_argument("--task-id", help="Task id whose review should be judged.")
+    framework_runtime_judge.set_defaults(func=cmd_framework_runtime)
+
+    for runtime_action in ("status", "resume"):
+        runtime_parser = framework_runtime_sub.add_parser(runtime_action, help=f"Framework runtime {runtime_action} for one run/goal.")
+        add_framework_runtime_run_args(runtime_parser)
+        runtime_parser.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_inspect = framework_runtime_sub.add_parser("inspect", help="Inspect one framework runtime run or task.")
+    add_framework_runtime_run_args(framework_runtime_inspect)
+    framework_runtime_inspect.add_argument("--task-id", help="Optional task id to inspect.")
+    framework_runtime_inspect.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_list = framework_runtime_sub.add_parser("list", help="List framework runtime run/goal completeness for a workspace.")
+    framework_runtime_list.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+    framework_runtime_list.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+    framework_runtime_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    framework_runtime_list.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_replay = framework_runtime_sub.add_parser("replay", help="Replay-read the framework runtime event log for one run.")
+    add_framework_runtime_run_args(framework_runtime_replay, goal=False)
+    framework_runtime_replay.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_evidence = framework_runtime_sub.add_parser("evidence", help="Export framework runtime run/task/packet/result/review/judge evidence.")
+    add_framework_runtime_run_args(framework_runtime_evidence)
+    framework_runtime_evidence.add_argument("--format", choices=["json", "text"], default="json", help="Evidence artifact format. Default: json.")
+    framework_runtime_evidence.set_defaults(func=cmd_framework_runtime)
 
     p = sub.add_parser("orchestrate", help="Create and inspect static auditable multi-agent orchestration artifacts.")
     orch_sub = p.add_subparsers(dest="orchestrate_action", required=True)
