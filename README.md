@@ -109,6 +109,54 @@ python3 -m agent_office framework-runtime worker result-intake --workspace-id ws
 python3 -m agent_office framework-runtime worker result-show --workspace-id ws-demo --run-id run-demo --job-id job-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
 ```
 
+
+WP5 Local Orchestration Contract V1 adds a framework-runtime orchestration contract on top of the local task graph, job lifecycle, executor/result evidence paths, and worker-result intake. It is still local/static only. It plans deterministic task dispatches from the existing task graph, validates dependency readiness, can show persisted orchestration state, and `run-local` writes explicit orchestration state plus local job and worker-result records. It does not call real Codex, Claude, providers, external adapters, daemons, background workers, message queues, or the network.
+
+```bash
+python3 -m agent_office framework-runtime orchestration plan --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime orchestration show --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime orchestration validate --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime orchestration run-local --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+```
+
+The orchestration state is stored at `.ai/workspaces/<workspace-id>/runs/<run-id>/orchestrations/<goal-id>.json`. The state model is explicit: `planned -> running -> succeeded`, or `planned -> blocked` when validation finds blocked dependencies. Each local dispatch creates a deterministic run-local job using the task id as the job id, intakes a deterministic `local_worker_adapter_stub` result, advances the task to `accepted`, appends orchestration events, and records evidence refs for the task graph, orchestration state, jobs, worker results, and event log.
+
+
+WP6 Local Execution Loop V1 adds a stepwise local execution loop over the WP5 orchestration plan. It is still local/static only. `run-once` advances at most one planned dispatch, `loop` repeats `run-once` until complete or `--max-iterations` is reached, and `status` previews or reads the persisted execution-loop state. The loop writes local execution state, deterministic jobs, deterministic worker results, task graph acceptance, and runtime events. It does not call real Codex, Claude, providers, external adapters, daemons, background workers, message queues, or the network.
+
+```bash
+python3 -m agent_office framework-runtime execution status --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime execution run-once --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime execution loop --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --max-iterations 100 --json
+```
+
+The execution-loop state is stored at `.ai/workspaces/<workspace-id>/runs/<run-id>/execution_loops/<goal-id>.json`. Its explicit state model is `planned -> running -> succeeded`, or `planned -> blocked` when the orchestration plan is invalid. Each `run-once` creates or reuses one task-id-based local job, intakes a deterministic `local_worker_adapter_stub` result, advances that task to `accepted`, and records evidence refs for the task graph, execution-loop state, jobs, worker results, and event log.
+
+
+WP7 Execution Policy + Capability Boundary V1 adds a deterministic local policy gate in front of execution-loop dispatch. Capabilities are declared as simple local/static records with worker, action, status, and allowed fields. `local.execution.dispatch` is allowed for the local execution loop; real provider, Codex, and Claude execution capabilities are forbidden. Unknown capabilities are denied deterministically.
+
+```bash
+python3 -m agent_office framework-runtime policy capabilities --json
+python3 -m agent_office framework-runtime policy check --capability-id local.execution.dispatch --json
+python3 -m agent_office framework-runtime policy check --capability-id external.provider.execute
+python3 -m agent_office framework-runtime execution run-once --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --capability-id local.execution.dispatch --json
+python3 -m agent_office framework-runtime execution run-once --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --capability-id external.provider.execute --json
+```
+
+Allowed execution writes a policy decision, `policy.allowed` event, local job, deterministic worker result, and normal execution-loop evidence. Denied execution writes a policy decision, `policy.denied` and `execution_loop.policy_denied` events, creates a failed local job, marks the task `rejected`, and does not create a worker result or dispatch a worker. Policy decisions are stored at `.ai/workspaces/<workspace-id>/runs/<run-id>/policy_decisions/<job-id>.json` and are included in framework runtime status/evidence output.
+
+WP8 scheduler boundary: Framework Runtime scheduler work must build on the WP6/WP7 `framework-runtime execution` surface only. The scheduler must not use legacy `framework-runtime executor`, `framework-runtime dispatch`, or `framework-runtime resume` as an execution backend; those commands remain local-only compatibility surfaces for older trunk behavior. Scheduler-intended dispatch must produce a policy decision before job creation or worker-result intake, and denied capabilities must not create worker results or call workers.
+
+State vocabulary for scheduler planning:
+
+| Layer | Canonical WP6/WP7 states | Scheduler guidance |
+| --- | --- | --- |
+| Task graph | `created`, `accepted`, `rejected`, `skipped` as terminal states for Framework Runtime status | Use `accepted` / `rejected` outcomes from the execution loop; do not map these to older `completed` semantics implicitly. |
+| Job lifecycle | `pending`, `running`, `succeeded`, `failed`, `cancelled` | Jobs are run-local execution records; policy denial moves the job to `failed`. |
+| Orchestration | `planned`, `running`, `succeeded`, `blocked`, `failed` | Treat WP5 orchestration as the deterministic plan source, not a provider executor. |
+| Execution loop | `planned`, `running`, `succeeded`, `blocked`, `failed` | WP8 ticks should advance this state machine through bounded local `run-once` behavior. |
+| Older `runtime` namespace | `pending`, `completed`, `failed`, `blocked` and older job states | Non-canonical for Framework Runtime WP8 scheduler; keep it separate unless a later architecture review defines migration. |
+
 Baseline report index:
 
 - `AGENTOFFICE_FRAMEWORK_RUNTIME_TRUNK_BATCH_REPORT.md`: original trunk batch implementation report.
@@ -117,8 +165,11 @@ Baseline report index:
 - `FRAMEWORK_RUNTIME_WP2_JOB_LIFECYCLE_CORE_REPORT.md`: WP2 local/static job lifecycle core report.
 - `FRAMEWORK_RUNTIME_WP3_LOCAL_EXECUTOR_LOOP_V1_REPORT.md`: WP3 local deterministic executor loop report.
 - `FRAMEWORK_RUNTIME_WP4_WORKER_ADAPTER_CONTRACT_RESULT_INTAKE_REPORT.md`: WP4 local worker adapter contract and deterministic result intake report.
+- `FRAMEWORK_RUNTIME_WP5_LOCAL_ORCHESTRATION_CONTRACT_V1_REPORT.md`: WP5 local deterministic orchestration contract report.
+- `FRAMEWORK_RUNTIME_WP6_LOCAL_EXECUTION_LOOP_V1_REPORT.md`: WP6 local deterministic execution loop report.
+- `FRAMEWORK_RUNTIME_WP7_EXECUTION_POLICY_CAPABILITY_BOUNDARY_V1_REPORT.md`: WP7 local policy/capability boundary report.
 
-After WP4, future Framework Runtime work packages should start from this local deterministic job/executor/worker-result baseline and keep the safety boundary unless broader execution is explicitly authorized.
+After WP7, future Framework Runtime work packages should start from this local deterministic job/executor/worker-result/orchestration/execution-loop/policy baseline and keep the safety boundary unless broader execution is explicitly authorized.
 
 ## Runtime Foundation Slice
 

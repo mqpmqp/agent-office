@@ -37,6 +37,9 @@ LOCAL_EXECUTOR_NAME = "local_executor_stub"
 LOCAL_WORKER_NAME = "local_echo_worker"
 REVIEW_STUB_NAME = "local_review_stub"
 JUDGE_STUB_NAME = "local_judge_stub"
+LOCAL_ORCHESTRATOR_NAME = "local_orchestrator_stub"
+LOCAL_EXECUTION_LOOP_NAME = "local_execution_loop_stub"
+LOCAL_EXECUTION_CAPABILITY_ID = "local.execution.dispatch"
 
 
 class FrameworkRuntimeError(ValueError):
@@ -71,7 +74,176 @@ def runtime_contract_status() -> dict[str, Any]:
             "local_executor_loop_v1",
             "worker_adapter_contract",
             "deterministic_worker_result_intake",
+            "local_orchestration_contract_v1",
+            "local_execution_loop_v1",
+            "execution_policy_capability_boundary_v1",
         ],
+    }
+
+
+
+def capability_declarations() -> list[dict[str, Any]]:
+    return [
+        {
+            "capability_id": LOCAL_EXECUTION_CAPABILITY_ID,
+            "worker": LOCAL_EXECUTION_LOOP_NAME,
+            "action": "dispatch",
+            "status": "local-only",
+            "allowed": True,
+            "reason_code": "LOCAL_ONLY_ALLOWED",
+            "description": "Allow deterministic local execution-loop dispatch only.",
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+            "external_worker_calls": False,
+        },
+        {
+            "capability_id": "local.worker_result.intake",
+            "worker": LOCAL_WORKER_ADAPTER_ID,
+            "action": "result-intake",
+            "status": "local-only",
+            "allowed": True,
+            "reason_code": "LOCAL_ONLY_ALLOWED",
+            "description": "Allow deterministic local worker-result intake only.",
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+            "external_worker_calls": False,
+        },
+        {
+            "capability_id": "external.provider.execute",
+            "worker": "external_provider",
+            "action": "execute",
+            "status": "forbidden",
+            "allowed": False,
+            "reason_code": "FORBIDDEN_CAPABILITY",
+            "description": "Deny real provider execution in framework-runtime local mode.",
+            "provider_calls": True,
+            "network_calls": True,
+            "env_reads": False,
+            "external_worker_calls": True,
+        },
+        {
+            "capability_id": "real.codex.execute",
+            "worker": "codex",
+            "action": "execute",
+            "status": "forbidden",
+            "allowed": False,
+            "reason_code": "FORBIDDEN_CAPABILITY",
+            "description": "Deny real Codex worker execution in framework-runtime local mode.",
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+            "external_worker_calls": True,
+        },
+        {
+            "capability_id": "real.claude.execute",
+            "worker": "claude",
+            "action": "execute",
+            "status": "forbidden",
+            "allowed": False,
+            "reason_code": "FORBIDDEN_CAPABILITY",
+            "description": "Deny real Claude worker execution in framework-runtime local mode.",
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+            "external_worker_calls": True,
+        },
+    ]
+
+
+def capability_contract_payload() -> dict[str, Any]:
+    capabilities = capability_declarations()
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_capability_contract",
+        "contract_version": "execution_policy_capability_boundary_v1",
+        "capabilities": capabilities,
+        "allowed_capabilities": [item for item in capabilities if item["allowed"]],
+        "forbidden_capabilities": [item for item in capabilities if not item["allowed"]],
+        "local_static": True,
+        "deterministic": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def capability_by_id(capability_id: str) -> dict[str, Any] | None:
+    for item in capability_declarations():
+        if item["capability_id"] == capability_id:
+            return item
+    return None
+
+
+def policy_decision_payload(capability_id: str, worker: str, action: str, subject: dict[str, str] | None = None) -> dict[str, Any]:
+    capability_id = str(capability_id or "")
+    worker = str(worker or "")
+    action = str(action or "")
+    declaration = capability_by_id(capability_id)
+    if declaration is None:
+        allowed = False
+        status = "unknown"
+        reason_code = "UNKNOWN_CAPABILITY"
+        reason = f"Capability is not declared: {capability_id}"
+    elif declaration["status"] == "forbidden" or not declaration["allowed"]:
+        allowed = False
+        status = str(declaration["status"])
+        reason_code = str(declaration["reason_code"])
+        reason = f"Capability is forbidden: {capability_id}"
+    elif declaration["worker"] != worker or declaration["action"] != action:
+        allowed = False
+        status = str(declaration["status"])
+        reason_code = "WORKER_ACTION_MISMATCH"
+        reason = f"Capability {capability_id} does not allow worker/action {worker}/{action}"
+    else:
+        allowed = True
+        status = str(declaration["status"])
+        reason_code = str(declaration["reason_code"])
+        reason = f"Capability allowed: {capability_id}"
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_policy_decision",
+        "contract_version": "execution_policy_capability_boundary_v1",
+        "capability_id": capability_id,
+        "worker": worker,
+        "action": action,
+        "allowed": allowed,
+        "status": status,
+        "reason_code": reason_code,
+        "reason": reason,
+        "subject": dict(sorted((subject or {}).items())),
+        "capability": declaration,
+        "local_static": True,
+        "deterministic": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+    }
+
+
+def policy_check_payload(capability_id: str, worker: str | None = None, action: str | None = None) -> dict[str, Any]:
+    declaration = capability_by_id(str(capability_id or ""))
+    decision = policy_decision_payload(
+        capability_id,
+        worker or str(declaration.get("worker", "")) if declaration else worker or "unknown",
+        action or str(declaration.get("action", "")) if declaration else action or "unknown",
+        None,
+    )
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_policy_check",
+        "decision": decision,
+        "capability_contract": capability_contract_payload(),
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
     }
 
 
@@ -711,6 +883,804 @@ def intake_worker_result_payload(root: Path, workspace_id: str, run_id: str, job
     }
 
 
+
+def orchestration_id_for_goal(goal_id: str) -> str:
+    return validate_runtime_id(goal_id, "orchestration_id")
+
+
+def orchestrations_dir(root: Path, workspace_id: str, run_id: str) -> Path:
+    return ensure_runtime_run(root, workspace_id, run_id) / "orchestrations"
+
+
+def orchestration_state_path(root: Path, workspace_id: str, run_id: str, goal_id: str) -> Path:
+    orchestration_id = orchestration_id_for_goal(goal_id)
+    return orchestrations_dir(root, workspace_id, run_id) / f"{orchestration_id}.json"
+
+
+def orchestration_state_ref(workspace_id: str, run_id: str, goal_id: str) -> str:
+    orchestration_id = orchestration_id_for_goal(goal_id)
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/orchestrations/{orchestration_id}.json"
+
+
+def task_graph_ref(workspace_id: str, goal_id: str) -> str:
+    return f".ai/workspaces/{workspace_id}/goals/{goal_id}/task_graph.json"
+
+
+def orchestration_job_ref(workspace_id: str, run_id: str, job_id: str) -> str:
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/jobs/{job_id}.json"
+
+
+def orchestration_transition_entry(sequence: int, action: str, from_status: str | None, to_status: str, reason: str) -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "stamp": f"orchestration-transition-{sequence:04d}",
+        "action": action,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+    }
+
+
+def append_orchestration_transition(payload: dict[str, Any], action: str, new_status: str, reason: str) -> dict[str, Any]:
+    old_status = str(payload.get("status", "")) or None
+    log = list(payload.get("transition_log", []))
+    transition = orchestration_transition_entry(len(log) + 1, action, old_status, new_status, reason)
+    log.append(transition)
+    payload["status"] = new_status
+    payload["updated_at"] = transition["stamp"]
+    payload["transition_log"] = log
+    return payload
+
+
+def orchestration_ordered_tasks(graph: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    tasks = list(graph.get("tasks", []))
+    by_id = {str(task["task_id"]): task for task in tasks}
+    accepted = {str(task["task_id"]) for task in tasks if str(task.get("status", "created")) == "accepted"}
+    remaining = {str(task["task_id"]) for task in tasks if str(task.get("status", "created")) == "created"}
+    blocked: list[dict[str, Any]] = []
+    for task in tasks:
+        status = str(task.get("status", "created"))
+        if status not in {"created", "accepted"}:
+            blocked.append({"task_id": str(task["task_id"]), "reasons": [f"status:{status}"]})
+
+    ordered: list[dict[str, Any]] = []
+    while remaining:
+        ready_batch: list[dict[str, Any]] = []
+        for task in tasks:
+            task_id = str(task["task_id"])
+            if task_id not in remaining:
+                continue
+            if all(str(dependency) in accepted for dependency in task.get("depends_on", [])):
+                ready_batch.append(task)
+        if not ready_batch:
+            for task in tasks:
+                task_id = str(task["task_id"])
+                if task_id not in remaining:
+                    continue
+                reasons: list[str] = []
+                for dependency in task.get("depends_on", []):
+                    dependency_id = str(dependency)
+                    if dependency_id not in by_id:
+                        reasons.append(f"unknown_dependency:{dependency_id}")
+                    elif dependency_id not in accepted:
+                        reasons.append(f"dependency_not_accepted:{dependency_id}")
+                blocked.append({"task_id": task_id, "reasons": reasons or ["not_ready"]})
+            break
+        for task in ready_batch:
+            task_id = str(task["task_id"])
+            ordered.append(dict(task))
+            accepted.add(task_id)
+            remaining.remove(task_id)
+    return ordered, blocked
+
+
+def orchestration_dispatch_for_task(workspace_id: str, run_id: str, goal_id: str, task: dict[str, Any], sequence: int) -> dict[str, Any]:
+    task_id = validate_runtime_id(str(task["task_id"]), "task_id")
+    job_id = task_id
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_local_task_dispatch",
+        "sequence": sequence,
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "job_id": job_id,
+        "title": str(task.get("title", task_id)),
+        "role": str(task.get("role", "implementation_agent")),
+        "depends_on": list(task.get("depends_on", [])),
+        "required_evidence": list(task.get("required_evidence", [])),
+        "worker_adapter": LOCAL_WORKER_ADAPTER_ID,
+        "job_ref": orchestration_job_ref(workspace_id, run_id, job_id),
+        "worker_result_ref": worker_result_ref(workspace_id, run_id, job_id),
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+    }
+
+
+def orchestration_plan_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    ensure_runtime_run(root, workspace_id, run_id)
+    graph = load_runtime_graph(root, workspace_id, goal_id)
+    ordered, blocked = orchestration_ordered_tasks(graph)
+    dispatches = [
+        orchestration_dispatch_for_task(workspace_id, run_id, goal_id, task, index)
+        for index, task in enumerate(ordered, start=1)
+    ]
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_plan",
+        "contract_version": "local_orchestration_contract_v1",
+        "workspace_id": validate_runtime_id(workspace_id, "workspace_id"),
+        "run_id": validate_runtime_id(run_id, "run_id"),
+        "goal_id": validate_runtime_id(goal_id, "goal_id"),
+        "orchestration_id": orchestration_id_for_goal(goal_id),
+        "request": {
+            "kind": "agentoffice.framework_runtime_orchestration_request",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "task_graph_ref": task_graph_ref(workspace_id, goal_id),
+            "mode": "local_static",
+        },
+        "dispatch_plan": dispatches,
+        "blocked_tasks": blocked,
+        "valid": not blocked,
+        "status_model": ["planned", "running", "succeeded", "blocked", "failed"],
+        "ordering_contract": "task graph order; dependencies must be accepted before dependent dispatch",
+        "local_static": True,
+        "deterministic": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+    }
+
+
+def read_orchestration_state_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    path = orchestration_state_path(root, workspace_id, run_id, goal_id)
+    if not path.exists():
+        raise FrameworkRuntimeError(f"Orchestration state not found: {goal_id}")
+    return read_runtime_json_child(path.parent, path)
+
+
+def orchestration_show_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    path = orchestration_state_path(root, workspace_id, run_id, goal_id)
+    if path.exists():
+        state = read_runtime_json_child(path.parent, path)
+        persisted = True
+    else:
+        state = orchestration_plan_payload(root, workspace_id, run_id, goal_id)
+        persisted = False
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_show",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "persisted": persisted,
+        "orchestration": state,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+    }
+
+
+def orchestration_validate_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    plan = orchestration_plan_payload(root, workspace_id, run_id, goal_id)
+    errors = [
+        f"{item['task_id']}:{','.join(item['reasons'])}"
+        for item in plan["blocked_tasks"]
+    ]
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_validation",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "valid": not errors,
+        "errors": errors,
+        "dispatch_count": len(plan["dispatch_plan"]),
+        "plan": plan,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def initial_orchestration_state(plan: dict[str, Any]) -> dict[str, Any]:
+    transition = orchestration_transition_entry(1, "plan", None, "planned", "deterministic orchestration plan prepared")
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_state",
+        "contract_version": "local_orchestration_contract_v1",
+        "workspace_id": plan["workspace_id"],
+        "run_id": plan["run_id"],
+        "goal_id": plan["goal_id"],
+        "orchestration_id": plan["orchestration_id"],
+        "status": "planned",
+        "created_at": transition["stamp"],
+        "updated_at": transition["stamp"],
+        "request": plan["request"],
+        "plan": plan,
+        "tasks": [],
+        "evidence_refs": [
+            task_graph_ref(plan["workspace_id"], plan["goal_id"]),
+            orchestration_state_ref(plan["workspace_id"], plan["run_id"], plan["goal_id"]),
+        ],
+        "transition_log": [transition],
+        "local_static": True,
+        "deterministic": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+        "daemon_started": False,
+        "background_worker_started": False,
+    }
+
+
+def orchestration_run_local_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    state_path = orchestration_state_path(root, workspace_id, run_id, goal_id)
+    if state_path.exists():
+        state = read_runtime_json_child(state_path.parent, state_path)
+        if state.get("status") in {"succeeded", "blocked", "failed"}:
+            return {
+                "schema_version": 1,
+                "kind": "agentoffice.framework_runtime_orchestration_run_local",
+                "workspace_id": workspace_id,
+                "run_id": run_id,
+                "goal_id": goal_id,
+                "progressed": False,
+                "reason": f"orchestration already {state.get('status')}",
+                "orchestration": state,
+                "local_static": True,
+                "provider_calls": False,
+                "network_calls": False,
+                "env_reads": False,
+            }
+        raise FrameworkRuntimeError(f"Orchestration state is not terminal: {state.get('status')}")
+
+    plan = orchestration_plan_payload(root, workspace_id, run_id, goal_id)
+    state = initial_orchestration_state(plan)
+    append_runtime_event(root, workspace_id, run_id, "orchestration.planned", LOCAL_ORCHESTRATOR_NAME)
+    if not plan["valid"]:
+        append_orchestration_transition(state, "block", "blocked", "orchestration plan has blocked tasks")
+        write_json_atomic(state_path, state)
+        append_runtime_event(root, workspace_id, run_id, "orchestration.blocked", LOCAL_ORCHESTRATOR_NAME)
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_orchestration_run_local",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "progressed": False,
+            "reason": "orchestration plan blocked",
+            "orchestration": state,
+            "local_static": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+        }
+
+    append_orchestration_transition(state, "start", "running", "local orchestration run started")
+    write_json_atomic(state_path, state)
+    append_runtime_event(root, workspace_id, run_id, "orchestration.started", LOCAL_ORCHESTRATOR_NAME)
+    for dispatch in plan["dispatch_plan"]:
+        task_id = str(dispatch["task_id"])
+        job_id = str(dispatch["job_id"])
+        job = create_job_payload(
+            root,
+            workspace_id,
+            run_id,
+            job_id,
+            f"orchestration task {task_id}: {dispatch['title']}",
+            {
+                "dispatch_sequence": str(dispatch["sequence"]),
+                "goal_id": goal_id,
+                "orchestration_id": plan["orchestration_id"],
+                "task_id": task_id,
+            },
+            [task_graph_ref(workspace_id, goal_id), orchestration_state_ref(workspace_id, run_id, goal_id)],
+        )
+        append_runtime_event(root, workspace_id, run_id, "orchestration.task_dispatched", LOCAL_ORCHESTRATOR_NAME)
+        intake = intake_worker_result_payload(
+            root,
+            workspace_id,
+            run_id,
+            job_id,
+            LOCAL_WORKER_ADAPTER_ID,
+            "succeeded",
+            f"local orchestration completed task {task_id}: {dispatch['title']}",
+            [orchestration_state_ref(workspace_id, run_id, goal_id)],
+        )
+        task = set_task_status(root, workspace_id, run_id, goal_id, task_id, "accepted")
+        append_runtime_event(root, workspace_id, run_id, "orchestration.task_succeeded", LOCAL_ORCHESTRATOR_NAME)
+        state["tasks"].append(
+            {
+                "sequence": dispatch["sequence"],
+                "task_id": task_id,
+                "job_id": job_id,
+                "status": "succeeded",
+                "task_status": task["status"],
+                "job_ref": orchestration_job_ref(workspace_id, run_id, job_id),
+                "worker_result_ref": worker_result_ref(workspace_id, run_id, job_id),
+                "transition_count": len(intake["job"]["transition_log"]),
+            }
+        )
+        state["evidence_refs"] = normalize_evidence_refs(
+            list(state["evidence_refs"])
+            + [orchestration_job_ref(workspace_id, run_id, job_id), worker_result_ref(workspace_id, run_id, job_id), executor_event_log_ref(workspace_id, run_id)]
+            + list(job.get("evidence_refs", []))
+            + list(intake["worker_result"].get("evidence_refs", []))
+        )
+        write_json_atomic(state_path, state)
+
+    append_orchestration_transition(state, "succeed", "succeeded", "local orchestration run completed")
+    write_json_atomic(state_path, state)
+    append_runtime_event(root, workspace_id, run_id, "orchestration.succeeded", LOCAL_ORCHESTRATOR_NAME)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_run_local",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "progressed": True,
+        "reason": "local orchestration completed",
+        "orchestration": state,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+
+def execution_loops_dir(root: Path, workspace_id: str, run_id: str) -> Path:
+    return ensure_runtime_run(root, workspace_id, run_id) / "execution_loops"
+
+
+def execution_loop_state_path(root: Path, workspace_id: str, run_id: str, goal_id: str) -> Path:
+    execution_id = orchestration_id_for_goal(goal_id)
+    return execution_loops_dir(root, workspace_id, run_id) / f"{execution_id}.json"
+
+
+def execution_loop_state_ref(workspace_id: str, run_id: str, goal_id: str) -> str:
+    execution_id = orchestration_id_for_goal(goal_id)
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/execution_loops/{execution_id}.json"
+
+
+
+def policy_decisions_dir(root: Path, workspace_id: str, run_id: str) -> Path:
+    return ensure_runtime_run(root, workspace_id, run_id) / "policy_decisions"
+
+
+def policy_decision_path(root: Path, workspace_id: str, run_id: str, job_id: str) -> Path:
+    job_id = validate_runtime_id(job_id, "job_id")
+    return policy_decisions_dir(root, workspace_id, run_id) / f"{job_id}.json"
+
+
+def policy_decision_ref(workspace_id: str, run_id: str, job_id: str) -> str:
+    job_id = validate_runtime_id(job_id, "job_id")
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/policy_decisions/{job_id}.json"
+
+
+def write_policy_decision(root: Path, workspace_id: str, run_id: str, job_id: str, decision: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(decision)
+    payload["job_id"] = validate_runtime_id(job_id, "job_id")
+    payload["decision_ref"] = policy_decision_ref(workspace_id, run_id, job_id)
+    write_json_atomic(policy_decision_path(root, workspace_id, run_id, job_id), payload)
+    return payload
+
+
+def fail_job_for_policy_denial(root: Path, workspace_id: str, run_id: str, goal_id: str, job_id: str, task_id: str, title: str, state: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    target = job_path(root, workspace_id, run_id, job_id)
+    decision_ref = policy_decision_ref(workspace_id, run_id, job_id)
+    if target.exists():
+        job = read_job_payload(root, workspace_id, run_id, job_id)
+    else:
+        job = create_job_payload(
+            root,
+            workspace_id,
+            run_id,
+            job_id,
+            f"policy denied execution loop task {task_id}: {title}",
+            {
+                "dispatch_sequence": str(state.get("cursor", 0) + 1),
+                "execution_id": str(state["execution_id"]),
+                "goal_id": goal_id,
+                "task_id": task_id,
+                "policy_decision": "denied",
+                "policy_reason_code": str(decision["reason_code"]),
+                "capability_id": str(decision["capability_id"]),
+            },
+            [task_graph_ref(workspace_id, goal_id), execution_loop_state_ref(workspace_id, run_id, goal_id), decision_ref],
+        )
+    metadata = normalize_job_metadata(
+        dict(job.get("metadata", {}))
+        | {
+            "policy_decision": "denied",
+            "policy_reason_code": str(decision["reason_code"]),
+            "capability_id": str(decision["capability_id"]),
+        }
+    )
+    job["metadata"] = metadata
+    job["policy_decision"] = decision
+    job["evidence_refs"] = normalize_evidence_refs(list(job.get("evidence_refs", [])) + [decision_ref, executor_event_log_ref(workspace_id, run_id)])
+    if str(job.get("status")) not in TERMINAL_JOB_STATUSES:
+        append_job_transition(job, "policy_denied", "failed", str(decision["reason"]))
+    write_job_payload(root, workspace_id, run_id, job)
+    return job
+
+
+def execution_loop_transition_entry(sequence: int, action: str, from_status: str | None, to_status: str, reason: str) -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "stamp": f"execution-loop-transition-{sequence:04d}",
+        "action": action,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+    }
+
+
+def append_execution_loop_transition(payload: dict[str, Any], action: str, new_status: str, reason: str) -> dict[str, Any]:
+    old_status = str(payload.get("status", "")) or None
+    log = list(payload.get("transition_log", []))
+    transition = execution_loop_transition_entry(len(log) + 1, action, old_status, new_status, reason)
+    log.append(transition)
+    payload["status"] = new_status
+    payload["updated_at"] = transition["stamp"]
+    payload["transition_log"] = log
+    return payload
+
+
+def initial_execution_loop_state(plan: dict[str, Any]) -> dict[str, Any]:
+    transition = execution_loop_transition_entry(1, "plan", None, "planned", "deterministic execution loop planned")
+    dispatches = [
+        {
+            "sequence": dispatch["sequence"],
+            "task_id": dispatch["task_id"],
+            "job_id": dispatch["job_id"],
+            "status": "pending",
+            "job_ref": dispatch["job_ref"],
+            "worker_result_ref": dispatch["worker_result_ref"],
+        }
+        for dispatch in plan["dispatch_plan"]
+    ]
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_execution_loop_state",
+        "contract_version": "local_execution_loop_v1",
+        "workspace_id": plan["workspace_id"],
+        "run_id": plan["run_id"],
+        "goal_id": plan["goal_id"],
+        "execution_id": plan["orchestration_id"],
+        "orchestration_id": plan["orchestration_id"],
+        "status": "planned",
+        "created_at": transition["stamp"],
+        "updated_at": transition["stamp"],
+        "cursor": 0,
+        "dispatch_count": len(dispatches),
+        "completed_count": 0,
+        "plan": plan,
+        "dispatches": dispatches,
+        "evidence_refs": [
+            task_graph_ref(plan["workspace_id"], plan["goal_id"]),
+            execution_loop_state_ref(plan["workspace_id"], plan["run_id"], plan["goal_id"]),
+        ],
+        "transition_log": [transition],
+        "local_static": True,
+        "deterministic": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+        "daemon_started": False,
+        "background_worker_started": False,
+    }
+
+
+def read_execution_loop_state_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    path = execution_loop_state_path(root, workspace_id, run_id, goal_id)
+    if not path.exists():
+        raise FrameworkRuntimeError(f"Execution loop state not found: {goal_id}")
+    return read_runtime_json_child(path.parent, path)
+
+
+def write_execution_loop_state(root: Path, workspace_id: str, run_id: str, goal_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    write_json_atomic(execution_loop_state_path(root, workspace_id, run_id, goal_id), state)
+    return state
+
+
+def load_or_create_execution_loop_state(root: Path, workspace_id: str, run_id: str, goal_id: str) -> tuple[dict[str, Any], bool]:
+    path = execution_loop_state_path(root, workspace_id, run_id, goal_id)
+    if path.exists():
+        return read_runtime_json_child(path.parent, path), False
+    plan = orchestration_plan_payload(root, workspace_id, run_id, goal_id)
+    state = initial_execution_loop_state(plan)
+    append_runtime_event(root, workspace_id, run_id, "execution_loop.planned", LOCAL_EXECUTION_LOOP_NAME)
+    if not plan["valid"]:
+        append_execution_loop_transition(state, "block", "blocked", "execution loop plan has blocked tasks")
+        write_execution_loop_state(root, workspace_id, run_id, goal_id, state)
+        append_runtime_event(root, workspace_id, run_id, "execution_loop.blocked", LOCAL_EXECUTION_LOOP_NAME)
+        return state, True
+    write_execution_loop_state(root, workspace_id, run_id, goal_id, state)
+    return state, True
+
+
+def execution_loop_status_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    path = execution_loop_state_path(root, workspace_id, run_id, goal_id)
+    if path.exists():
+        state = read_runtime_json_child(path.parent, path)
+        persisted = True
+    else:
+        plan = orchestration_plan_payload(root, workspace_id, run_id, goal_id)
+        state = initial_execution_loop_state(plan)
+        if not plan["valid"]:
+            append_execution_loop_transition(state, "block", "blocked", "execution loop plan has blocked tasks")
+        persisted = False
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_execution_loop_status",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "persisted": persisted,
+        "execution_loop": state,
+        "complete": state.get("status") == "succeeded",
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def execution_loop_next_dispatch(state: dict[str, Any]) -> dict[str, Any] | None:
+    for dispatch in state.get("dispatches", []):
+        if dispatch.get("status") == "pending":
+            return dispatch
+    return None
+
+
+def execution_loop_dispatch_plan_item(state: dict[str, Any], task_id: str) -> dict[str, Any]:
+    for dispatch in state["plan"]["dispatch_plan"]:
+        if str(dispatch["task_id"]) == task_id:
+            return dispatch
+    raise FrameworkRuntimeError(f"Execution loop dispatch not found for task: {task_id}")
+
+
+def execution_loop_run_once_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, capability_id: str = LOCAL_EXECUTION_CAPABILITY_ID) -> dict[str, Any]:
+    root = safe_root(root)
+    state, created = load_or_create_execution_loop_state(root, workspace_id, run_id, goal_id)
+    if state.get("status") in {"succeeded", "blocked", "failed"}:
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_execution_loop_run_once",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "progressed": False,
+            "created": created,
+            "reason": f"execution loop already {state.get('status')}",
+            "execution_loop": state,
+            "dispatch": None,
+            "local_static": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+        }
+    if state.get("status") == "planned":
+        append_execution_loop_transition(state, "start", "running", "local execution loop started")
+        write_execution_loop_state(root, workspace_id, run_id, goal_id, state)
+        append_runtime_event(root, workspace_id, run_id, "execution_loop.started", LOCAL_EXECUTION_LOOP_NAME)
+    if state.get("status") != "running":
+        raise FrameworkRuntimeError(f"Execution loop state is not runnable: {state.get('status')}")
+
+    dispatch = execution_loop_next_dispatch(state)
+    if dispatch is None:
+        append_execution_loop_transition(state, "succeed", "succeeded", "local execution loop completed")
+        write_execution_loop_state(root, workspace_id, run_id, goal_id, state)
+        append_runtime_event(root, workspace_id, run_id, "execution_loop.succeeded", LOCAL_EXECUTION_LOOP_NAME)
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_execution_loop_run_once",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "progressed": False,
+            "created": created,
+            "reason": "execution loop completed",
+            "execution_loop": state,
+            "dispatch": None,
+            "local_static": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+        }
+
+    task_id = str(dispatch["task_id"])
+    job_id = str(dispatch["job_id"])
+    plan_item = execution_loop_dispatch_plan_item(state, task_id)
+    decision = write_policy_decision(
+        root,
+        workspace_id,
+        run_id,
+        job_id,
+        policy_decision_payload(
+            capability_id,
+            LOCAL_EXECUTION_LOOP_NAME,
+            "dispatch",
+            {"workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "task_id": task_id, "job_id": job_id},
+        ),
+    )
+    dispatch["policy_decision"] = {
+        "allowed": decision["allowed"],
+        "reason_code": decision["reason_code"],
+        "capability_id": decision["capability_id"],
+        "decision_ref": decision["decision_ref"],
+    }
+    if not decision["allowed"]:
+        append_runtime_event(root, workspace_id, run_id, "policy.denied", LOCAL_EXECUTION_LOOP_NAME)
+        job = fail_job_for_policy_denial(root, workspace_id, run_id, goal_id, job_id, task_id, str(plan_item["title"]), state, decision)
+        task = set_task_status(root, workspace_id, run_id, goal_id, task_id, "rejected")
+        dispatch["status"] = "policy_denied"
+        dispatch["task_status"] = task["status"]
+        dispatch["job_status"] = job["status"]
+        state["cursor"] = int(dispatch["sequence"])
+        state["evidence_refs"] = normalize_evidence_refs(
+            list(state["evidence_refs"])
+            + [policy_decision_ref(workspace_id, run_id, job_id), orchestration_job_ref(workspace_id, run_id, job_id), executor_event_log_ref(workspace_id, run_id)]
+            + list(job.get("evidence_refs", []))
+        )
+        append_execution_loop_transition(state, "policy_denied", "blocked", str(decision["reason"]))
+        write_execution_loop_state(root, workspace_id, run_id, goal_id, state)
+        append_runtime_event(root, workspace_id, run_id, "execution_loop.policy_denied", LOCAL_EXECUTION_LOOP_NAME)
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_execution_loop_run_once",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "progressed": False,
+            "created": created,
+            "reason": str(decision["reason"]),
+            "execution_loop": state,
+            "dispatch": dispatch,
+            "job": job,
+            "worker_result": None,
+            "policy_decision": decision,
+            "local_static": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+            "external_worker_calls": False,
+        }
+    append_runtime_event(root, workspace_id, run_id, "policy.allowed", LOCAL_EXECUTION_LOOP_NAME)
+    job_path_target = job_path(root, workspace_id, run_id, job_id)
+    if job_path_target.exists():
+        job = read_job_payload(root, workspace_id, run_id, job_id)
+    else:
+        job = create_job_payload(
+            root,
+            workspace_id,
+            run_id,
+            job_id,
+            f"execution loop task {task_id}: {plan_item['title']}",
+            {
+                "dispatch_sequence": str(dispatch["sequence"]),
+                "execution_id": str(state["execution_id"]),
+                "goal_id": goal_id,
+                "task_id": task_id,
+            },
+            [task_graph_ref(workspace_id, goal_id), execution_loop_state_ref(workspace_id, run_id, goal_id), policy_decision_ref(workspace_id, run_id, job_id)],
+        )
+    append_runtime_event(root, workspace_id, run_id, "execution_loop.task_dispatched", LOCAL_EXECUTION_LOOP_NAME)
+    if worker_result_path(root, workspace_id, run_id, job_id).exists():
+        worker_result = read_worker_result_payload(root, workspace_id, run_id, job_id)
+    else:
+        intake = intake_worker_result_payload(
+            root,
+            workspace_id,
+            run_id,
+            job_id,
+            LOCAL_WORKER_ADAPTER_ID,
+            "succeeded",
+            f"local execution loop completed task {task_id}: {plan_item['title']}",
+            [execution_loop_state_ref(workspace_id, run_id, goal_id)],
+        )
+        job = intake["job"]
+        worker_result = intake["worker_result"]
+    task = set_task_status(root, workspace_id, run_id, goal_id, task_id, "accepted")
+    append_runtime_event(root, workspace_id, run_id, "execution_loop.task_succeeded", LOCAL_EXECUTION_LOOP_NAME)
+    dispatch["status"] = "succeeded"
+    dispatch["task_status"] = task["status"]
+    dispatch["job_status"] = job["status"]
+    dispatch["worker_result_status"] = worker_result["status"]
+    dispatch["policy_decision"]["allowed"] = True
+    state["cursor"] = int(dispatch["sequence"])
+    state["completed_count"] = sum(1 for item in state["dispatches"] if item.get("status") == "succeeded")
+    state["evidence_refs"] = normalize_evidence_refs(
+        list(state["evidence_refs"])
+        + [policy_decision_ref(workspace_id, run_id, job_id), orchestration_job_ref(workspace_id, run_id, job_id), worker_result_ref(workspace_id, run_id, job_id), executor_event_log_ref(workspace_id, run_id)]
+        + list(job.get("evidence_refs", []))
+        + list(worker_result.get("evidence_refs", []))
+    )
+    if state["completed_count"] == state["dispatch_count"]:
+        append_execution_loop_transition(state, "succeed", "succeeded", "local execution loop completed")
+        append_runtime_event(root, workspace_id, run_id, "execution_loop.succeeded", LOCAL_EXECUTION_LOOP_NAME)
+    write_execution_loop_state(root, workspace_id, run_id, goal_id, state)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_execution_loop_run_once",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "progressed": True,
+        "created": created,
+        "reason": "local execution loop progressed one dispatch",
+        "execution_loop": state,
+        "dispatch": dispatch,
+        "job": job,
+        "worker_result": worker_result,
+        "policy_decision": decision,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def execution_loop_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, max_iterations: int = 100, capability_id: str = LOCAL_EXECUTION_CAPABILITY_ID) -> dict[str, Any]:
+    if max_iterations < 1:
+        raise FrameworkRuntimeError("Execution loop max iterations must be at least 1.")
+    actions: list[dict[str, Any]] = []
+    for _ in range(max_iterations):
+        action = execution_loop_run_once_payload(root, workspace_id, run_id, goal_id, capability_id)
+        if not action["progressed"]:
+            break
+        actions.append(action)
+        if action["execution_loop"].get("status") in {"succeeded", "blocked", "failed"}:
+            break
+    status = execution_loop_status_payload(root, workspace_id, run_id, goal_id)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_execution_loop",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "actions": actions,
+        "action_count": len(actions),
+        "complete": status["complete"],
+        "status": status,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
 def job_error_payload(message: str, action: str | None = None) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -882,6 +1852,9 @@ def run_status_payload(root: Path, workspace_id: str, run_id: str, goal_id: str)
         "jobs": list_json_objects(run_root / "jobs"),
         "executor_results": list_json_objects(run_root / "executor_results"),
         "worker_results": list_json_objects(run_root / "worker_results"),
+        "orchestrations": list_json_objects(run_root / "orchestrations"),
+        "execution_loops": list_json_objects(run_root / "execution_loops"),
+        "policy_decisions": list_json_objects(run_root / "policy_decisions"),
         "events": events,
         "complete": not incomplete,
     }
@@ -1043,6 +2016,7 @@ def evidence_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, o
         "status": status,
         "replay": replay,
         "worker_contract": worker_contract_payload(),
+        "capability_contract": capability_contract_payload(),
         "safety": {
             "local_stub": True,
             "provider_calls": False,
@@ -1089,6 +2063,9 @@ def format_evidence_bundle_text(bundle: dict[str, Any]) -> str:
         f"jobs: {len(status['jobs'])}",
         f"executor_results: {len(status['executor_results'])}",
         f"worker_results: {len(status['worker_results'])}",
+        f"orchestrations: {len(status['orchestrations'])}",
+        f"execution_loops: {len(status['execution_loops'])}",
+        f"policy_decisions: {len(status['policy_decisions'])}",
         f"events: {replay['event_count']}",
         "local stub / no external provider: true",
     ]
@@ -1097,6 +2074,14 @@ def format_evidence_bundle_text(bundle: dict[str, Any]) -> str:
 
 def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
     kind = payload.get("kind")
+    if kind == "agentoffice.framework_runtime_capability_contract":
+        return "\n".join(
+            f"capability {item['capability_id']} worker={item['worker']} action={item['action']} status={item['status']} allowed={str(item['allowed']).lower()}"
+            for item in payload["capabilities"]
+        )
+    if kind == "agentoffice.framework_runtime_policy_check":
+        decision = payload["decision"]
+        return f"policy check capability={decision['capability_id']} allowed={str(decision['allowed']).lower()} code={decision['reason_code']} local_static=true"
     if kind == "agentoffice.framework_runtime_worker_contract":
         return "\n".join(
             f"worker {adapter['name']} mode={adapter['mode']} provider_calls={adapter['provider_calls']} network_calls={adapter['network_calls']}"
@@ -1147,6 +2132,29 @@ def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
         return f"executor loop {payload['workspace_id']}/{payload['run_id']} actions={payload['action_count']} complete={str(payload['complete']).lower()} local_stub=true"
     if kind == "agentoffice.framework_runtime_executor_status":
         return f"executor status {payload['workspace_id']}/{payload['run_id']} jobs={payload['job_count']} pending={payload['pending_count']} running={payload['running_count']} succeeded={payload['succeeded_count']} failed={payload['failed_count']} cancelled={payload['cancelled_count']} local_stub=true"
+    if kind == "agentoffice.framework_runtime_orchestration_plan":
+        return f"orchestration plan {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} dispatches={len(payload['dispatch_plan'])} valid={str(payload['valid']).lower()} local_static=true"
+    if kind == "agentoffice.framework_runtime_orchestration_show":
+        orchestration = payload["orchestration"]
+        status = orchestration.get("status", "planned")
+        return f"orchestration show {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} persisted={str(payload['persisted']).lower()} status={status} local_static=true"
+    if kind == "agentoffice.framework_runtime_orchestration_validation":
+        return f"orchestration validate {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} valid={str(payload['valid']).lower()} errors={len(payload['errors'])} dispatches={payload['dispatch_count']} local_static=true"
+    if kind == "agentoffice.framework_runtime_orchestration_run_local":
+        orchestration = payload["orchestration"]
+        return f"orchestration run-local {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} progressed={str(payload['progressed']).lower()} status={orchestration['status']} tasks={len(orchestration.get('tasks', []))} local_static=true"
+    if kind == "agentoffice.framework_runtime_execution_loop_run_once":
+        if not payload["progressed"]:
+            return f"execution run-once {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} progressed=false reason={payload['reason']} local_static=true"
+        dispatch = payload["dispatch"]
+        state = payload["execution_loop"]
+        return f"execution run-once {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} task={dispatch['task_id']} status={state['status']} completed={state['completed_count']}/{state['dispatch_count']} local_static=true"
+    if kind == "agentoffice.framework_runtime_execution_loop":
+        state = payload["status"]["execution_loop"]
+        return f"execution loop {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} actions={payload['action_count']} status={state['status']} complete={str(payload['complete']).lower()} local_static=true"
+    if kind == "agentoffice.framework_runtime_execution_loop_status":
+        state = payload["execution_loop"]
+        return f"execution status {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} persisted={str(payload['persisted']).lower()} status={state['status']} completed={state['completed_count']}/{state['dispatch_count']} local_static=true"
     if kind == "agentoffice.framework_runtime_worker_result_intake":
         result = payload["worker_result"]
         return f"worker result-intake {payload['workspace_id']}/{payload['run_id']} job={result['job_id']} status={result['status']} adapter={result['adapter_id']} local_static=true"
