@@ -37,6 +37,7 @@ LOCAL_EXECUTOR_NAME = "local_executor_stub"
 LOCAL_WORKER_NAME = "local_echo_worker"
 REVIEW_STUB_NAME = "local_review_stub"
 JUDGE_STUB_NAME = "local_judge_stub"
+LOCAL_ORCHESTRATOR_NAME = "local_orchestrator_stub"
 
 
 class FrameworkRuntimeError(ValueError):
@@ -71,6 +72,7 @@ def runtime_contract_status() -> dict[str, Any]:
             "local_executor_loop_v1",
             "worker_adapter_contract",
             "deterministic_worker_result_intake",
+            "local_orchestration_contract_v1",
         ],
     }
 
@@ -711,6 +713,373 @@ def intake_worker_result_payload(root: Path, workspace_id: str, run_id: str, job
     }
 
 
+
+def orchestration_id_for_goal(goal_id: str) -> str:
+    return validate_runtime_id(goal_id, "orchestration_id")
+
+
+def orchestrations_dir(root: Path, workspace_id: str, run_id: str) -> Path:
+    return ensure_runtime_run(root, workspace_id, run_id) / "orchestrations"
+
+
+def orchestration_state_path(root: Path, workspace_id: str, run_id: str, goal_id: str) -> Path:
+    orchestration_id = orchestration_id_for_goal(goal_id)
+    return orchestrations_dir(root, workspace_id, run_id) / f"{orchestration_id}.json"
+
+
+def orchestration_state_ref(workspace_id: str, run_id: str, goal_id: str) -> str:
+    orchestration_id = orchestration_id_for_goal(goal_id)
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/orchestrations/{orchestration_id}.json"
+
+
+def task_graph_ref(workspace_id: str, goal_id: str) -> str:
+    return f".ai/workspaces/{workspace_id}/goals/{goal_id}/task_graph.json"
+
+
+def orchestration_job_ref(workspace_id: str, run_id: str, job_id: str) -> str:
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/jobs/{job_id}.json"
+
+
+def orchestration_transition_entry(sequence: int, action: str, from_status: str | None, to_status: str, reason: str) -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "stamp": f"orchestration-transition-{sequence:04d}",
+        "action": action,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+    }
+
+
+def append_orchestration_transition(payload: dict[str, Any], action: str, new_status: str, reason: str) -> dict[str, Any]:
+    old_status = str(payload.get("status", "")) or None
+    log = list(payload.get("transition_log", []))
+    transition = orchestration_transition_entry(len(log) + 1, action, old_status, new_status, reason)
+    log.append(transition)
+    payload["status"] = new_status
+    payload["updated_at"] = transition["stamp"]
+    payload["transition_log"] = log
+    return payload
+
+
+def orchestration_ordered_tasks(graph: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    tasks = list(graph.get("tasks", []))
+    by_id = {str(task["task_id"]): task for task in tasks}
+    accepted = {str(task["task_id"]) for task in tasks if str(task.get("status", "created")) == "accepted"}
+    remaining = {str(task["task_id"]) for task in tasks if str(task.get("status", "created")) == "created"}
+    blocked: list[dict[str, Any]] = []
+    for task in tasks:
+        status = str(task.get("status", "created"))
+        if status not in {"created", "accepted"}:
+            blocked.append({"task_id": str(task["task_id"]), "reasons": [f"status:{status}"]})
+
+    ordered: list[dict[str, Any]] = []
+    while remaining:
+        ready_batch: list[dict[str, Any]] = []
+        for task in tasks:
+            task_id = str(task["task_id"])
+            if task_id not in remaining:
+                continue
+            if all(str(dependency) in accepted for dependency in task.get("depends_on", [])):
+                ready_batch.append(task)
+        if not ready_batch:
+            for task in tasks:
+                task_id = str(task["task_id"])
+                if task_id not in remaining:
+                    continue
+                reasons: list[str] = []
+                for dependency in task.get("depends_on", []):
+                    dependency_id = str(dependency)
+                    if dependency_id not in by_id:
+                        reasons.append(f"unknown_dependency:{dependency_id}")
+                    elif dependency_id not in accepted:
+                        reasons.append(f"dependency_not_accepted:{dependency_id}")
+                blocked.append({"task_id": task_id, "reasons": reasons or ["not_ready"]})
+            break
+        for task in ready_batch:
+            task_id = str(task["task_id"])
+            ordered.append(dict(task))
+            accepted.add(task_id)
+            remaining.remove(task_id)
+    return ordered, blocked
+
+
+def orchestration_dispatch_for_task(workspace_id: str, run_id: str, goal_id: str, task: dict[str, Any], sequence: int) -> dict[str, Any]:
+    task_id = validate_runtime_id(str(task["task_id"]), "task_id")
+    job_id = task_id
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_local_task_dispatch",
+        "sequence": sequence,
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "job_id": job_id,
+        "title": str(task.get("title", task_id)),
+        "role": str(task.get("role", "implementation_agent")),
+        "depends_on": list(task.get("depends_on", [])),
+        "required_evidence": list(task.get("required_evidence", [])),
+        "worker_adapter": LOCAL_WORKER_ADAPTER_ID,
+        "job_ref": orchestration_job_ref(workspace_id, run_id, job_id),
+        "worker_result_ref": worker_result_ref(workspace_id, run_id, job_id),
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+    }
+
+
+def orchestration_plan_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    ensure_runtime_run(root, workspace_id, run_id)
+    graph = load_runtime_graph(root, workspace_id, goal_id)
+    ordered, blocked = orchestration_ordered_tasks(graph)
+    dispatches = [
+        orchestration_dispatch_for_task(workspace_id, run_id, goal_id, task, index)
+        for index, task in enumerate(ordered, start=1)
+    ]
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_plan",
+        "contract_version": "local_orchestration_contract_v1",
+        "workspace_id": validate_runtime_id(workspace_id, "workspace_id"),
+        "run_id": validate_runtime_id(run_id, "run_id"),
+        "goal_id": validate_runtime_id(goal_id, "goal_id"),
+        "orchestration_id": orchestration_id_for_goal(goal_id),
+        "request": {
+            "kind": "agentoffice.framework_runtime_orchestration_request",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "task_graph_ref": task_graph_ref(workspace_id, goal_id),
+            "mode": "local_static",
+        },
+        "dispatch_plan": dispatches,
+        "blocked_tasks": blocked,
+        "valid": not blocked,
+        "status_model": ["planned", "running", "succeeded", "blocked", "failed"],
+        "ordering_contract": "task graph order; dependencies must be accepted before dependent dispatch",
+        "local_static": True,
+        "deterministic": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+    }
+
+
+def read_orchestration_state_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    path = orchestration_state_path(root, workspace_id, run_id, goal_id)
+    if not path.exists():
+        raise FrameworkRuntimeError(f"Orchestration state not found: {goal_id}")
+    return read_runtime_json_child(path.parent, path)
+
+
+def orchestration_show_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    path = orchestration_state_path(root, workspace_id, run_id, goal_id)
+    if path.exists():
+        state = read_runtime_json_child(path.parent, path)
+        persisted = True
+    else:
+        state = orchestration_plan_payload(root, workspace_id, run_id, goal_id)
+        persisted = False
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_show",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "persisted": persisted,
+        "orchestration": state,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+    }
+
+
+def orchestration_validate_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    plan = orchestration_plan_payload(root, workspace_id, run_id, goal_id)
+    errors = [
+        f"{item['task_id']}:{','.join(item['reasons'])}"
+        for item in plan["blocked_tasks"]
+    ]
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_validation",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "valid": not errors,
+        "errors": errors,
+        "dispatch_count": len(plan["dispatch_plan"]),
+        "plan": plan,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def initial_orchestration_state(plan: dict[str, Any]) -> dict[str, Any]:
+    transition = orchestration_transition_entry(1, "plan", None, "planned", "deterministic orchestration plan prepared")
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_state",
+        "contract_version": "local_orchestration_contract_v1",
+        "workspace_id": plan["workspace_id"],
+        "run_id": plan["run_id"],
+        "goal_id": plan["goal_id"],
+        "orchestration_id": plan["orchestration_id"],
+        "status": "planned",
+        "created_at": transition["stamp"],
+        "updated_at": transition["stamp"],
+        "request": plan["request"],
+        "plan": plan,
+        "tasks": [],
+        "evidence_refs": [
+            task_graph_ref(plan["workspace_id"], plan["goal_id"]),
+            orchestration_state_ref(plan["workspace_id"], plan["run_id"], plan["goal_id"]),
+        ],
+        "transition_log": [transition],
+        "local_static": True,
+        "deterministic": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+        "daemon_started": False,
+        "background_worker_started": False,
+    }
+
+
+def orchestration_run_local_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    state_path = orchestration_state_path(root, workspace_id, run_id, goal_id)
+    if state_path.exists():
+        state = read_runtime_json_child(state_path.parent, state_path)
+        if state.get("status") in {"succeeded", "blocked", "failed"}:
+            return {
+                "schema_version": 1,
+                "kind": "agentoffice.framework_runtime_orchestration_run_local",
+                "workspace_id": workspace_id,
+                "run_id": run_id,
+                "goal_id": goal_id,
+                "progressed": False,
+                "reason": f"orchestration already {state.get('status')}",
+                "orchestration": state,
+                "local_static": True,
+                "provider_calls": False,
+                "network_calls": False,
+                "env_reads": False,
+            }
+        raise FrameworkRuntimeError(f"Orchestration state is not terminal: {state.get('status')}")
+
+    plan = orchestration_plan_payload(root, workspace_id, run_id, goal_id)
+    state = initial_orchestration_state(plan)
+    append_runtime_event(root, workspace_id, run_id, "orchestration.planned", LOCAL_ORCHESTRATOR_NAME)
+    if not plan["valid"]:
+        append_orchestration_transition(state, "block", "blocked", "orchestration plan has blocked tasks")
+        write_json_atomic(state_path, state)
+        append_runtime_event(root, workspace_id, run_id, "orchestration.blocked", LOCAL_ORCHESTRATOR_NAME)
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_orchestration_run_local",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "progressed": False,
+            "reason": "orchestration plan blocked",
+            "orchestration": state,
+            "local_static": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+        }
+
+    append_orchestration_transition(state, "start", "running", "local orchestration run started")
+    write_json_atomic(state_path, state)
+    append_runtime_event(root, workspace_id, run_id, "orchestration.started", LOCAL_ORCHESTRATOR_NAME)
+    for dispatch in plan["dispatch_plan"]:
+        task_id = str(dispatch["task_id"])
+        job_id = str(dispatch["job_id"])
+        job = create_job_payload(
+            root,
+            workspace_id,
+            run_id,
+            job_id,
+            f"orchestration task {task_id}: {dispatch['title']}",
+            {
+                "dispatch_sequence": str(dispatch["sequence"]),
+                "goal_id": goal_id,
+                "orchestration_id": plan["orchestration_id"],
+                "task_id": task_id,
+            },
+            [task_graph_ref(workspace_id, goal_id), orchestration_state_ref(workspace_id, run_id, goal_id)],
+        )
+        append_runtime_event(root, workspace_id, run_id, "orchestration.task_dispatched", LOCAL_ORCHESTRATOR_NAME)
+        intake = intake_worker_result_payload(
+            root,
+            workspace_id,
+            run_id,
+            job_id,
+            LOCAL_WORKER_ADAPTER_ID,
+            "succeeded",
+            f"local orchestration completed task {task_id}: {dispatch['title']}",
+            [orchestration_state_ref(workspace_id, run_id, goal_id)],
+        )
+        task = set_task_status(root, workspace_id, run_id, goal_id, task_id, "accepted")
+        append_runtime_event(root, workspace_id, run_id, "orchestration.task_succeeded", LOCAL_ORCHESTRATOR_NAME)
+        state["tasks"].append(
+            {
+                "sequence": dispatch["sequence"],
+                "task_id": task_id,
+                "job_id": job_id,
+                "status": "succeeded",
+                "task_status": task["status"],
+                "job_ref": orchestration_job_ref(workspace_id, run_id, job_id),
+                "worker_result_ref": worker_result_ref(workspace_id, run_id, job_id),
+                "transition_count": len(intake["job"]["transition_log"]),
+            }
+        )
+        state["evidence_refs"] = normalize_evidence_refs(
+            list(state["evidence_refs"])
+            + [orchestration_job_ref(workspace_id, run_id, job_id), worker_result_ref(workspace_id, run_id, job_id), executor_event_log_ref(workspace_id, run_id)]
+            + list(job.get("evidence_refs", []))
+            + list(intake["worker_result"].get("evidence_refs", []))
+        )
+        write_json_atomic(state_path, state)
+
+    append_orchestration_transition(state, "succeed", "succeeded", "local orchestration run completed")
+    write_json_atomic(state_path, state)
+    append_runtime_event(root, workspace_id, run_id, "orchestration.succeeded", LOCAL_ORCHESTRATOR_NAME)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_orchestration_run_local",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "progressed": True,
+        "reason": "local orchestration completed",
+        "orchestration": state,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
 def job_error_payload(message: str, action: str | None = None) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -882,6 +1251,7 @@ def run_status_payload(root: Path, workspace_id: str, run_id: str, goal_id: str)
         "jobs": list_json_objects(run_root / "jobs"),
         "executor_results": list_json_objects(run_root / "executor_results"),
         "worker_results": list_json_objects(run_root / "worker_results"),
+        "orchestrations": list_json_objects(run_root / "orchestrations"),
         "events": events,
         "complete": not incomplete,
     }
@@ -1089,6 +1459,7 @@ def format_evidence_bundle_text(bundle: dict[str, Any]) -> str:
         f"jobs: {len(status['jobs'])}",
         f"executor_results: {len(status['executor_results'])}",
         f"worker_results: {len(status['worker_results'])}",
+        f"orchestrations: {len(status['orchestrations'])}",
         f"events: {replay['event_count']}",
         "local stub / no external provider: true",
     ]
@@ -1147,6 +1518,17 @@ def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
         return f"executor loop {payload['workspace_id']}/{payload['run_id']} actions={payload['action_count']} complete={str(payload['complete']).lower()} local_stub=true"
     if kind == "agentoffice.framework_runtime_executor_status":
         return f"executor status {payload['workspace_id']}/{payload['run_id']} jobs={payload['job_count']} pending={payload['pending_count']} running={payload['running_count']} succeeded={payload['succeeded_count']} failed={payload['failed_count']} cancelled={payload['cancelled_count']} local_stub=true"
+    if kind == "agentoffice.framework_runtime_orchestration_plan":
+        return f"orchestration plan {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} dispatches={len(payload['dispatch_plan'])} valid={str(payload['valid']).lower()} local_static=true"
+    if kind == "agentoffice.framework_runtime_orchestration_show":
+        orchestration = payload["orchestration"]
+        status = orchestration.get("status", "planned")
+        return f"orchestration show {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} persisted={str(payload['persisted']).lower()} status={status} local_static=true"
+    if kind == "agentoffice.framework_runtime_orchestration_validation":
+        return f"orchestration validate {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} valid={str(payload['valid']).lower()} errors={len(payload['errors'])} dispatches={payload['dispatch_count']} local_static=true"
+    if kind == "agentoffice.framework_runtime_orchestration_run_local":
+        orchestration = payload["orchestration"]
+        return f"orchestration run-local {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} progressed={str(payload['progressed']).lower()} status={orchestration['status']} tasks={len(orchestration.get('tasks', []))} local_static=true"
     if kind == "agentoffice.framework_runtime_worker_result_intake":
         result = payload["worker_result"]
         return f"worker result-intake {payload['workspace_id']}/{payload['run_id']} job={result['job_id']} status={result['status']} adapter={result['adapter_id']} local_static=true"

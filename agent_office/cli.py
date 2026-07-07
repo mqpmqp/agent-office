@@ -150,6 +150,10 @@ from .framework_runtime import (
     format_framework_runtime_payload,
     intake_worker_result_payload as framework_runtime_intake_worker_result_payload,
     inspect_payload as framework_runtime_inspect_payload,
+    orchestration_plan_payload as framework_runtime_orchestration_plan_payload,
+    orchestration_run_local_payload as framework_runtime_orchestration_run_local_payload,
+    orchestration_show_payload as framework_runtime_orchestration_show_payload,
+    orchestration_validate_payload as framework_runtime_orchestration_validate_payload,
     job_error_payload as framework_runtime_job_error_payload,
     judge_payload as framework_runtime_judge_payload,
     list_jobs_payload as framework_runtime_list_jobs_payload,
@@ -1310,6 +1314,7 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
     job_action = getattr(args, "framework_runtime_job_action", None)
     executor_action = getattr(args, "framework_runtime_executor_action", None)
     worker_action = getattr(args, "framework_runtime_worker_action", None)
+    orchestration_action = getattr(args, "framework_runtime_orchestration_action", None)
     try:
         if action == "workers":
             payload = worker_contract_payload()
@@ -1333,6 +1338,17 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
             payload = framework_runtime_replay_payload(Path(args.root), args.workspace_id, args.run_id)
         elif action == "evidence":
             payload = framework_runtime_evidence_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.format)
+        elif action == "orchestration":
+            if orchestration_action == "plan":
+                payload = framework_runtime_orchestration_plan_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+            elif orchestration_action == "show":
+                payload = framework_runtime_orchestration_show_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+            elif orchestration_action == "validate":
+                payload = framework_runtime_orchestration_validate_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+            elif orchestration_action == "run-local":
+                payload = framework_runtime_orchestration_run_local_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+            else:
+                raise AgentOfficeError("framework-runtime orchestration requires a supported action.")
         elif action == "worker":
             if worker_action == "adapters":
                 payload = framework_runtime_worker_adapter_contract_payload()
@@ -1382,8 +1398,8 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
         else:
             raise AgentOfficeError("framework-runtime requires a supported action.")
     except FrameworkRuntimeError as exc:
-        if action in {"job", "executor", "worker"} and getattr(args, "json", False):
-            error_action = job_action if action == "job" else executor_action if action == "executor" else worker_action
+        if action in {"job", "executor", "worker", "orchestration"} and getattr(args, "json", False):
+            error_action = job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action
             print(json.dumps(framework_runtime_job_error_payload(str(exc), error_action), indent=2, ensure_ascii=False))
             return 2
         raise AgentOfficeError(str(exc)) from exc
@@ -2403,6 +2419,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_framework_runtime_run_args(framework_runtime_evidence)
     framework_runtime_evidence.add_argument("--format", choices=["json", "text"], default="json", help="Evidence artifact format. Default: json.")
     framework_runtime_evidence.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_orchestration = framework_runtime_sub.add_parser("orchestration", help="Plan, inspect, validate, and run the local deterministic orchestration contract.")
+    framework_runtime_orchestration_sub = framework_runtime_orchestration.add_subparsers(dest="framework_runtime_orchestration_action", required=True)
+    for orchestration_action in ("plan", "show", "validate", "run-local"):
+        orchestration_parser = framework_runtime_orchestration_sub.add_parser(orchestration_action, help=f"Framework runtime orchestration {orchestration_action} for one run/goal.")
+        add_framework_runtime_run_args(orchestration_parser)
+        orchestration_parser.set_defaults(func=cmd_framework_runtime)
 
     framework_runtime_worker = framework_runtime_sub.add_parser("worker", help="Read local worker adapter contracts and intake deterministic worker results.")
     framework_runtime_worker_sub = framework_runtime_worker.add_subparsers(dest="framework_runtime_worker_action", required=True)
