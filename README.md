@@ -48,7 +48,7 @@ Available CLI surfaces:
 - `task-graph`: create and inspect deterministic framework task graphs.
 - `packet`: emit framework task packets without provider execution.
 - `actor-result`: intake and list saved actor results without provider execution.
-- `framework-runtime`: run the trunk loop with `workers`, `dispatch`, `review`, `judge`, `status`, `resume`, `inspect`, `list`, `replay`, `evidence`, local/static `job` lifecycle commands, and the local deterministic `executor` loop.
+- `framework-runtime`: run the trunk loop with `workers`, `dispatch`, `review`, `judge`, `status`, `resume`, `inspect`, `list`, `replay`, `evidence`, local/static `job` lifecycle commands, the local deterministic `executor` loop, and local/static `worker` result intake contracts.
 - `runtime`: broader local runtime-foundation commands. These remain separate from the framework-runtime trunk baseline.
 
 Safety boundary: Framework Runtime trunk commands are local/static only unless a future work package explicitly authorizes a broader mode. The current baseline must not read `.env`, print environment variables, call providers or models, make network requests, connect to real Codex/Claude/provider workers, or execute external adapters.
@@ -82,7 +82,7 @@ python3 -m agent_office framework-runtime evidence --workspace-id ws-demo --run-
 python3 -m agent_office framework-runtime workers --json
 ```
 
-`framework-runtime evidence` writes the evidence artifact under the run evidence directory and includes run, task, packet, actor-result, event, review, judge, job, executor-result, worker-contract, replay, and local-only safety evidence.
+`framework-runtime evidence` writes the evidence artifact under the run evidence directory and includes run, task, packet, actor-result, event, review, judge, job, executor-result, worker-result, worker-contract, replay, and local-only safety evidence.
 
 WP2 Job Lifecycle Core adds local/static job state under each run at `.ai/workspaces/<workspace-id>/runs/<run-id>/jobs/<job-id>.json`. Jobs do not schedule background tasks, connect to providers, or call Codex/Claude. They are deterministic JSON records with `job_id`, `status`, `created_at`, `updated_at`, `objective`, `metadata`, `evidence_refs`, and `transition_log`. Supported statuses are `pending`, `running`, `succeeded`, `failed`, and `cancelled`; job commands expose create/list/show/cancel/fail.
 
@@ -101,6 +101,14 @@ python3 -m agent_office framework-runtime job fail --workspace-id ws-demo --run-
 
 Invalid job transitions return stable non-zero CLI behavior. With `--json`, job and executor user errors return an `agentoffice.framework_runtime_job_error` payload instead of a traceback.
 
+WP4 Worker Adapter Contract / Deterministic Worker Result Intake adds only a local/static adapter descriptor and deterministic result intake. It does not execute workers, connect to provider/Codex/Claude workers, start a daemon, or perform network behavior. Result intake accepts `succeeded` or `failed` for pending/running jobs, writes `.ai/workspaces/<workspace-id>/runs/<run-id>/worker_results/<job-id>.json`, appends deterministic runtime events, and advances the job to the matching terminal status. Missing jobs, terminal/cancelled jobs, unsupported adapters, empty summaries, and invalid statuses are rejected with structured errors.
+
+```bash
+python3 -m agent_office framework-runtime worker adapters --json
+python3 -m agent_office framework-runtime worker result-intake --workspace-id ws-demo --run-id run-demo --job-id job-demo --status succeeded --summary "local deterministic result" --evidence-ref local/evidence/job-demo.txt --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime worker result-show --workspace-id ws-demo --run-id run-demo --job-id job-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+```
+
 Baseline report index:
 
 - `AGENTOFFICE_FRAMEWORK_RUNTIME_TRUNK_BATCH_REPORT.md`: original trunk batch implementation report.
@@ -108,8 +116,9 @@ Baseline report index:
 - `FRAMEWORK_RUNTIME_WP1_BASELINE_CONSOLIDATION_REPORT.md`: current WP1 baseline consolidation report.
 - `FRAMEWORK_RUNTIME_WP2_JOB_LIFECYCLE_CORE_REPORT.md`: WP2 local/static job lifecycle core report.
 - `FRAMEWORK_RUNTIME_WP3_LOCAL_EXECUTOR_LOOP_V1_REPORT.md`: WP3 local deterministic executor loop report.
+- `FRAMEWORK_RUNTIME_WP4_WORKER_ADAPTER_CONTRACT_RESULT_INTAKE_REPORT.md`: WP4 local worker adapter contract and deterministic result intake report.
 
-After WP3, future Framework Runtime work packages should start from this local deterministic job/executor baseline and keep the safety boundary unless broader execution is explicitly authorized.
+After WP4, future Framework Runtime work packages should start from this local deterministic job/executor/worker-result baseline and keep the safety boundary unless broader execution is explicitly authorized.
 
 ## Runtime Foundation Slice
 

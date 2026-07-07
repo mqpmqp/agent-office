@@ -148,6 +148,7 @@ from .framework_runtime import (
     executor_run_once_payload as framework_runtime_executor_run_once_payload,
     executor_status_payload as framework_runtime_executor_status_payload,
     format_framework_runtime_payload,
+    intake_worker_result_payload as framework_runtime_intake_worker_result_payload,
     inspect_payload as framework_runtime_inspect_payload,
     job_error_payload as framework_runtime_job_error_payload,
     judge_payload as framework_runtime_judge_payload,
@@ -161,6 +162,8 @@ from .framework_runtime import (
     result_id_for_task,
     run_status_payload as framework_runtime_status_payload,
     transition_job_payload as framework_runtime_transition_job_payload,
+    worker_adapter_contract_payload as framework_runtime_worker_adapter_contract_payload,
+    read_worker_result_payload as framework_runtime_read_worker_result_payload,
     worker_contract_payload,
 )
 from .profiles import (
@@ -1306,6 +1309,7 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
     action = args.framework_runtime_action
     job_action = getattr(args, "framework_runtime_job_action", None)
     executor_action = getattr(args, "framework_runtime_executor_action", None)
+    worker_action = getattr(args, "framework_runtime_worker_action", None)
     try:
         if action == "workers":
             payload = worker_contract_payload()
@@ -1329,6 +1333,24 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
             payload = framework_runtime_replay_payload(Path(args.root), args.workspace_id, args.run_id)
         elif action == "evidence":
             payload = framework_runtime_evidence_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.format)
+        elif action == "worker":
+            if worker_action == "adapters":
+                payload = framework_runtime_worker_adapter_contract_payload()
+            elif worker_action == "result-intake":
+                payload = framework_runtime_intake_worker_result_payload(
+                    Path(args.root),
+                    args.workspace_id,
+                    args.run_id,
+                    args.job_id,
+                    args.adapter_id,
+                    args.status,
+                    args.summary,
+                    args.evidence_ref,
+                )
+            elif worker_action == "result-show":
+                payload = framework_runtime_read_worker_result_payload(Path(args.root), args.workspace_id, args.run_id, args.job_id)
+            else:
+                raise AgentOfficeError("framework-runtime worker requires a supported action.")
         elif action == "executor":
             if executor_action == "run-once":
                 payload = framework_runtime_executor_run_once_payload(Path(args.root), args.workspace_id, args.run_id, args.job_id)
@@ -1360,8 +1382,8 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
         else:
             raise AgentOfficeError("framework-runtime requires a supported action.")
     except FrameworkRuntimeError as exc:
-        if action in {"job", "executor"} and getattr(args, "json", False):
-            error_action = job_action if action == "job" else executor_action
+        if action in {"job", "executor", "worker"} and getattr(args, "json", False):
+            error_action = job_action if action == "job" else executor_action if action == "executor" else worker_action
             print(json.dumps(framework_runtime_job_error_payload(str(exc), error_action), indent=2, ensure_ascii=False))
             return 2
         raise AgentOfficeError(str(exc)) from exc
@@ -2381,6 +2403,33 @@ def build_parser() -> argparse.ArgumentParser:
     add_framework_runtime_run_args(framework_runtime_evidence)
     framework_runtime_evidence.add_argument("--format", choices=["json", "text"], default="json", help="Evidence artifact format. Default: json.")
     framework_runtime_evidence.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_worker = framework_runtime_sub.add_parser("worker", help="Read local worker adapter contracts and intake deterministic worker results.")
+    framework_runtime_worker_sub = framework_runtime_worker.add_subparsers(dest="framework_runtime_worker_action", required=True)
+
+    framework_runtime_worker_adapters = framework_runtime_worker_sub.add_parser("adapters", help="List local static worker adapter contract descriptors.")
+    framework_runtime_worker_adapters.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    framework_runtime_worker_adapters.set_defaults(func=cmd_framework_runtime)
+
+    def add_framework_runtime_worker_run_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+        parser.add_argument("--run-id", required=True, help="Stable run id.")
+        parser.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    framework_runtime_worker_result_intake = framework_runtime_worker_sub.add_parser("result-intake", help="Intake one deterministic local worker result for a framework runtime job.")
+    add_framework_runtime_worker_run_args(framework_runtime_worker_result_intake)
+    framework_runtime_worker_result_intake.add_argument("--job-id", required=True, help="Stable job id.")
+    framework_runtime_worker_result_intake.add_argument("--adapter-id", default="local_worker_adapter_stub", help="Local worker adapter id. Default: local_worker_adapter_stub.")
+    framework_runtime_worker_result_intake.add_argument("--status", choices=["succeeded", "failed"], required=True, help="Deterministic worker result status.")
+    framework_runtime_worker_result_intake.add_argument("--summary", required=True, help="Short deterministic worker result summary.")
+    framework_runtime_worker_result_intake.add_argument("--evidence-ref", action="append", help="Optional local evidence reference. Repeatable.")
+    framework_runtime_worker_result_intake.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_worker_result_show = framework_runtime_worker_sub.add_parser("result-show", help="Show one deterministic local worker result for a framework runtime job.")
+    add_framework_runtime_worker_run_args(framework_runtime_worker_result_show)
+    framework_runtime_worker_result_show.add_argument("--job-id", required=True, help="Stable job id.")
+    framework_runtime_worker_result_show.set_defaults(func=cmd_framework_runtime)
 
     framework_runtime_executor = framework_runtime_sub.add_parser("executor", help="Run the local deterministic framework runtime executor loop.")
     framework_runtime_executor_sub = framework_runtime_executor.add_subparsers(dest="framework_runtime_executor_action", required=True)

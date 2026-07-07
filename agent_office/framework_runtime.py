@@ -31,6 +31,8 @@ from .workspace_store import (
 TERMINAL_TASK_STATUSES = {"accepted", "rejected", "skipped"}
 JOB_STATUSES = {"pending", "running", "succeeded", "failed", "cancelled"}
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+WORKER_RESULT_STATUSES = {"succeeded", "failed"}
+LOCAL_WORKER_ADAPTER_ID = "local_worker_adapter_stub"
 LOCAL_EXECUTOR_NAME = "local_executor_stub"
 LOCAL_WORKER_NAME = "local_echo_worker"
 REVIEW_STUB_NAME = "local_review_stub"
@@ -67,7 +69,45 @@ def runtime_contract_status() -> dict[str, Any]:
             "evidence_export",
             "job_lifecycle",
             "local_executor_loop_v1",
+            "worker_adapter_contract",
+            "deterministic_worker_result_intake",
         ],
+    }
+
+
+def legacy_packet_worker_adapter() -> dict[str, Any]:
+    return {
+        "name": LOCAL_WORKER_NAME,
+        "mode": "deterministic_local_stub",
+        "input_kind": "agentoffice.packet",
+        "output_kind": "agentoffice.actor_result",
+        "reads_env": False,
+        "prints_env": False,
+        "network_calls": False,
+        "provider_calls": False,
+        "external_runtime_calls": False,
+        "failure_contract": "structured_framework_runtime_error",
+    }
+
+
+def deterministic_job_worker_adapter() -> dict[str, Any]:
+    return {
+        "adapter_id": LOCAL_WORKER_ADAPTER_ID,
+        "name": LOCAL_WORKER_ADAPTER_ID,
+        "mode": "deterministic_local_stub",
+        "input_kind": "agentoffice.framework_runtime_job",
+        "output_kind": "agentoffice.framework_runtime_worker_result",
+        "supported_result_statuses": sorted(WORKER_RESULT_STATUSES),
+        "execution_enabled": False,
+        "result_intake_enabled": True,
+        "reads_env": False,
+        "prints_env": False,
+        "network_calls": False,
+        "provider_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+        "external_runtime_calls": False,
+        "failure_contract": "structured_framework_runtime_error",
     }
 
 
@@ -75,20 +115,20 @@ def worker_contract_payload() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "kind": "agentoffice.framework_runtime_worker_contract",
-        "adapters": [
-            {
-                "name": LOCAL_WORKER_NAME,
-                "mode": "deterministic_local_stub",
-                "input_kind": "agentoffice.packet",
-                "output_kind": "agentoffice.actor_result",
-                "reads_env": False,
-                "prints_env": False,
-                "network_calls": False,
-                "provider_calls": False,
-                "external_runtime_calls": False,
-                "failure_contract": "structured_framework_runtime_error",
-            }
-        ],
+        "adapters": [legacy_packet_worker_adapter(), deterministic_job_worker_adapter()],
+    }
+
+
+def worker_adapter_contract_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_worker_adapter_contract",
+        "adapters": [deterministic_job_worker_adapter()],
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
     }
 
 
@@ -570,6 +610,107 @@ def executor_status_payload(root: Path, workspace_id: str, run_id: str) -> dict[
     }
 
 
+def worker_results_dir(root: Path, workspace_id: str, run_id: str) -> Path:
+    return ensure_runtime_run(root, workspace_id, run_id) / "worker_results"
+
+
+def worker_result_path(root: Path, workspace_id: str, run_id: str, job_id: str) -> Path:
+    job_id = validate_runtime_id(job_id, "job_id")
+    return worker_results_dir(root, workspace_id, run_id) / f"{job_id}.json"
+
+
+def worker_result_ref(workspace_id: str, run_id: str, job_id: str) -> str:
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/worker_results/{job_id}.json"
+
+
+def read_worker_result_payload(root: Path, workspace_id: str, run_id: str, job_id: str) -> dict[str, Any]:
+    path = worker_result_path(root, workspace_id, run_id, job_id)
+    if not path.exists():
+        raise FrameworkRuntimeError(f"Worker result not found for job: {job_id}")
+    try:
+        return read_json(path)
+    except WorkspaceStoreError as exc:
+        raise FrameworkRuntimeError(str(exc)) from exc
+
+
+def worker_result_payload(workspace_id: str, run_id: str, job: dict[str, Any], adapter_id: str, status: str, summary: str, evidence_refs: list[str] | None = None) -> dict[str, Any]:
+    job_id = str(job["job_id"])
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_worker_result",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "job_id": job_id,
+        "adapter_id": adapter_id,
+        "status": status,
+        "summary": summary,
+        "evidence_refs": normalize_evidence_refs(evidence_refs),
+        "local_static": True,
+        "deterministic_intake": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "codex_worker_connected": False,
+        "claude_worker_connected": False,
+    }
+
+
+def intake_worker_result_payload(root: Path, workspace_id: str, run_id: str, job_id: str, adapter_id: str, status: str, summary: str, evidence_refs: list[str] | None = None) -> dict[str, Any]:
+    root = safe_root(root)
+    adapter_id = validate_runtime_id(adapter_id, "adapter_id")
+    if adapter_id != LOCAL_WORKER_ADAPTER_ID:
+        raise FrameworkRuntimeError(f"Unsupported worker adapter: {adapter_id}")
+    if status not in WORKER_RESULT_STATUSES:
+        raise FrameworkRuntimeError(f"Unsupported worker result status: {status}")
+    if not summary.strip():
+        raise FrameworkRuntimeError("Worker result summary must not be empty.")
+    job = read_job_payload(root, workspace_id, run_id, job_id)
+    old_status = str(job.get("status", ""))
+    if old_status in TERMINAL_JOB_STATUSES:
+        raise FrameworkRuntimeError(f"Job {job_id} is terminal and cannot accept worker result: {old_status}")
+    if old_status not in {"pending", "running"}:
+        raise FrameworkRuntimeError(f"Job {job_id} cannot accept worker result from status: {old_status}")
+    target = worker_result_path(root, workspace_id, run_id, job_id)
+    if target.exists():
+        raise FrameworkRuntimeError(f"Worker result already exists for job: {job_id}")
+
+    result = worker_result_payload(workspace_id, run_id, job, adapter_id, status, summary, evidence_refs)
+    write_json_atomic(target, result)
+    append_runtime_event(root, workspace_id, run_id, "worker_result.received", adapter_id)
+    append_runtime_event(root, workspace_id, run_id, f"worker_result.{status}", adapter_id)
+    append_job_transition(job, f"worker_result_{status}", status, f"deterministic worker result {status}")
+    refs = normalize_evidence_refs(
+        list(job.get("evidence_refs", []))
+        + list(result.get("evidence_refs", []))
+        + [worker_result_ref(workspace_id, run_id, job_id), executor_event_log_ref(workspace_id, run_id)]
+    )
+    job["evidence_refs"] = refs
+    job["worker_result"] = {
+        "adapter_id": adapter_id,
+        "result_ref": worker_result_ref(workspace_id, run_id, job_id),
+        "status": status,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+    write_job_payload(root, workspace_id, run_id, job)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_worker_result_intake",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "job": job,
+        "worker_result": result,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
 def job_error_payload(message: str, action: str | None = None) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -740,6 +881,7 @@ def run_status_payload(root: Path, workspace_id: str, run_id: str, goal_id: str)
         "judges": list_json_objects(run_root / "judges"),
         "jobs": list_json_objects(run_root / "jobs"),
         "executor_results": list_json_objects(run_root / "executor_results"),
+        "worker_results": list_json_objects(run_root / "worker_results"),
         "events": events,
         "complete": not incomplete,
     }
@@ -946,6 +1088,7 @@ def format_evidence_bundle_text(bundle: dict[str, Any]) -> str:
         f"judges: {len(status['judges'])}",
         f"jobs: {len(status['jobs'])}",
         f"executor_results: {len(status['executor_results'])}",
+        f"worker_results: {len(status['worker_results'])}",
         f"events: {replay['event_count']}",
         "local stub / no external provider: true",
     ]
@@ -1004,6 +1147,11 @@ def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
         return f"executor loop {payload['workspace_id']}/{payload['run_id']} actions={payload['action_count']} complete={str(payload['complete']).lower()} local_stub=true"
     if kind == "agentoffice.framework_runtime_executor_status":
         return f"executor status {payload['workspace_id']}/{payload['run_id']} jobs={payload['job_count']} pending={payload['pending_count']} running={payload['running_count']} succeeded={payload['succeeded_count']} failed={payload['failed_count']} cancelled={payload['cancelled_count']} local_stub=true"
+    if kind == "agentoffice.framework_runtime_worker_result_intake":
+        result = payload["worker_result"]
+        return f"worker result-intake {payload['workspace_id']}/{payload['run_id']} job={result['job_id']} status={result['status']} adapter={result['adapter_id']} local_static=true"
+    if kind == "agentoffice.framework_runtime_worker_result":
+        return f"worker result {payload['workspace_id']}/{payload['run_id']} job={payload['job_id']} status={payload['status']} adapter={payload['adapter_id']} local_static=true"
     if kind == "agentoffice.framework_runtime_job":
         return f"job {payload['workspace_id']}/{payload['run_id']}/{payload['job_id']} status={payload['status']} evidence_refs={len(payload['evidence_refs'])} local_static=true"
     if kind == "agentoffice.framework_runtime_job_list":
