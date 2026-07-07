@@ -144,6 +144,9 @@ from .framework_runtime import (
     create_job_payload as framework_runtime_create_job_payload,
     dispatch_payload,
     evidence_payload as framework_runtime_evidence_payload,
+    executor_loop_payload as framework_runtime_executor_loop_payload,
+    executor_run_once_payload as framework_runtime_executor_run_once_payload,
+    executor_status_payload as framework_runtime_executor_status_payload,
     format_framework_runtime_payload,
     inspect_payload as framework_runtime_inspect_payload,
     job_error_payload as framework_runtime_job_error_payload,
@@ -1302,6 +1305,7 @@ def parse_key_value_metadata(items: list[str] | None) -> dict[str, str]:
 def cmd_framework_runtime(args: argparse.Namespace) -> int:
     action = args.framework_runtime_action
     job_action = getattr(args, "framework_runtime_job_action", None)
+    executor_action = getattr(args, "framework_runtime_executor_action", None)
     try:
         if action == "workers":
             payload = worker_contract_payload()
@@ -1325,6 +1329,15 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
             payload = framework_runtime_replay_payload(Path(args.root), args.workspace_id, args.run_id)
         elif action == "evidence":
             payload = framework_runtime_evidence_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.format)
+        elif action == "executor":
+            if executor_action == "run-once":
+                payload = framework_runtime_executor_run_once_payload(Path(args.root), args.workspace_id, args.run_id, args.job_id)
+            elif executor_action == "loop":
+                payload = framework_runtime_executor_loop_payload(Path(args.root), args.workspace_id, args.run_id, args.max_iterations)
+            elif executor_action == "status":
+                payload = framework_runtime_executor_status_payload(Path(args.root), args.workspace_id, args.run_id)
+            else:
+                raise AgentOfficeError("framework-runtime executor requires a supported action.")
         elif action == "job":
             if job_action == "create":
                 payload = framework_runtime_create_job_payload(
@@ -1347,8 +1360,9 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
         else:
             raise AgentOfficeError("framework-runtime requires a supported action.")
     except FrameworkRuntimeError as exc:
-        if action == "job" and getattr(args, "json", False):
-            print(json.dumps(framework_runtime_job_error_payload(str(exc), job_action), indent=2, ensure_ascii=False))
+        if action in {"job", "executor"} and getattr(args, "json", False):
+            error_action = job_action if action == "job" else executor_action
+            print(json.dumps(framework_runtime_job_error_payload(str(exc), error_action), indent=2, ensure_ascii=False))
             return 2
         raise AgentOfficeError(str(exc)) from exc
 
@@ -2367,6 +2381,29 @@ def build_parser() -> argparse.ArgumentParser:
     add_framework_runtime_run_args(framework_runtime_evidence)
     framework_runtime_evidence.add_argument("--format", choices=["json", "text"], default="json", help="Evidence artifact format. Default: json.")
     framework_runtime_evidence.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_executor = framework_runtime_sub.add_parser("executor", help="Run the local deterministic framework runtime executor loop.")
+    framework_runtime_executor_sub = framework_runtime_executor.add_subparsers(dest="framework_runtime_executor_action", required=True)
+
+    def add_framework_runtime_executor_run_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+        parser.add_argument("--run-id", required=True, help="Stable run id.")
+        parser.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    framework_runtime_executor_run_once = framework_runtime_executor_sub.add_parser("run-once", help="Run one pending local job through the deterministic stub executor.")
+    add_framework_runtime_executor_run_args(framework_runtime_executor_run_once)
+    framework_runtime_executor_run_once.add_argument("--job-id", help="Optional job id to run. Defaults to the first pending job.")
+    framework_runtime_executor_run_once.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_executor_loop = framework_runtime_executor_sub.add_parser("loop", help="Run pending local jobs until drained or max iterations is reached.")
+    add_framework_runtime_executor_run_args(framework_runtime_executor_loop)
+    framework_runtime_executor_loop.add_argument("--max-iterations", type=int, default=100, help="Maximum run-once iterations. Default: 100.")
+    framework_runtime_executor_loop.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_executor_status = framework_runtime_executor_sub.add_parser("status", help="Show local executor job and result status for a run.")
+    add_framework_runtime_executor_run_args(framework_runtime_executor_status)
+    framework_runtime_executor_status.set_defaults(func=cmd_framework_runtime)
 
     framework_runtime_job = framework_runtime_sub.add_parser("job", help="Manage local static framework runtime jobs.")
     framework_runtime_job_sub = framework_runtime_job.add_subparsers(dest="framework_runtime_job_action", required=True)

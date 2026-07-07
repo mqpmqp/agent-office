@@ -142,6 +142,10 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
             (["framework-runtime", "job", "show", "--help"], "--job-id"),
             (["framework-runtime", "job", "cancel", "--help"], "--reason"),
             (["framework-runtime", "job", "fail", "--help"], "--reason"),
+            (["framework-runtime", "executor", "--help"], "run-once"),
+            (["framework-runtime", "executor", "run-once", "--help"], "--job-id"),
+            (["framework-runtime", "executor", "loop", "--help"], "--max-iterations"),
+            (["framework-runtime", "executor", "status", "--help"], "--run-id"),
         ]
         for argv, expected in help_cases:
             stdout = io.StringIO()
@@ -409,6 +413,129 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
             self.assertEqual(stdout, "")
             self.assertIn("Job not found", stderr)
             self.assertNotIn("Traceback", stderr)
+
+    def test_local_executor_run_once_succeeds_pending_job_and_exports_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_workspace(base, "ws-demo")
+            create_run(base, "ws-demo", "run-demo")
+            create_goal_graph(base, "ws-demo", "goal-demo")
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "create", "--workspace-id", "ws-demo", "--run-id", "run-demo",
+                "--job-id", "job-a", "--objective", "Run local executor", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            self.assertEqual(json.loads(stdout)["status"], "pending")
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "executor", "run-once", "--workspace-id", "ws-demo", "--run-id", "run-demo",
+                "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertEqual(payload["kind"], "agentoffice.framework_runtime_executor_run_once")
+            self.assertTrue(payload["progressed"])
+            self.assertEqual(payload["job"]["status"], "succeeded")
+            self.assertEqual([entry["to_status"] for entry in payload["job"]["transition_log"]], ["pending", "running", "succeeded"])
+            self.assertFalse(payload["provider_calls"])
+            self.assertFalse(payload["network_calls"])
+            self.assertFalse(payload["env_reads"])
+            self.assertIn("executor_results/job-a.json", " ".join(payload["job"]["evidence_refs"]))
+            self.assertTrue((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "executor_results" / "job-a.json").is_file())
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "executor", "status", "--workspace-id", "ws-demo", "--run-id", "run-demo",
+                "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            status = json.loads(stdout)
+            self.assertEqual(status["succeeded_count"], 1)
+            self.assertEqual(status["pending_count"], 0)
+            self.assertEqual(status["executor_results"][0]["status"], "succeeded")
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "evidence", "--format", "json", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            evidence = json.loads(stdout)
+            self.assertEqual(len(evidence["bundle"]["status"]["jobs"]), 1)
+            self.assertEqual(len(evidence["bundle"]["status"]["executor_results"]), 1)
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "replay", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            replay = json.loads(stdout)
+            event_types = [event["event_type"] for event in replay["events"]]
+            self.assertIn("executor.job_started", event_types)
+            self.assertIn("executor.job_succeeded", event_types)
+
+    def test_local_executor_loop_drains_pending_jobs_and_keeps_failures_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_workspace(base, "ws-demo")
+            create_run(base, "ws-demo", "run-demo")
+
+            for job_id, metadata in (("job-ok", []), ("job-fail", ["executor_outcome=failed"])):
+                args = [
+                    "framework-runtime", "job", "create", "--workspace-id", "ws-demo", "--run-id", "run-demo",
+                    "--job-id", job_id, "--objective", f"Objective {job_id}", "--root", tmp, "--json"
+                ]
+                for item in metadata:
+                    args.extend(["--metadata", item])
+                exit_code, stdout, stderr = run_cli(args)
+                self.assertEqual(exit_code, 0, stderr)
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "executor", "loop", "--workspace-id", "ws-demo", "--run-id", "run-demo",
+                "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertEqual(payload["kind"], "agentoffice.framework_runtime_executor_loop")
+            self.assertEqual(payload["action_count"], 2)
+            self.assertTrue(payload["complete"])
+            self.assertEqual(payload["status"]["succeeded_count"], 1)
+            self.assertEqual(payload["status"]["failed_count"], 1)
+            self.assertEqual(payload["status"]["pending_count"], 0)
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "executor", "run-once", "--workspace-id", "ws-demo", "--run-id", "run-demo",
+                "--root", tmp
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            self.assertIn("progressed=false", stdout)
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "job", "cancel", "--workspace-id", "ws-demo", "--run-id", "run-demo",
+                "--job-id", "job-ok", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 2)
+            self.assertIn("terminal", json.loads(stdout)["error"])
+
+    def test_local_executor_command_does_not_read_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_workspace(base, "ws-demo")
+            create_run(base, "ws-demo", "run-demo")
+            run_cli([
+                "framework-runtime", "job", "create", "--workspace-id", "ws-demo", "--run-id", "run-demo",
+                "--job-id", "job-a", "--objective", "Run local executor", "--root", tmp, "--json"
+            ])
+            args = argparse.Namespace(
+                framework_runtime_action="executor",
+                framework_runtime_job_action=None,
+                framework_runtime_executor_action="run-once",
+                workspace_id="ws-demo",
+                run_id="run-demo",
+                job_id=None,
+                root=tmp,
+                json=True,
+            )
+            with patch.object(os, "environ", EnvGuard()), patch.object(cli.os, "environ", EnvGuard()):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(cli.cmd_framework_runtime(args), 0)
+                self.assertIn("agentoffice.framework_runtime_executor_run_once", stdout.getvalue())
 
     def test_baseline_existing_slice_commands_and_legacy_packet_still_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

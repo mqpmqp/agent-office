@@ -31,6 +31,7 @@ from .workspace_store import (
 TERMINAL_TASK_STATUSES = {"accepted", "rejected", "skipped"}
 JOB_STATUSES = {"pending", "running", "succeeded", "failed", "cancelled"}
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+LOCAL_EXECUTOR_NAME = "local_executor_stub"
 LOCAL_WORKER_NAME = "local_echo_worker"
 REVIEW_STUB_NAME = "local_review_stub"
 JUDGE_STUB_NAME = "local_judge_stub"
@@ -65,6 +66,7 @@ def runtime_contract_status() -> dict[str, Any]:
             "replay",
             "evidence_export",
             "job_lifecycle",
+            "local_executor_loop_v1",
         ],
     }
 
@@ -330,6 +332,7 @@ def create_job_payload(root: Path, workspace_id: str, run_id: str, job_id: str, 
         "provider_calls": False,
         "network_calls": False,
         "external_worker_calls": False,
+        "executor": None,
     }
     write_json_atomic(target, payload)
     return payload
@@ -360,6 +363,23 @@ def list_jobs_payload(root: Path, workspace_id: str, run_id: str) -> dict[str, A
     }
 
 
+def write_job_payload(root: Path, workspace_id: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    write_json_atomic(job_path(root, workspace_id, run_id, str(payload["job_id"])), payload)
+    return payload
+
+
+def append_job_transition(payload: dict[str, Any], action: str, new_status: str, reason: str) -> dict[str, Any]:
+    old_status = str(payload.get("status", ""))
+    log = list(payload.get("transition_log", []))
+    sequence = len(log) + 1
+    transition = job_transition_entry(sequence, action, old_status, new_status, reason)
+    log.append(transition)
+    payload["status"] = new_status
+    payload["updated_at"] = transition["stamp"]
+    payload["transition_log"] = log
+    return payload
+
+
 def transition_job_payload(root: Path, workspace_id: str, run_id: str, job_id: str, action: str, reason: str) -> dict[str, Any]:
     if action not in {"cancel", "fail"}:
         raise FrameworkRuntimeError(f"Unsupported job transition: {action}")
@@ -370,15 +390,184 @@ def transition_job_payload(root: Path, workspace_id: str, run_id: str, job_id: s
     if old_status not in {"pending", "running"}:
         raise FrameworkRuntimeError(f"Job {job_id} cannot be {action}ed from status: {old_status}")
     new_status = "cancelled" if action == "cancel" else "failed"
-    log = list(payload.get("transition_log", []))
-    sequence = len(log) + 1
-    transition = job_transition_entry(sequence, action, old_status, new_status, reason or f"job {action}ed")
-    log.append(transition)
-    payload["status"] = new_status
-    payload["updated_at"] = transition["stamp"]
-    payload["transition_log"] = log
-    write_json_atomic(job_path(root, workspace_id, run_id, job_id), payload)
+    append_job_transition(payload, action, new_status, reason or f"job {action}ed")
+    write_job_payload(root, workspace_id, run_id, payload)
     return payload
+
+
+def executor_results_dir(root: Path, workspace_id: str, run_id: str) -> Path:
+    return ensure_runtime_run(root, workspace_id, run_id) / "executor_results"
+
+
+def executor_result_path(root: Path, workspace_id: str, run_id: str, job_id: str) -> Path:
+    job_id = validate_runtime_id(job_id, "job_id")
+    return executor_results_dir(root, workspace_id, run_id) / f"{job_id}.json"
+
+
+def executor_result_ref(workspace_id: str, run_id: str, job_id: str) -> str:
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/executor_results/{job_id}.json"
+
+
+def executor_event_log_ref(workspace_id: str, run_id: str) -> str:
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/events.jsonl"
+
+
+def selected_executor_job(root: Path, workspace_id: str, run_id: str, job_id: str | None) -> dict[str, Any] | None:
+    if job_id is not None:
+        job = read_job_payload(root, workspace_id, run_id, job_id)
+        if str(job.get("status")) in TERMINAL_JOB_STATUSES:
+            return None
+        return job
+    for status in ("running", "pending"):
+        for job in list_jobs_payload(root, workspace_id, run_id)["jobs"]:
+            if str(job.get("status")) == status:
+                return job
+    return None
+
+
+def executor_job_outcome(job: dict[str, Any]) -> str:
+    metadata = job.get("metadata", {})
+    if isinstance(metadata, dict) and str(metadata.get("executor_outcome", "succeeded")) == "failed":
+        return "failed"
+    return "succeeded"
+
+
+def executor_result_payload(workspace_id: str, run_id: str, job: dict[str, Any], outcome: str) -> dict[str, Any]:
+    job_id = str(job["job_id"])
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_executor_result",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "job_id": job_id,
+        "executor": LOCAL_EXECUTOR_NAME,
+        "mode": "deterministic_local_stub",
+        "status": outcome,
+        "summary": f"local executor stub {outcome} job {job_id}: {job['objective']}",
+        "outputs": {
+            "echo_job_id": job_id,
+            "echo_objective": job["objective"],
+        },
+        "local_stub": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def executor_run_once_payload(root: Path, workspace_id: str, run_id: str, job_id: str | None = None) -> dict[str, Any]:
+    root = safe_root(root)
+    ensure_runtime_run(root, workspace_id, run_id)
+    job = selected_executor_job(root, workspace_id, run_id, job_id)
+    if job is None:
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_executor_run_once",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "job": None,
+            "progressed": False,
+            "reason": "no runnable job",
+            "local_stub": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+        }
+
+    job_id = str(job["job_id"])
+    if str(job.get("status")) == "pending":
+        append_job_transition(job, "executor_start", "running", "local executor stub started")
+        append_runtime_event(root, workspace_id, run_id, "executor.job_started", LOCAL_EXECUTOR_NAME)
+        write_job_payload(root, workspace_id, run_id, job)
+
+    outcome = executor_job_outcome(job)
+    result = executor_result_payload(workspace_id, run_id, job, outcome)
+    result_path = executor_result_path(root, workspace_id, run_id, job_id)
+    write_json_atomic(result_path, result)
+    event_type = "executor.job_succeeded" if outcome == "succeeded" else "executor.job_failed"
+    append_runtime_event(root, workspace_id, run_id, event_type, LOCAL_EXECUTOR_NAME)
+    reason = f"local executor stub {outcome}"
+    append_job_transition(job, f"executor_{outcome}", outcome, reason)
+    refs = normalize_evidence_refs(list(job.get("evidence_refs", [])) + [executor_result_ref(workspace_id, run_id, job_id), executor_event_log_ref(workspace_id, run_id)])
+    job["evidence_refs"] = refs
+    job["executor"] = {
+        "name": LOCAL_EXECUTOR_NAME,
+        "mode": "deterministic_local_stub",
+        "result_ref": executor_result_ref(workspace_id, run_id, job_id),
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+    write_job_payload(root, workspace_id, run_id, job)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_executor_run_once",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "job": job,
+        "executor_result": result,
+        "progressed": True,
+        "local_stub": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+    }
+
+
+def executor_loop_payload(root: Path, workspace_id: str, run_id: str, max_iterations: int = 100) -> dict[str, Any]:
+    if max_iterations < 1:
+        raise FrameworkRuntimeError("Executor loop max iterations must be at least 1.")
+    actions: list[dict[str, Any]] = []
+    for _ in range(max_iterations):
+        action = executor_run_once_payload(root, workspace_id, run_id)
+        if not action["progressed"]:
+            break
+        actions.append(action)
+    status = executor_status_payload(root, workspace_id, run_id)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_executor_loop",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "actions": actions,
+        "action_count": len(actions),
+        "complete": status["pending_count"] == 0 and status["running_count"] == 0,
+        "status": status,
+        "local_stub": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+    }
+
+
+def executor_status_payload(root: Path, workspace_id: str, run_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    ensure_runtime_run(root, workspace_id, run_id)
+    jobs = list_jobs_payload(root, workspace_id, run_id)["jobs"]
+    results = list_json_objects(executor_results_dir(root, workspace_id, run_id))
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_executor_status",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "executor": LOCAL_EXECUTOR_NAME,
+        "mode": "deterministic_local_stub",
+        "jobs": jobs,
+        "executor_results": results,
+        "job_count": len(jobs),
+        "pending_count": sum(1 for job in jobs if job.get("status") == "pending"),
+        "running_count": sum(1 for job in jobs if job.get("status") == "running"),
+        "succeeded_count": sum(1 for job in jobs if job.get("status") == "succeeded"),
+        "failed_count": sum(1 for job in jobs if job.get("status") == "failed"),
+        "cancelled_count": sum(1 for job in jobs if job.get("status") == "cancelled"),
+        "local_stub": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
 
 
 def job_error_payload(message: str, action: str | None = None) -> dict[str, Any]:
@@ -549,6 +738,8 @@ def run_status_payload(root: Path, workspace_id: str, run_id: str, goal_id: str)
         "actor_results": list_json_objects(run_root / "results"),
         "reviews": list_json_objects(run_root / "reviews"),
         "judges": list_json_objects(run_root / "judges"),
+        "jobs": list_json_objects(run_root / "jobs"),
+        "executor_results": list_json_objects(run_root / "executor_results"),
         "events": events,
         "complete": not incomplete,
     }
@@ -753,6 +944,8 @@ def format_evidence_bundle_text(bundle: dict[str, Any]) -> str:
         f"actor_results: {len(status['actor_results'])}",
         f"reviews: {len(status['reviews'])}",
         f"judges: {len(status['judges'])}",
+        f"jobs: {len(status['jobs'])}",
+        f"executor_results: {len(status['executor_results'])}",
         f"events: {replay['event_count']}",
         "local stub / no external provider: true",
     ]
@@ -802,6 +995,15 @@ def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
         return f"replay {payload['workspace_id']}/{payload['run_id']} events={payload['event_count']} read_only=true"
     if kind == "agentoffice.framework_runtime_evidence_export":
         return f"evidence {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} format={payload['format']} path={payload['artifact_path']} local_stub=true"
+    if kind == "agentoffice.framework_runtime_executor_run_once":
+        if not payload["progressed"]:
+            return f"executor run-once {payload['workspace_id']}/{payload['run_id']} progressed=false reason={payload['reason']} local_stub=true"
+        job = payload["job"]
+        return f"executor run-once {payload['workspace_id']}/{payload['run_id']} job={job['job_id']} status={job['status']} local_stub=true"
+    if kind == "agentoffice.framework_runtime_executor_loop":
+        return f"executor loop {payload['workspace_id']}/{payload['run_id']} actions={payload['action_count']} complete={str(payload['complete']).lower()} local_stub=true"
+    if kind == "agentoffice.framework_runtime_executor_status":
+        return f"executor status {payload['workspace_id']}/{payload['run_id']} jobs={payload['job_count']} pending={payload['pending_count']} running={payload['running_count']} succeeded={payload['succeeded_count']} failed={payload['failed_count']} cancelled={payload['cancelled_count']} local_stub=true"
     if kind == "agentoffice.framework_runtime_job":
         return f"job {payload['workspace_id']}/{payload['run_id']}/{payload['job_id']} status={payload['status']} evidence_refs={len(payload['evidence_refs'])} local_static=true"
     if kind == "agentoffice.framework_runtime_job_list":
