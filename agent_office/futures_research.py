@@ -354,20 +354,70 @@ def classify_volatility(volatility: float | None, history: list[float]) -> str:
     return "normal"
 
 
+
+def build_feature_catalog(feature_rows: list[dict[str, Any]], source_hash: str) -> dict[str, Any]:
+    categories = {
+        'feature_version': 'metadata', 'source_hash': 'metadata', 'open': 'market_structure', 'high': 'market_structure', 'low': 'market_structure', 'close': 'market_structure', 'volume': 'market_structure',
+        'returns': 'market_structure', 'volatility': 'market_structure', 'atr': 'market_structure', 'trend': 'market_structure', 'momentum': 'market_structure', 'volume_change': 'market_structure',
+        'funding_rate': 'funding', 'funding_zscore': 'funding', 'funding_change': 'funding', 'premium_spread': 'funding', 'basis': 'funding',
+        'open_interest': 'positioning', 'oi_change': 'positioning', 'oi_acceleration': 'positioning', 'oi_price_divergence': 'positioning', 'long_short_ratio': 'positioning', 'long_short_imbalance': 'positioning',
+        'taker_imbalance': 'active_flow', 'buy_sell_pressure': 'active_flow', 'volume_delta': 'active_flow', 'liquidation_imbalance': 'active_flow', 'orderflow_delta': 'active_flow',
+        'volatility_term_structure': 'derivative_structure', 'market_regime': 'derived_state', 'trend_state': 'derived_state', 'volatility_state': 'derived_state', 'crowding_score': 'derived_state',
+    }
+    sources = {
+        'feature_version': ['feature_store'], 'source_hash': ['data_audit'], 'open': ['ohlcv'], 'high': ['ohlcv'], 'low': ['ohlcv'], 'close': ['ohlcv'], 'volume': ['ohlcv'], 'returns': ['ohlcv'], 'volatility': ['ohlcv'], 'atr': ['ohlcv'], 'trend': ['ohlcv'], 'momentum': ['ohlcv'], 'volume_change': ['ohlcv'],
+        'funding_rate': ['funding'], 'funding_zscore': ['funding'], 'funding_change': ['funding'], 'premium_spread': ['premium'], 'basis': ['basis'],
+        'open_interest': ['open_interest'], 'oi_change': ['open_interest'], 'oi_acceleration': ['open_interest'], 'oi_price_divergence': ['open_interest', 'ohlcv'], 'long_short_ratio': ['long_short_ratio'], 'long_short_imbalance': ['long_short_ratio'],
+        'taker_imbalance': ['taker_buy_sell'], 'buy_sell_pressure': ['taker_buy_sell'], 'volume_delta': ['taker_buy_sell'], 'liquidation_imbalance': ['liquidation'], 'orderflow_delta': ['orderflow'],
+        'volatility_term_structure': ['volatility_structure'], 'market_regime': ['ohlcv'], 'trend_state': ['ohlcv'], 'volatility_state': ['ohlcv'], 'crowding_score': ['funding', 'long_short_ratio', 'open_interest', 'taker_buy_sell'],
+    }
+    rows = len(feature_rows)
+    names = list(feature_rows[0]) if feature_rows else []
+    features = []
+    for name in names:
+        if name == 'timestamp':
+            continue
+        null_count = sum(1 for row in feature_rows if row.get(name) is None)
+        features.append({
+            'name': name,
+            'category': categories.get(name, 'uncategorized'),
+            'source_datasets': sources.get(name, []),
+            'feature_version': FEATURE_VERSION,
+            'source_hash': source_hash,
+            'row_count': rows,
+            'null_count': null_count,
+            'null_ratio': (null_count / rows) if rows else None,
+            'no_interpolation': True,
+        })
+    return {
+        'kind': 'agentoffice.futures_research.feature_catalog.v2',
+        'feature_version': FEATURE_VERSION,
+        'source_hash': source_hash,
+        'rows': rows,
+        'features': features,
+        'created_at': utc_now(),
+        'trading_allowed': False,
+    }
+
 def build_feature_store(data_lake: str | Path, feature_store: str | Path) -> dict[str, Any]:
     store = Path(feature_store)
     audit = audit_data_lake(data_lake, store)
     datasets = load_audited_datasets(audit)
     ohlcv = datasets.get("ohlcv", [])
     if not ohlcv:
+        source_hash = sha256_text(json.dumps(audit, sort_keys=True))
+        catalog_path = store / 'feature_catalog.json'
+        write_json(catalog_path, build_feature_catalog([], source_hash))
         payload = {
             "kind": "agentoffice.futures_research.feature_store.v2",
             "ok": False,
             "status": "failed",
             "reason": "ohlcv_required",
             "feature_version": FEATURE_VERSION,
-            "source_hash": sha256_text(json.dumps(audit, sort_keys=True)),
+            'source_hash': source_hash,
             "rows": 0,
+            "feature_catalog_path": str(catalog_path),
+            "feature_count": 0,
             "trading_allowed": False,
         }
         write_json(store / "manifest.json", payload)
@@ -492,13 +542,19 @@ def build_feature_store(data_lake: str | Path, feature_store: str | Path) -> dic
 
     rows_path = store / "features.jsonl"
     atomic_write(rows_path, "".join(json.dumps(row, sort_keys=True) + "\n" for row in feature_rows))
+    source_hash = sha256_text(json.dumps(audit, sort_keys=True))
+    feature_catalog = build_feature_catalog(feature_rows, source_hash)
+    catalog_path = store / "feature_catalog.json"
+    write_json(catalog_path, feature_catalog)
     manifest = {
         "kind": "agentoffice.futures_research.feature_store.v2",
         "ok": bool(feature_rows),
         "status": "ready" if feature_rows else "failed",
         "feature_version": FEATURE_VERSION,
-        "source_hash": sha256_text(json.dumps(audit, sort_keys=True)),
+        'source_hash': source_hash,
         "rows": len(feature_rows),
+        "feature_catalog_path": str(catalog_path),
+        "feature_count": len(feature_catalog["features"]),
         "path": str(rows_path),
         "exact_timestamp_join": True,
         "no_interpolation": True,
@@ -512,6 +568,8 @@ def build_feature_store(data_lake: str | Path, feature_store: str | Path) -> dic
         {
             "rows": len(feature_rows),
             "null_counts": {key: sum(1 for row in feature_rows if row.get(key) is None) for key in feature_rows[0]} if feature_rows else {},
+            "null_ratios": {item["name"]: item["null_ratio"] for item in feature_catalog["features"]},
+            "feature_count": len(feature_catalog["features"]),
             "no_interpolation_applied": True,
             "exact_join_misses": exact_join_misses,
         },

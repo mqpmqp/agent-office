@@ -121,6 +121,7 @@ class FuturesResearchCliTests(unittest.TestCase):
             code, stdout, stderr = run_cli(loop_args)
 
             features = [json.loads(line) for line in (feature_store / "features.jsonl").read_text(encoding="utf-8").splitlines()]
+            feature_catalog = json.loads((feature_store / "feature_catalog.json").read_text(encoding="utf-8"))
             latest = json.loads((trial_store / "latest_trial.json").read_text(encoding="utf-8"))
             edge_search = json.loads((trial_store / "edge_search" / "latest_edge_search.json").read_text(encoding="utf-8"))
             memory_files = list((trial_store / "strategy_memory").glob("*/*.json"))
@@ -132,6 +133,18 @@ class FuturesResearchCliTests(unittest.TestCase):
         self.assertEqual(payload["feature_store"]["feature_version"], "futures_feature_v2.0")
         self.assertTrue(payload["feature_store"]["exact_timestamp_join"])
         self.assertTrue(payload["feature_store"]["no_interpolation"])
+        catalog_by_name = {item["name"]: item for item in feature_catalog["features"]}
+        self.assertEqual(feature_catalog["kind"], "agentoffice.futures_research.feature_catalog.v2")
+        self.assertEqual(feature_catalog["feature_version"], "futures_feature_v2.0")
+        self.assertEqual(feature_catalog["source_hash"], payload["feature_store"]["source_hash"])
+        self.assertEqual(payload["feature_store"]["feature_count"], len(feature_catalog["features"]))
+        self.assertEqual(payload["feature_store"]["feature_catalog_path"], str(feature_store / "feature_catalog.json"))
+        self.assertTrue(all(item["no_interpolation"] for item in feature_catalog["features"]))
+        self.assertEqual(catalog_by_name["funding_zscore"]["category"], "funding")
+        self.assertEqual(catalog_by_name["funding_zscore"]["source_datasets"], ["funding"])
+        self.assertEqual(catalog_by_name["oi_acceleration"]["category"], "positioning")
+        self.assertEqual(catalog_by_name["taker_imbalance"]["source_datasets"], ["taker_buy_sell"])
+        self.assertIn("open_interest", catalog_by_name["crowding_score"]["source_datasets"])
         self.assertEqual(len(features), 80)
         self.assertTrue(all(row["feature_version"] == "futures_feature_v2.0" for row in features))
         self.assertTrue(all(row.get("source_hash") for row in features))

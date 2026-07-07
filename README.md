@@ -41,6 +41,8 @@ data_lake/
 
 Supported datasets are OHLCV, Funding, Premium, Open Interest, Long Short Ratio, Taker Buy/Sell, Liquidation, Orderflow, Basis, and Volatility Structure. Missing or unreadable datasets are recorded as failed audit entries; the system does not fabricate data or interpolate joins.
 
+Feature Store V2 writes feature_catalog.json beside features.jsonl; each feature records category, source datasets, feature version, source hash, row count, null count, null ratio, and no_interpolation=true.
+
 ```bash
 python3 -m agent_office futures-research audit --data-lake data_lake --out feature_store --json
 python3 -m agent_office futures-research features --data-lake data_lake --feature-store feature_store --json
