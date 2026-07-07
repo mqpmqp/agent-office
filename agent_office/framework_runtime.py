@@ -1775,7 +1775,7 @@ def scheduler_dependency_reasons(task: dict[str, Any], by_task_id: dict[str, dic
 def initial_scheduler_state(root: Path, workspace_id: str, run_id: str, goal_id: str, trigger: str, max_retries: int) -> dict[str, Any]:
     if max_retries < 0:
         raise FrameworkRuntimeError("Scheduler max retries must be zero or greater.")
-    graph = load_task_graph(root, workspace_id, goal_id)
+    graph = load_runtime_graph(root, workspace_id, goal_id)
     tasks = graph["tasks"]
     by_task_id = {task["task_id"]: task for task in tasks}
     scheduler_tasks: list[dict[str, Any]] = []
@@ -1844,16 +1844,16 @@ def initial_scheduler_state(root: Path, workspace_id: str, run_id: str, goal_id:
     }
 
 
-def refresh_scheduler_counts(state: dict[str, Any]) -> dict[str, Any]:
+def refresh_scheduler_counts(state: dict[str, Any], append_transitions: bool = True) -> dict[str, Any]:
     tasks = list(state.get("tasks", []))
     state["task_count"] = len(tasks)
     state["completed_count"] = sum(1 for item in tasks if item.get("status") == "completed")
     state["failed_count"] = sum(1 for item in tasks if item.get("status") == "failed")
     state["blocked_count"] = sum(1 for item in tasks if item.get("status") == "blocked")
-    if tasks and all(item.get("status") in TERMINAL_SCHEDULER_TASK_STATUSES for item in tasks):
-        if state["failed_count"]:
+    if append_transitions and tasks and all(item.get("status") in TERMINAL_SCHEDULER_TASK_STATUSES for item in tasks):
+        if state["failed_count"] and state.get("status") != "failed":
             append_scheduler_transition(state, "fail", "failed", "one or more scheduler tasks failed")
-        elif state.get("status") != "completed":
+        elif not state["failed_count"] and state.get("status") != "completed":
             append_scheduler_transition(state, "complete", "completed", "all scheduler tasks completed")
     return state
 
@@ -1916,7 +1916,7 @@ def scheduler_status_payload(root: Path, workspace_id: str, run_id: str, goal_id
     else:
         state = initial_scheduler_state(root, workspace_id, run_id, goal_id, "manual", 1)
         persisted = False
-    refresh_scheduler_counts(state)
+    refresh_scheduler_counts(state, append_transitions=persisted)
     return {
         "schema_version": 1,
         "kind": "agentoffice.framework_runtime_scheduler_status",
@@ -1945,10 +1945,18 @@ def scheduler_dependency_ready(task: dict[str, Any], state: dict[str, Any]) -> t
     return not reasons, reasons
 
 
+def has_scheduler_task_status_block(task: dict[str, Any]) -> bool:
+    return any(str(reason).startswith(("task_status:", "task_terminal:")) for reason in task.get("blocked_reasons", []))
+
+
 def refresh_scheduler_eligibility(state: dict[str, Any]) -> None:
     for task in state.get("tasks", []):
         status = str(task.get("status", ""))
         if status in {"paused", "waiting_result", "selected", "dispatched"} | TERMINAL_SCHEDULER_TASK_STATUSES:
+            continue
+        if has_scheduler_task_status_block(task):
+            if status != "blocked":
+                append_scheduler_task_transition(task, "block", "blocked", ";".join(str(reason) for reason in task.get("blocked_reasons", [])))
             continue
         ready, reasons = scheduler_dependency_ready(task, state)
         if ready and status == "blocked":
@@ -2013,7 +2021,7 @@ def scheduler_run_payload(root: Path, workspace_id: str, run_id: str, goal_id: s
         append_scheduler_transition(state, "start", "selected", "scheduler selected first task")
     task_id = str(task["task_id"])
     retry_suffix = f"-r{int(task.get('retry_count', 0))}" if int(task.get("retry_count", 0)) else ""
-    job_id = f"sched-{task_id}{retry_suffix}"
+    job_id = f"sched-{goal_id}-{task_id}{retry_suffix}"
     append_scheduler_task_transition(task, "select", "selected", "scheduler selected task by priority")
     decision = write_policy_decision(
         root,
@@ -2054,6 +2062,9 @@ def scheduler_run_payload(root: Path, workspace_id: str, run_id: str, goal_id: s
         }
     if job_path(root, workspace_id, run_id, job_id).exists():
         job = read_job_payload(root, workspace_id, run_id, job_id)
+        metadata = job.get("metadata", {}) if isinstance(job.get("metadata"), dict) else {}
+        if str(metadata.get("goal_id", "")) != goal_id or str(metadata.get("task_id", "")) != task_id:
+            raise FrameworkRuntimeError(f"Scheduler job id collision for goal/task: {job_id}")
     else:
         job = create_job_payload(
             root,
@@ -2150,17 +2161,18 @@ def scheduler_retry_payload(root: Path, workspace_id: str, run_id: str, goal_id:
     task = scheduler_task_by_id(state, task_id)
     retry_count = int(task.get("retry_count", 0))
     max_retries = int(task.get("max_retries", 0))
+    if task.get("status") != "failed":
+        raise FrameworkRuntimeError(f"Scheduler task is not failed and cannot be retried: {task_id}")
     if retry_count >= max_retries:
-        append_scheduler_task_transition(task, "retry-exhausted", "failed", "scheduler retry exhausted")
-        append_scheduler_transition(state, "retry-exhausted", "blocked", f"scheduler retry exhausted for task {task_id}")
-    else:
-        task["retry_count"] = retry_count + 1
-        task["job_id"] = None
-        task["job_ref"] = None
-        task["worker_assignment"] = None
-        task["worker_result_ref"] = None
-        append_scheduler_task_transition(task, "retry", "retry_scheduled", "scheduler retry scheduled")
-        append_scheduler_transition(state, "retry", "retry_scheduled", f"scheduler retry scheduled for task {task_id}")
+        refresh_scheduler_counts(state)
+        return {"schema_version": 1, "kind": "agentoffice.framework_runtime_scheduler_retry", "workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "task": task, "scheduler": state, "local_static": True, "provider_calls": False, "network_calls": False, "env_reads": False, "external_worker_calls": False}
+    task["retry_count"] = retry_count + 1
+    task["job_id"] = None
+    task["job_ref"] = None
+    task["worker_assignment"] = None
+    task["worker_result_ref"] = None
+    append_scheduler_task_transition(task, "retry", "retry_scheduled", "scheduler retry scheduled")
+    append_scheduler_transition(state, "retry", "retry_scheduled", f"scheduler retry scheduled for task {task_id}")
     write_scheduler_state(root, workspace_id, run_id, goal_id, state)
     append_runtime_event(root, workspace_id, run_id, "scheduler.retry", LOCAL_EXECUTION_LOOP_NAME)
     return {"schema_version": 1, "kind": "agentoffice.framework_runtime_scheduler_retry", "workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "task": task, "scheduler": state, "local_static": True, "provider_calls": False, "network_calls": False, "env_reads": False, "external_worker_calls": False}

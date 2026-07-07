@@ -1289,7 +1289,7 @@ class FrameworkRuntimeWP8SchedulerKernelTest(unittest.TestCase):
             self.assertEqual(exit_code, 0, stderr)
             retry_run = json.loads(stdout)
             self.assertEqual(retry_run["dispatch"]["task_id"], "a")
-            self.assertEqual(retry_run["job"]["job_id"], "sched-a-r1")
+            self.assertEqual(retry_run["job"]["job_id"], "sched-goal-demo-a-r1")
 
             exit_code, stdout, stderr = run_cli(self.scheduler_args(tmp, "result-intake", "--task-id", "a", "--status", "failed", "--summary", "deterministic failure", "--json"))
             self.assertEqual(exit_code, 0, stderr)
@@ -1320,6 +1320,126 @@ class FrameworkRuntimeWP8SchedulerKernelTest(unittest.TestCase):
                     self.assertEqual(cli.cmd_framework_runtime(args), 0)
                 self.assertIn("agentoffice.framework_runtime_scheduler_status", stdout.getvalue())
 
+    def test_scheduler_missing_graph_returns_json_error_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_workspace(base, "ws-demo")
+            create_run(base, "ws-demo", "run-demo")
+
+            for action in ("request", "status"):
+                exit_code, stdout, stderr = run_cli(self.scheduler_args(tmp, action, "--json"))
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(stderr, "")
+                payload = json.loads(stdout)
+                self.assertIn("Task graph not found", payload["error"])
+                self.assertNotIn("Traceback", stdout + stderr)
+
+    def test_scheduler_failed_terminal_refresh_and_retry_are_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.init_scheduler_graph(
+                tmp,
+                [{"task_id": "a", "title": "A", "status": "created", "depends_on": [], "role": "implementation_agent", "required_evidence": [], "priority": 1}],
+            )
+            self.assertEqual(run_cli(self.scheduler_args(tmp, "request", "--max-retries", "0", "--json"))[0], 0)
+            self.assertEqual(run_cli(self.scheduler_args(tmp, "run", "--json"))[0], 0)
+            self.assertEqual(run_cli(self.scheduler_args(tmp, "result-intake", "--task-id", "a", "--status", "failed", "--summary", "failed", "--json"))[0], 0)
+
+            exit_code, stdout, stderr = run_cli(self.scheduler_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            first_status = json.loads(stdout)["scheduler"]
+            transition_count = len(first_status["transition_log"])
+            self.assertEqual(first_status["status"], "failed")
+
+            exit_code, stdout, stderr = run_cli(self.scheduler_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            second_status = json.loads(stdout)["scheduler"]
+            self.assertEqual(len(second_status["transition_log"]), transition_count)
+
+            exit_code, stdout, stderr = run_cli(self.scheduler_args(tmp, "retry", "--task-id", "a", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            exhausted = json.loads(stdout)
+            self.assertEqual(exhausted["task"]["status"], "failed")
+            self.assertEqual(len(exhausted["task"]["transition_log"]), len(first_status["tasks"][0]["transition_log"]))
+            self.assertEqual(len(exhausted["scheduler"]["transition_log"]), transition_count)
+
+            exit_code, stdout, stderr = run_cli(self.scheduler_args(tmp, "retry", "--task-id", "a", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            repeated = json.loads(stdout)
+            self.assertEqual(len(repeated["task"]["transition_log"]), len(exhausted["task"]["transition_log"]))
+            self.assertEqual(len(repeated["scheduler"]["transition_log"]), transition_count)
+
+    def test_scheduler_retry_rejects_non_failed_task_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.init_scheduler_graph(
+                tmp,
+                [
+                    {"task_id": "done", "title": "Done", "status": "accepted", "depends_on": [], "role": "implementation_agent", "required_evidence": [], "priority": 3},
+                    {"task_id": "blocked", "title": "Blocked", "status": "created", "depends_on": ["done"], "role": "implementation_agent", "required_evidence": [], "priority": 2},
+                ],
+            )
+            self.assertEqual(run_cli(self.scheduler_args(tmp, "request", "--json"))[0], 0)
+
+            exit_code, stdout, stderr = run_cli(self.scheduler_args(tmp, "retry", "--task-id", "done", "--json"))
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stderr, "")
+            self.assertIn("cannot be retried", json.loads(stdout)["error"])
+
+            exit_code, stdout, stderr = run_cli(self.scheduler_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            tasks = self.task_map(json.loads(stdout)["scheduler"])
+            self.assertEqual(tasks["done"]["status"], "completed")
+            self.assertEqual(tasks["blocked"]["status"], "pending")
+
+    def test_scheduler_preserves_task_status_block_and_namespaces_jobs_by_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_workspace(base, "ws-demo")
+            create_run(base, "ws-demo", "run-demo")
+            for goal_id in ("goal-one", "goal-two"):
+                create_goal_graph(
+                    base,
+                    "ws-demo",
+                    goal_id,
+                    [{"task_id": "same", "title": "Same", "status": "pending", "depends_on": [], "role": "implementation_agent", "required_evidence": [], "priority": 1}],
+                )
+                args = ["framework-runtime", "scheduler", "request", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--goal-id", goal_id, "--root", tmp, "--json"]
+                self.assertEqual(run_cli(args)[0], 0)
+                run_args = ["framework-runtime", "scheduler", "run", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--goal-id", goal_id, "--root", tmp, "--json"]
+                exit_code, stdout, stderr = run_cli(run_args)
+                self.assertEqual(exit_code, 0, stderr)
+                run = json.loads(stdout)
+                self.assertFalse(run["progressed"])
+                self.assertEqual(run["reason"], "no eligible scheduler task")
+                task = self.task_map(run["scheduler"])["same"]
+                self.assertEqual(task["status"], "blocked")
+                self.assertIn("task_status:pending", task["blocked_reasons"])
+                pause_args = ["framework-runtime", "scheduler", "pause", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--goal-id", goal_id, "--root", tmp, "--task-id", "same", "--json"]
+                self.assertEqual(run_cli(pause_args)[0], 0)
+                resume_args = ["framework-runtime", "scheduler", "resume", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--goal-id", goal_id, "--root", tmp, "--task-id", "same", "--json"]
+                exit_code, stdout, stderr = run_cli(resume_args)
+                self.assertEqual(exit_code, 0, stderr)
+                resumed_task = self.task_map(json.loads(stdout)["scheduler"])["same"]
+                self.assertEqual(resumed_task["status"], "blocked")
+                self.assertIn("task_status:pending", resumed_task["blocked_reasons"])
+
+            for goal_id in ("goal-one", "goal-two"):
+                graph_path = base / ".ai" / "workspaces" / "ws-demo" / "goals" / goal_id / "task_graph.json"
+                graph = json.loads(graph_path.read_text(encoding="utf-8"))
+                graph["tasks"][0]["status"] = "created"
+                graph_path.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
+                args = ["framework-runtime", "scheduler", "request", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--goal-id", goal_id, "--root", tmp, "--reset", "--json"]
+                self.assertEqual(run_cli(args)[0], 0)
+
+            job_ids = []
+            for goal_id in ("goal-one", "goal-two"):
+                run_args = ["framework-runtime", "scheduler", "run", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--goal-id", goal_id, "--root", tmp, "--json"]
+                exit_code, stdout, stderr = run_cli(run_args)
+                self.assertEqual(exit_code, 0, stderr)
+                run = json.loads(stdout)
+                job_ids.append(run["job"]["job_id"])
+                self.assertEqual(run["job"]["metadata"]["goal_id"], goal_id)
+            self.assertEqual(job_ids, ["sched-goal-one-same", "sched-goal-two-same"])
+
     def test_scheduler_error_paths_and_legacy_runtime_not_wp8_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             init_graph_run(tmp)
@@ -1341,7 +1461,7 @@ class FrameworkRuntimeWP8SchedulerKernelTest(unittest.TestCase):
             self.assertFalse(denied["progressed"])
             self.assertEqual(denied["policy_decision"]["reason_code"], "FORBIDDEN_CAPABILITY")
             self.assertIsNone(denied["worker_assignment"])
-            self.assertFalse((Path(tmp) / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "worker_results" / "sched-task-a.json").exists())
+            self.assertFalse((Path(tmp) / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "worker_results" / "sched-goal-demo-task-a.json").exists())
 
 
 
