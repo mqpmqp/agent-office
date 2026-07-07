@@ -302,14 +302,6 @@ from .autonomy import (
     format_autonomy_validation,
 )
 
-from .futures_research import (
-    FuturesResearchError,
-    audit_data_lake as futures_audit_data_lake,
-    build_feature_store as futures_build_feature_store,
-    format_research_payload,
-    run_full_loop as futures_run_full_loop,
-    run_research as futures_run_research,
-)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TASKS_ROOT = PROJECT_ROOT / ".ai" / "tasks"
@@ -2301,32 +2293,6 @@ def _add_repeatable_root_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", action="append", default=[], help="Repeatable artifact scan root. When set, default locations are not scanned.")
 
 
-def cmd_futures_research(args: argparse.Namespace) -> int:
-    action = args.futures_action
-    try:
-        if action == "audit":
-            payload = futures_audit_data_lake(args.data_lake, args.out)
-        elif action == "features":
-            payload = futures_build_feature_store(args.data_lake, args.feature_store)
-        elif action == "research":
-            payload = futures_run_research(
-                args.feature_store,
-                args.trial_store,
-                args.strategy,
-                cost_bps=args.cost_bps,
-                slippage_bps=args.slippage_bps,
-                holding_period=args.holding_period,
-            )
-        elif action == "loop":
-            payload = futures_run_full_loop(args.data_lake, args.feature_store, args.trial_store, args.strategy, cost_bps=args.cost_bps, slippage_bps=args.slippage_bps, holding_period=args.holding_period)
-        else:
-            raise AgentOfficeError("futures-research requires audit, features, research, or loop.")
-    except FuturesResearchError as exc:
-        raise AgentOfficeError(str(exc)) from exc
-    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else format_research_payload(payload))
-    return 0 if payload.get("ok", True) else 2
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-office")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -3231,41 +3197,6 @@ def build_parser() -> argparse.ArgumentParser:
     release_candidate.add_argument("--version", required=True, help="Candidate version, for example v1.1.0.")
     release_candidate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     release_candidate.set_defaults(func=cmd_v1)
-
-    p = sub.add_parser("futures-research", help="Run local-only futures data audit, feature, research, and failure-analysis loops.")
-    futures_sub = p.add_subparsers(dest="futures_action", required=True)
-    futures_audit = futures_sub.add_parser("audit", help="Audit Data Lake futures datasets without fabricating missing data.")
-    futures_audit.add_argument("--data-lake", required=True, help="Input data_lake directory.")
-    futures_audit.add_argument("--out", required=True, help="Output directory for manifests, checksums, coverage, quality reports, and audit.")
-    futures_audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    futures_audit.set_defaults(func=cmd_futures_research)
-
-    futures_features = futures_sub.add_parser("features", help="Build Feature Store V2 from audited Data Lake files.")
-    futures_features.add_argument("--data-lake", required=True, help="Input data_lake directory.")
-    futures_features.add_argument("--feature-store", required=True, help="Output feature_store directory.")
-    futures_features.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    futures_features.set_defaults(func=cmd_futures_research)
-
-    futures_research = futures_sub.add_parser("research", help="Run Strategy -> Walk Forward -> Failure Analysis from an existing feature_store.")
-    futures_research.add_argument("--feature-store", required=True, help="Input feature_store directory.")
-    futures_research.add_argument("--trial-store", required=True, help="Output trial_store directory.")
-    futures_research.add_argument("--strategy", default="all", help="Strategy name or all.")
-    futures_research.add_argument("--cost-bps", type=float, default=4.0, help="Round-trip cost model in basis points.")
-    futures_research.add_argument("--slippage-bps", type=float, default=2.0, help="Slippage model in basis points.")
-    futures_research.add_argument("--holding-period", type=int, default=3, help="Bars held after next-bar entry.")
-    futures_research.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    futures_research.set_defaults(func=cmd_futures_research)
-
-    futures_loop = futures_sub.add_parser("loop", help="Run Data Lake -> Feature Store -> Research -> Failure Memory in one local pass.")
-    futures_loop.add_argument("--data-lake", required=True, help="Input data_lake directory.")
-    futures_loop.add_argument("--feature-store", required=True, help="Output feature_store directory.")
-    futures_loop.add_argument("--trial-store", required=True, help="Output trial_store directory.")
-    futures_loop.add_argument("--strategy", default="all", help="Strategy name or all.")
-    futures_loop.add_argument("--cost-bps", type=float, default=4.0, help="Round-trip cost model in basis points.")
-    futures_loop.add_argument("--slippage-bps", type=float, default=2.0, help="Slippage model in basis points.")
-    futures_loop.add_argument("--holding-period", type=int, default=3, help="Bars held after next-bar entry.")
-    futures_loop.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    futures_loop.set_defaults(func=cmd_futures_research)
 
     p = sub.add_parser("run-bundle", help="Build, preview, inspect, validate, list, summarize, export, or check static local run bundles without executing providers.")
     p.add_argument("bundle_action", nargs="?", choices=["preview", "inspect", "validate", "list", "status", "intake", "results", "handoff", "review", "gate", "workflow", "export-review"], help="Bundle action.")
