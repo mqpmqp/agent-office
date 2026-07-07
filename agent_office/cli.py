@@ -142,6 +142,7 @@ from .packet_result import (
 from .framework_runtime import (
     FrameworkRuntimeError,
     capability_contract_payload as framework_runtime_capability_contract_payload,
+    contract_surface_payload as framework_runtime_contract_surface_payload,
     create_job_payload as framework_runtime_create_job_payload,
     dispatch_payload,
     execution_loop_payload as framework_runtime_execution_loop_payload,
@@ -1333,6 +1334,8 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
     try:
         if action == "workers":
             payload = worker_contract_payload()
+        elif action == "contract":
+            payload = framework_runtime_contract_surface_payload()
         elif action == "dispatch":
             payload = dispatch_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.task_id)
         elif action == "review":
@@ -2415,6 +2418,10 @@ def build_parser() -> argparse.ArgumentParser:
     framework_runtime_workers = framework_runtime_sub.add_parser("workers", help="List local framework runtime worker adapter contracts.")
     framework_runtime_workers.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     framework_runtime_workers.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_contract = framework_runtime_sub.add_parser("contract", help="Show the WP9 local/static framework-runtime contract surface.", description="Show the WP9 local/static framework-runtime contract surface.")
+    framework_runtime_contract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    framework_runtime_contract.set_defaults(func=cmd_framework_runtime)
 
     def add_framework_runtime_run_args(parser: argparse.ArgumentParser, *, goal: bool = True) -> None:
         parser.add_argument("--workspace-id", required=True, help="Stable workspace id.")
