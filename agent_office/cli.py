@@ -167,6 +167,13 @@ from .framework_runtime import (
     replay_payload as framework_runtime_replay_payload,
     resume_payload as framework_runtime_resume_payload,
     review_payload as framework_runtime_review_payload,
+    scheduler_pause_payload as framework_runtime_scheduler_pause_payload,
+    scheduler_request_payload as framework_runtime_scheduler_request_payload,
+    scheduler_result_intake_payload as framework_runtime_scheduler_result_intake_payload,
+    scheduler_resume_payload as framework_runtime_scheduler_resume_payload,
+    scheduler_retry_payload as framework_runtime_scheduler_retry_payload,
+    scheduler_run_payload as framework_runtime_scheduler_run_payload,
+    scheduler_status_payload as framework_runtime_scheduler_status_payload,
     review_id_for_task,
     result_id_for_task,
     run_status_payload as framework_runtime_status_payload,
@@ -1322,6 +1329,7 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
     orchestration_action = getattr(args, "framework_runtime_orchestration_action", None)
     execution_action = getattr(args, "framework_runtime_execution_action", None)
     policy_action = getattr(args, "framework_runtime_policy_action", None)
+    scheduler_action = getattr(args, "framework_runtime_scheduler_action", None)
     try:
         if action == "workers":
             payload = worker_contract_payload()
@@ -1372,6 +1380,23 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
                 payload = framework_runtime_policy_check_payload(args.capability_id, args.worker, args.action_name)
             else:
                 raise AgentOfficeError("framework-runtime policy requires a supported action.")
+        elif action == "scheduler":
+            if scheduler_action == "request":
+                payload = framework_runtime_scheduler_request_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.trigger, args.max_retries, args.reset)
+            elif scheduler_action == "run":
+                payload = framework_runtime_scheduler_run_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.capability_id)
+            elif scheduler_action == "status":
+                payload = framework_runtime_scheduler_status_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+            elif scheduler_action == "pause":
+                payload = framework_runtime_scheduler_pause_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.task_id)
+            elif scheduler_action == "resume":
+                payload = framework_runtime_scheduler_resume_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.task_id)
+            elif scheduler_action == "retry":
+                payload = framework_runtime_scheduler_retry_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.task_id)
+            elif scheduler_action == "result-intake":
+                payload = framework_runtime_scheduler_result_intake_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.task_id, args.status, args.summary)
+            else:
+                raise AgentOfficeError("framework-runtime scheduler requires a supported action.")
         elif action == "worker":
             if worker_action == "adapters":
                 payload = framework_runtime_worker_adapter_contract_payload()
@@ -1421,8 +1446,8 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
         else:
             raise AgentOfficeError("framework-runtime requires a supported action.")
     except FrameworkRuntimeError as exc:
-        if action in {"job", "executor", "worker", "orchestration", "execution", "policy"} and getattr(args, "json", False):
-            error_action = job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action if action == "orchestration" else execution_action if action == "execution" else policy_action
+        if action in {"job", "executor", "worker", "orchestration", "execution", "policy", "scheduler"} and getattr(args, "json", False):
+            error_action = job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action if action == "orchestration" else execution_action if action == "execution" else policy_action if action == "policy" else scheduler_action
             print(json.dumps(framework_runtime_job_error_payload(str(exc), error_action), indent=2, ensure_ascii=False))
             return 2
         raise AgentOfficeError(str(exc)) from exc
@@ -2476,6 +2501,50 @@ def build_parser() -> argparse.ArgumentParser:
     framework_runtime_policy_check.add_argument("--action-name", help="Optional action name override for the check.")
     framework_runtime_policy_check.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     framework_runtime_policy_check.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_scheduler = framework_runtime_sub.add_parser("scheduler", help="Run the deterministic WP8 scheduler kernel over framework-runtime execution state.")
+    framework_runtime_scheduler_sub = framework_runtime_scheduler.add_subparsers(dest="framework_runtime_scheduler_action", required=True)
+
+    def add_framework_runtime_scheduler_run_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--workspace-id", required=True, help="Stable workspace id.")
+        parser.add_argument("--run-id", required=True, help="Stable run id.")
+        parser.add_argument("--goal-id", required=True, help="Stable goal id.")
+        parser.add_argument("--root", required=True, help="Root directory that contains the .ai/workspaces store.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    framework_runtime_scheduler_request = framework_runtime_scheduler_sub.add_parser("request", help="Create or show a deterministic scheduler request.")
+    add_framework_runtime_scheduler_run_args(framework_runtime_scheduler_request)
+    framework_runtime_scheduler_request.add_argument("--trigger", choices=["manual", "dependency-ready", "retry", "resume"], default="manual", help="Deterministic scheduler trigger. Default: manual.")
+    framework_runtime_scheduler_request.add_argument("--max-retries", type=int, default=1, help="Bounded retry budget per task. Default: 1.")
+    framework_runtime_scheduler_request.add_argument("--reset", action="store_true", help="Replace any existing scheduler state for this goal.")
+    framework_runtime_scheduler_request.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_scheduler_run = framework_runtime_scheduler_sub.add_parser("run", help="Advance one deterministic scheduler decision.")
+    add_framework_runtime_scheduler_run_args(framework_runtime_scheduler_run)
+    framework_runtime_scheduler_run.add_argument("--capability-id", default="local.execution.dispatch", help="Capability id to check before scheduler job creation. Default: local.execution.dispatch.")
+    framework_runtime_scheduler_run.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_scheduler_status = framework_runtime_scheduler_sub.add_parser("status", help="Show deterministic scheduler state.")
+    add_framework_runtime_scheduler_run_args(framework_runtime_scheduler_status)
+    framework_runtime_scheduler_status.set_defaults(func=cmd_framework_runtime)
+
+    for scheduler_action in ("pause", "resume"):
+        scheduler_parser = framework_runtime_scheduler_sub.add_parser(scheduler_action, help=f"{scheduler_action.capitalize()} a scheduler task or the scheduler pool.")
+        add_framework_runtime_scheduler_run_args(scheduler_parser)
+        scheduler_parser.add_argument("--task-id", help="Optional task id. Defaults to the scheduler pool.")
+        scheduler_parser.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_scheduler_retry = framework_runtime_scheduler_sub.add_parser("retry", help="Schedule a bounded retry for one scheduler task.")
+    add_framework_runtime_scheduler_run_args(framework_runtime_scheduler_retry)
+    framework_runtime_scheduler_retry.add_argument("--task-id", required=True, help="Task id to retry.")
+    framework_runtime_scheduler_retry.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_scheduler_result_intake = framework_runtime_scheduler_sub.add_parser("result-intake", help="Intake one local deterministic scheduler worker result.")
+    add_framework_runtime_scheduler_run_args(framework_runtime_scheduler_result_intake)
+    framework_runtime_scheduler_result_intake.add_argument("--task-id", required=True, help="Task id whose scheduler job is waiting for a result.")
+    framework_runtime_scheduler_result_intake.add_argument("--status", choices=["succeeded", "failed"], required=True, help="Deterministic worker result status.")
+    framework_runtime_scheduler_result_intake.add_argument("--summary", required=True, help="Short deterministic worker result summary.")
+    framework_runtime_scheduler_result_intake.set_defaults(func=cmd_framework_runtime)
 
     framework_runtime_worker = framework_runtime_sub.add_parser("worker", help="Read local worker adapter contracts and intake deterministic worker results.")
     framework_runtime_worker_sub = framework_runtime_worker.add_subparsers(dest="framework_runtime_worker_action", required=True)
