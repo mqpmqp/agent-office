@@ -67,6 +67,14 @@ def write_json(path: Path, payload: Any) -> None:
     atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+
+def read_json_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else None
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -518,6 +526,64 @@ def load_features(feature_store: str | Path) -> list[dict[str, Any]]:
     return sorted((json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()), key=lambda row: row["timestamp"])
 
 
+
+def feature_source_summary(feature_store: str | Path) -> dict[str, Any]:
+    store = Path(feature_store)
+    manifest = read_json_file(store / "manifest.json") or {}
+    audit = read_json_file(store / "data_audit" / "audit.json") or {}
+    datasets = []
+    for item in audit.get("datasets", []):
+        if not isinstance(item, dict):
+            continue
+        datasets.append(
+            {
+                "name": item.get("name"),
+                "status": item.get("status"),
+                "checksum": item.get("checksum"),
+                "coverage": item.get("coverage"),
+                "source_status": item.get("source_status"),
+            }
+        )
+    return {
+        "feature_version": manifest.get("feature_version"),
+        "source_hash": manifest.get("source_hash"),
+        "rows": manifest.get("rows"),
+        "exact_timestamp_join": bool(manifest.get("exact_timestamp_join")),
+        "no_interpolation": bool(manifest.get("no_interpolation")) and bool(audit.get("no_interpolation", True)),
+        "no_fake_data": bool(audit.get("no_fake_data", True)),
+        "join_misses": manifest.get("join_misses", {}),
+        "datasets": datasets,
+    }
+
+def read_strategy_memory(store: Path, strategy: str, limit: int = 20) -> dict[str, Any]:
+    memory_dir = store / "strategy_memory" / strategy
+    files = sorted(memory_dir.glob("*.json"))[-limit:] if memory_dir.exists() else []
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    recent_reports = []
+    malformed = 0
+    for report_path in files:
+        try:
+            report = read_json_file(report_path) or {}
+        except Exception:
+            malformed += 1
+            continue
+        status = str(report.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        reasons = [str(reason) for reason in report.get("failure_reasons", []) if reason]
+        for reason in reasons:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        recent_reports.append({"trial_file": report_path.name, "status": status, "failure_reasons": reasons})
+    return {
+        "prior_trials": sum(status_counts.values()),
+        "prior_failed_trials": status_counts.get("failed", 0),
+        "status_counts": status_counts,
+        "historical_failure_reasons": dict(sorted(reason_counts.items())),
+        "recent_reports": recent_reports,
+        "malformed_reports": malformed,
+    }
+
+
 def signal_for(strategy: str, row: dict[str, Any]) -> int:
     if strategy == "momentum":
         value = row.get("momentum")
@@ -806,7 +872,19 @@ def run_research(feature_store: str | Path, trial_store: str | Path, strategy: s
             },
         }
         failure = failure_report(name, walk)
-        result = {"strategy": name, "walk_forward": walk, "failure_report": failure, "meta_label": train_meta_label(rows, name, holding_period, cost_bps, slippage_bps)}
+        memory = read_strategy_memory(store, name)
+        repeated = [reason for reason in failure["failure_reasons"] if memory["historical_failure_reasons"].get(reason, 0) != 0]
+        memory["repeated_failure_reasons"] = repeated
+        memory["skip_recommendation"] = bool(repeated and failure["status"] == "failed")
+        failure["memory_repeated_failure"] = bool(repeated)
+        failure["research_recommendation"] = "avoid_repeat_without_new_features" if memory["skip_recommendation"] else "review_with_new_hypothesis"
+        result = {
+            "strategy": name,
+            "walk_forward": walk,
+            "failure_report": failure,
+            "strategy_memory": memory,
+            "meta_label": train_meta_label(rows, name, holding_period, cost_bps, slippage_bps),
+        }
         results.append(result)
         write_json(store / "strategy_memory" / name / f"{trial_id}.json", failure)
     payload = {
@@ -818,7 +896,9 @@ def run_research(feature_store: str | Path, trial_store: str | Path, strategy: s
         "paper_trading_started": False,
         "private_api_touched": False,
         "feature_store": str(feature_store),
+        "source_lineage": feature_source_summary(feature_store),
         "strategies": results,
+        "strategy_memory_summary": {result["strategy"]: result["strategy_memory"] for result in results},
         "chrono_dual": chrono_dual_state(rows),
         "created_at": utc_now(),
     }

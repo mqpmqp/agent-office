@@ -103,21 +103,22 @@ class FuturesResearchCliTests(unittest.TestCase):
             lake = build_data_lake(root, full=True)
             feature_store = root / "feature_store"
             trial_store = root / "trial_store"
-            code, stdout, stderr = run_cli(
-                [
-                    "futures-research",
-                    "loop",
-                    "--data-lake",
-                    str(lake),
-                    "--feature-store",
-                    str(feature_store),
-                    "--trial-store",
-                    str(trial_store),
-                    "--strategy",
-                    "all",
-                    "--json",
-                ]
-            )
+            loop_args = [
+                "futures-research",
+                "loop",
+                "--data-lake",
+                str(lake),
+                "--feature-store",
+                str(feature_store),
+                "--trial-store",
+                str(trial_store),
+                "--strategy",
+                "all",
+                "--json",
+            ]
+            code, stdout, stderr = run_cli(loop_args)
+            self.assertEqual(code, 0, stdout + stderr)
+            code, stdout, stderr = run_cli(loop_args)
 
             features = [json.loads(line) for line in (feature_store / "features.jsonl").read_text(encoding="utf-8").splitlines()]
             latest = json.loads((trial_store / "latest_trial.json").read_text(encoding="utf-8"))
@@ -141,11 +142,17 @@ class FuturesResearchCliTests(unittest.TestCase):
         self.assertFalse(latest["trading_allowed"])
         self.assertFalse(latest["paper_trading_started"])
         self.assertFalse(latest["private_api_touched"])
+        self.assertEqual(latest["source_lineage"]["feature_version"], "futures_feature_v2.0")
+        self.assertTrue(latest["source_lineage"]["no_fake_data"])
+        self.assertTrue(latest["source_lineage"]["no_interpolation"])
+        self.assertEqual(len(latest["source_lineage"]["datasets"]), len(REQUIRED_DATASETS))
+        self.assertEqual(set(latest["strategy_memory_summary"]), {item["strategy"] for item in latest["strategies"]})
         self.assertEqual(latest["chrono_dual"]["macro_model"], "TimesFM")
         self.assertEqual(latest["chrono_dual"]["micro_model"], "Kronos")
         self.assertFalse(latest["chrono_dual"]["model_calls"])
         self.assertEqual(len(latest["strategies"]), 7)
         self.assertEqual(len(memory_files), 7)
+        self.assertTrue(any(item["strategy_memory"]["repeated_failure_reasons"] for item in latest["strategies"]))
         for strategy in latest["strategies"]:
             validation = strategy["walk_forward"]["validation_standard"]
             self.assertFalse(validation["random_split"])
@@ -160,6 +167,9 @@ class FuturesResearchCliTests(unittest.TestCase):
                 self.assertGreater(trade["entry_timestamp"], trade["signal_timestamp"])
                 self.assertFalse(trade["same_bar_fill"])
             self.assertIn(strategy["failure_report"]["status"], {"failed", "review"})
+            self.assertIn(strategy["failure_report"]["research_recommendation"], {"avoid_repeat_without_new_features", "review_with_new_hypothesis"})
+            self.assertGreaterEqual(strategy["strategy_memory"]["prior_trials"], 1)
+            self.assertIn("repeated_failure_reasons", strategy["strategy_memory"])
             self.assertEqual(strategy["meta_label"]["target"], "signal_execution_probability_not_direction_prediction")
             self.assertIn("logistic_regression", strategy["meta_label"]["models"])
             self.assertIn("gradient_boosting", strategy["meta_label"]["models"])
