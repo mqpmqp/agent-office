@@ -21,6 +21,34 @@ The agents do not freely chat. Every task is coordinated through files under:
   claude-decision.md
 ```
 
+## Futures Research Platform V2
+
+AgentOffice includes a local-only futures research surface for data-driven strategy research. It does not touch trading execution, Binance private APIs, Paper Trading, provider APIs, or model runtimes.
+
+The V2 loop is:
+
+```text
+data_lake/
+  -> data audit (manifest, checksum, coverage, quality, source status)
+  -> feature_store/
+  -> signal generators
+  -> next-bar execution simulator
+  -> train / validation / OOS walk-forward
+  -> trial_store/
+  -> strategy_memory/
+```
+
+Supported datasets are OHLCV, Funding, Premium, Open Interest, Long Short Ratio, Taker Buy/Sell, Liquidation, Orderflow, Basis, and Volatility Structure. Missing or unreadable datasets are recorded as failed audit entries; the system does not fabricate data or interpolate joins.
+
+```bash
+python3 -m agent_office futures-research audit --data-lake data_lake --out feature_store --json
+python3 -m agent_office futures-research features --data-lake data_lake --feature-store feature_store --json
+python3 -m agent_office futures-research research --feature-store feature_store --trial-store trial_store --strategy all --json
+python3 -m agent_office futures-research loop --data-lake data_lake --feature-store feature_store --trial-store trial_store --strategy all --json
+```
+
+Research strategies are Momentum, Mean Reversion, Breakout, Funding Carry, OI Divergence, Orderflow, and Regime Strategy. Walk-forward validation is chronological only: no random split, no future leakage, no same-bar fill, with cost and slippage included. Chrono-Dual integration is a research-layer contract only: TimesFM, Kronos, and LLM reviewer outputs are represented as market-state metadata with `model_calls=false` and `trading_allowed=false`. Meta labeling estimates whether existing signals are worth executing; it does not predict direction.
+
 ## Auditable Multi-Agent Orchestration
 
 AgentOffice is evolving from a static workflow/gate tool into an auditable multi-agent orchestration system.
