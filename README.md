@@ -36,6 +36,7 @@ data_lake/
   -> train / validation / OOS walk-forward
   -> trial_store/
   -> strategy_memory/
+  -> edge_search/
 ```
 
 Supported datasets are OHLCV, Funding, Premium, Open Interest, Long Short Ratio, Taker Buy/Sell, Liquidation, Orderflow, Basis, and Volatility Structure. Missing or unreadable datasets are recorded as failed audit entries; the system does not fabricate data or interpolate joins.
@@ -47,7 +48,7 @@ python3 -m agent_office futures-research research --feature-store feature_store 
 python3 -m agent_office futures-research loop --data-lake data_lake --feature-store feature_store --trial-store trial_store --strategy all --json
 ```
 
-Research strategies are Momentum, Mean Reversion, Breakout, Funding Carry, OI Divergence, Orderflow, and Regime Strategy. Walk-forward validation is chronological only: no random split, no future leakage, no same-bar fill, with cost and slippage included. Chrono-Dual integration is a research-layer contract only: TimesFM, Kronos, and LLM reviewer outputs are represented as market-state metadata with `model_calls=false` and `trading_allowed=false`. Meta labeling estimates whether existing signals are worth executing; it does not predict direction.
+Research strategies are Momentum, Mean Reversion, Breakout, Funding Carry, OI Divergence, Orderflow, and Regime Strategy. Walk-forward validation is chronological only: no random split, no future leakage, no same-bar fill, with cost and slippage included. Chrono-Dual integration is a research-layer contract only: TimesFM, Kronos, and LLM reviewer outputs are represented as market-state metadata with `model_calls=false` and `trading_allowed=false`. Meta labeling estimates whether existing signals are worth executing; it does not predict direction. Edge Search ranks strategy candidates from OOS metrics, cost impact, and failure memory, writes `trial_store/edge_search/latest_edge_search.json`, and remains research-only with `trading_allowed=false`.
 
 ## Auditable Multi-Agent Orchestration
 

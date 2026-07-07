@@ -843,6 +843,72 @@ def train_meta_label(rows: list[dict[str, Any]], strategy: str, holding_period: 
     }
 
 
+
+def edge_search_report(trial: dict[str, Any], store: Path) -> dict[str, Any]:
+    candidates = []
+    for result in trial.get('strategies', []):
+        strategy = result.get('strategy')
+        walk = result.get('walk_forward', {})
+        overall = walk.get('overall', {}).get('metrics', {})
+        oos = walk.get('segments', {}).get('oos', {}).get('metrics', {})
+        failure = result.get('failure_report', {})
+        memory = result.get('strategy_memory', {})
+        pf = float(oos.get('pf') or 0.0)
+        sharpe = float(oos.get('sharpe') or 0.0)
+        stability = float(oos.get('stability') or 0.0)
+        trades = int(oos.get('trade_count') or 0)
+        dd = abs(float(oos.get('dd') or 0.0))
+        cost = abs(float(overall.get('cost_impact') or 0.0))
+        score = min(1.0, max(0.0, (pf / 2.0) * 0.35 + max(0.0, sharpe / 2.0) * 0.25 + stability * 0.25 + min(1.0, trades / 20.0) * 0.15 - dd - cost))
+        blockers = []
+        if trades < 5:
+            blockers.append('oos_trade_count_insufficient')
+        if pf <= 1.0:
+            blockers.append('oos_profit_factor_not_positive')
+        if failure.get('status') == 'failed':
+            blockers.extend(failure.get('failure_reasons', []))
+        if memory.get('skip_recommendation'):
+            blockers.append('repeated_failure_memory')
+        blockers = sorted(set(str(item) for item in blockers if item))
+        if score >= 0.65 and not blockers:
+            action = 'candidate_review'
+        elif memory.get('skip_recommendation'):
+            action = 'avoid_repeat_without_new_evidence'
+        else:
+            action = 'research_new_hypothesis'
+        candidates.append({
+            'strategy': strategy,
+            'edge_score': score,
+            'research_action': action,
+            'blockers': blockers,
+            'metrics': {
+                'oos_pf': oos.get('pf'),
+                'oos_sharpe': oos.get('sharpe'),
+                'oos_dd': oos.get('dd'),
+                'oos_trade_count': trades,
+                'cost_impact': overall.get('cost_impact'),
+            },
+            'failure_reasons': failure.get('failure_reasons', []),
+            'repeated_failure_reasons': memory.get('repeated_failure_reasons', []),
+        })
+    candidates.sort(key=lambda item: item['edge_score'], reverse=True)
+    status = 'EDGE_CANDIDATE_REVIEW' if any(item['research_action'] == 'candidate_review' for item in candidates) else 'EDGE_NOT_FOUND'
+    payload = {
+        'kind': 'agentoffice.futures_research.edge_search.v2',
+        'trial_id': trial.get('trial_id'),
+        'status': status,
+        'trading_allowed': False,
+        'paper_trading_started': False,
+        'private_api_touched': False,
+        'selection_rule': 'research_only_oos_score_with_failure_memory_blockers',
+        'candidates': candidates,
+        'created_at': utc_now(),
+    }
+    trial_file = str(trial.get('trial_id') or 'unknown') + '.json'
+    write_json(store / 'edge_search' / trial_file, payload)
+    write_json(store / 'edge_search' / 'latest_edge_search.json', payload)
+    return payload
+
 def run_research(feature_store: str | Path, trial_store: str | Path, strategy: str = "all", *, cost_bps: float = 4.0, slippage_bps: float = 2.0, holding_period: int = 3) -> dict[str, Any]:
     if holding_period < 1:
         raise FuturesResearchError("holding_period_must_be_positive")
@@ -902,6 +968,7 @@ def run_research(feature_store: str | Path, trial_store: str | Path, strategy: s
         "chrono_dual": chrono_dual_state(rows),
         "created_at": utc_now(),
     }
+    payload['edge_search'] = edge_search_report(payload, store)
     write_json(store / "trials" / f"{trial_id}.json", payload)
     write_json(store / "latest_trial.json", payload)
     return payload
