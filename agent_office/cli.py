@@ -1343,7 +1343,7 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
         if action == "workers":
             payload = worker_contract_payload()
         elif action == "contract":
-            payload = framework_runtime_contract_surface_payload()
+            payload = framework_runtime_contract_surface_payload(args.section, args.surface_id)
         elif action == "dispatch":
             payload = dispatch_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.task_id)
         elif action == "review":
@@ -1457,8 +1457,8 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
         else:
             raise AgentOfficeError("framework-runtime requires a supported action.")
     except FrameworkRuntimeError as exc:
-        if action in {"job", "executor", "worker", "orchestration", "execution", "policy", "scheduler"} and getattr(args, "json", False):
-            error_action = job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action if action == "orchestration" else execution_action if action == "execution" else policy_action if action == "policy" else scheduler_action
+        if action in {"contract", "job", "executor", "worker", "orchestration", "execution", "policy", "scheduler"} and getattr(args, "json", False):
+            error_action = "contract" if action == "contract" else job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action if action == "orchestration" else execution_action if action == "execution" else policy_action if action == "policy" else scheduler_action
             print(json.dumps(framework_runtime_job_error_payload(str(exc), error_action), indent=2, ensure_ascii=False))
             return 2
         raise AgentOfficeError(str(exc)) from exc
@@ -2454,6 +2454,8 @@ def build_parser() -> argparse.ArgumentParser:
     framework_runtime_workers.set_defaults(func=cmd_framework_runtime)
 
     framework_runtime_contract = framework_runtime_sub.add_parser("contract", help="Show the WP9 local/static framework-runtime contract surface.", description="Show the WP9 local/static framework-runtime contract surface.")
+    framework_runtime_contract.add_argument("--section", default="all", help="Read-only contract section to inspect: all, summary, surfaces, relationships, invariants, validation, or safety.")
+    framework_runtime_contract.add_argument("--surface-id", help="Read-only contract surface id to inspect when section is all or surfaces.")
     framework_runtime_contract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     framework_runtime_contract.set_defaults(func=cmd_framework_runtime)
 

@@ -52,6 +52,18 @@ JUDGE_STUB_NAME = "local_judge_stub"
 LOCAL_ORCHESTRATOR_NAME = "local_orchestrator_stub"
 LOCAL_EXECUTION_LOOP_NAME = "local_execution_loop_stub"
 LOCAL_EXECUTION_CAPABILITY_ID = "local.execution.dispatch"
+CONTRACT_SECTION_IDS = {"all", "summary", "surfaces", "relationships", "invariants", "validation", "safety"}
+CONTRACT_SAFETY_FLAG_KEYS = (
+    "local_static",
+    "deterministic",
+    "read_only",
+    "provider_calls",
+    "network_calls",
+    "env_reads",
+    "external_worker_calls",
+    "daemon_started",
+    "background_worker_started",
+)
 
 
 class FrameworkRuntimeError(ValueError):
@@ -90,12 +102,13 @@ def runtime_contract_status() -> dict[str, Any]:
             "local_execution_loop_v1",
             "execution_policy_capability_boundary_v1",
             "framework_runtime_wp9_contract_surface_v1",
+            "framework_runtime_wp9_contract_inspection_v1",
         ],
     }
 
 
-def contract_surface_payload() -> dict[str, Any]:
-    return {
+def contract_surface_payload(section: str = "all", surface_id: str | None = None) -> dict[str, Any]:
+    payload = {
         "schema_version": 1,
         "kind": "agentoffice.framework_runtime_contract_surface",
         "contract_version": "framework_runtime_wp9_contract_surface_v1",
@@ -142,6 +155,71 @@ def contract_surface_payload() -> dict[str, Any]:
             "legacy runtime scheduler namespace is not the WP8/WP9 framework-runtime scheduler backend",
         ],
         "validation_contract": ["compileall agent_office tests", "unittest tests.test_framework_runtime", "full unittest and unittest discover", "doctor adapters", "verify.sh and smoke-test.sh P6-PROFILES", "run-staged P6-PROFILES --dry-run --reset", "framework-runtime contract CLI help and JSON/text smoke", "git diff --check"],
+        "local_static": True,
+        "deterministic": True,
+        "read_only": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "daemon_started": False,
+        "background_worker_started": False,
+    }
+    return contract_surface_selection_payload(payload, section, surface_id)
+
+
+def contract_safety_flags(payload: dict[str, Any]) -> dict[str, bool]:
+    return {key: bool(payload[key]) for key in CONTRACT_SAFETY_FLAG_KEYS}
+
+
+def contract_surface_selection_payload(payload: dict[str, Any], section: str, surface_id: str | None) -> dict[str, Any]:
+    section_id = str(section or "all")
+    if section_id not in CONTRACT_SECTION_IDS:
+        allowed = ", ".join(sorted(CONTRACT_SECTION_IDS))
+        raise FrameworkRuntimeError(f"Unsupported contract section: {section_id}. Expected one of: {allowed}.")
+    if surface_id:
+        if section_id not in {"all", "surfaces"}:
+            raise FrameworkRuntimeError("--surface-id can only be used with the all or surfaces contract section.")
+        surface = next((item for item in payload["surfaces"] if item["surface_id"] == surface_id), None)
+        if surface is None:
+            raise FrameworkRuntimeError(f"Unknown contract surface: {surface_id}")
+        return contract_section_payload(payload, "surfaces", {"surface_id": surface_id, "surface": surface})
+    if section_id == "all":
+        return payload
+    if section_id == "summary":
+        data = {
+            "surface_ids": [item["surface_id"] for item in payload["surfaces"]],
+            "surface_count": len(payload["surfaces"]),
+            "relationship_count": len(payload["relationships"]),
+            "invariant_count": len(payload["inherited_invariants"]),
+            "validation_command_count": len(payload["validation_contract"]),
+            "wp8_scheduler_backend": "framework-runtime scheduler",
+            "policy_gate": LOCAL_EXECUTION_CAPABILITY_ID,
+        }
+    elif section_id == "surfaces":
+        data = {"surfaces": payload["surfaces"], "surface_count": len(payload["surfaces"])}
+    elif section_id == "relationships":
+        data = {"relationships": payload["relationships"], "relationship_count": len(payload["relationships"])}
+    elif section_id == "invariants":
+        data = {"inherited_invariants": payload["inherited_invariants"], "invariant_count": len(payload["inherited_invariants"])}
+    elif section_id == "validation":
+        data = {"validation_contract": payload["validation_contract"], "validation_command_count": len(payload["validation_contract"])}
+    else:
+        data = {"safety": contract_safety_flags(payload)}
+    return contract_section_payload(payload, section_id, data)
+
+
+def contract_section_payload(payload: dict[str, Any], section_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_contract_surface_section",
+        "contract_version": payload["contract_version"],
+        "status": payload["status"],
+        "section": section_id,
+        "baseline": payload["baseline"],
+        "command": payload["command"],
+        "data": data,
+        "safety": contract_safety_flags(payload),
         "local_static": True,
         "deterministic": True,
         "read_only": True,
@@ -2662,6 +2740,31 @@ def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
                 f"contract {payload['contract_version']} surfaces={len(payload['surfaces'])} relationships={len(payload['relationships'])} read_only={str(payload['read_only']).lower()} local_static=true",
                 "wp8_scheduler_backend=framework-runtime scheduler policy_gate=local.execution.dispatch external_behavior=false",
             ]
+        )
+    if kind == "agentoffice.framework_runtime_contract_surface_section":
+        section = payload["section"]
+        data = payload["data"]
+        if section == "summary":
+            return (
+                f"contract {payload['contract_version']} section=summary surfaces={data['surface_count']} "
+                f"relationships={data['relationship_count']} read_only=true local_static=true"
+            )
+        if section == "surfaces" and "surface" in data:
+            surface = data["surface"]
+            return f"contract {payload['contract_version']} section=surfaces surface={surface['surface_id']} kind={surface['kind']} read_only=true local_static=true"
+        if section == "surfaces":
+            surface_ids = ",".join(item["surface_id"] for item in data["surfaces"])
+            return f"contract {payload['contract_version']} section=surfaces count={data['surface_count']} ids={surface_ids} read_only=true local_static=true"
+        if section == "relationships":
+            return f"contract {payload['contract_version']} section=relationships count={data['relationship_count']} read_only=true local_static=true"
+        if section == "invariants":
+            return f"contract {payload['contract_version']} section=invariants count={data['invariant_count']} read_only=true local_static=true"
+        if section == "validation":
+            return f"contract {payload['contract_version']} section=validation count={data['validation_command_count']} read_only=true local_static=true"
+        safety = payload["safety"]
+        return (
+            f"contract {payload['contract_version']} section=safety read_only={str(safety['read_only']).lower()} "
+            f"provider_calls={str(safety['provider_calls']).lower()} network_calls={str(safety['network_calls']).lower()} env_reads={str(safety['env_reads']).lower()}"
         )
     if kind == "agentoffice.framework_runtime_capability_contract":
         return "\n".join(

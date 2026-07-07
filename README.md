@@ -1532,6 +1532,19 @@ python3 -m agent_office runtime orchestrate --workspace .ai/local-runtime/demo -
 python3 -m agent_office runtime orchestrate --workspace .ai/local-runtime/demo --resume --json
 ```
 
+### Framework Runtime WP9 contract inspection
+
+WP9 exposes a deterministic read-only contract surface for reviewing framework-runtime boundaries without reading `.env`, printing environment variables, dispatching providers, starting workers, or mutating runtime state.
+
+```bash
+python3 -m agent_office framework-runtime contract --json
+python3 -m agent_office framework-runtime contract --section summary --json
+python3 -m agent_office framework-runtime contract --section surfaces --surface-id scheduler --json
+python3 -m agent_office framework-runtime contract --section safety
+```
+
+Supported sections are `all`, `summary`, `surfaces`, `relationships`, `invariants`, `validation`, and `safety`. Invalid JSON requests return a structured Framework Runtime error envelope instead of a traceback.
+
 Operator flow:
 
 1. Initialize the workspace once with a stable `run-id`.
