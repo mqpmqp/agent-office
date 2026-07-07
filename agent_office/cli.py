@@ -143,6 +143,9 @@ from .framework_runtime import (
     FrameworkRuntimeError,
     create_job_payload as framework_runtime_create_job_payload,
     dispatch_payload,
+    execution_loop_payload as framework_runtime_execution_loop_payload,
+    execution_loop_run_once_payload as framework_runtime_execution_run_once_payload,
+    execution_loop_status_payload as framework_runtime_execution_status_payload,
     evidence_payload as framework_runtime_evidence_payload,
     executor_loop_payload as framework_runtime_executor_loop_payload,
     executor_run_once_payload as framework_runtime_executor_run_once_payload,
@@ -1315,6 +1318,7 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
     executor_action = getattr(args, "framework_runtime_executor_action", None)
     worker_action = getattr(args, "framework_runtime_worker_action", None)
     orchestration_action = getattr(args, "framework_runtime_orchestration_action", None)
+    execution_action = getattr(args, "framework_runtime_execution_action", None)
     try:
         if action == "workers":
             payload = worker_contract_payload()
@@ -1349,6 +1353,15 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
                 payload = framework_runtime_orchestration_run_local_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
             else:
                 raise AgentOfficeError("framework-runtime orchestration requires a supported action.")
+        elif action == "execution":
+            if execution_action == "run-once":
+                payload = framework_runtime_execution_run_once_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+            elif execution_action == "loop":
+                payload = framework_runtime_execution_loop_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.max_iterations)
+            elif execution_action == "status":
+                payload = framework_runtime_execution_status_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id)
+            else:
+                raise AgentOfficeError("framework-runtime execution requires a supported action.")
         elif action == "worker":
             if worker_action == "adapters":
                 payload = framework_runtime_worker_adapter_contract_payload()
@@ -1398,8 +1411,8 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
         else:
             raise AgentOfficeError("framework-runtime requires a supported action.")
     except FrameworkRuntimeError as exc:
-        if action in {"job", "executor", "worker", "orchestration"} and getattr(args, "json", False):
-            error_action = job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action
+        if action in {"job", "executor", "worker", "orchestration", "execution"} and getattr(args, "json", False):
+            error_action = job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action if action == "orchestration" else execution_action
             print(json.dumps(framework_runtime_job_error_payload(str(exc), error_action), indent=2, ensure_ascii=False))
             return 2
         raise AgentOfficeError(str(exc)) from exc
@@ -2426,6 +2439,19 @@ def build_parser() -> argparse.ArgumentParser:
         orchestration_parser = framework_runtime_orchestration_sub.add_parser(orchestration_action, help=f"Framework runtime orchestration {orchestration_action} for one run/goal.")
         add_framework_runtime_run_args(orchestration_parser)
         orchestration_parser.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_execution = framework_runtime_sub.add_parser("execution", help="Run the local deterministic execution loop over an orchestration plan.")
+    framework_runtime_execution_sub = framework_runtime_execution.add_subparsers(dest="framework_runtime_execution_action", required=True)
+    framework_runtime_execution_run_once = framework_runtime_execution_sub.add_parser("run-once", help="Advance one local execution-loop dispatch.")
+    add_framework_runtime_run_args(framework_runtime_execution_run_once)
+    framework_runtime_execution_run_once.set_defaults(func=cmd_framework_runtime)
+    framework_runtime_execution_loop = framework_runtime_execution_sub.add_parser("loop", help="Advance local execution-loop dispatches until complete or max iterations is reached.")
+    add_framework_runtime_run_args(framework_runtime_execution_loop)
+    framework_runtime_execution_loop.add_argument("--max-iterations", type=int, default=100, help="Maximum run-once iterations. Default: 100.")
+    framework_runtime_execution_loop.set_defaults(func=cmd_framework_runtime)
+    framework_runtime_execution_status = framework_runtime_execution_sub.add_parser("status", help="Show local execution-loop state for one run/goal.")
+    add_framework_runtime_run_args(framework_runtime_execution_status)
+    framework_runtime_execution_status.set_defaults(func=cmd_framework_runtime)
 
     framework_runtime_worker = framework_runtime_sub.add_parser("worker", help="Read local worker adapter contracts and intake deterministic worker results.")
     framework_runtime_worker_sub = framework_runtime_worker.add_subparsers(dest="framework_runtime_worker_action", required=True)

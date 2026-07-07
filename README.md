@@ -121,6 +121,17 @@ python3 -m agent_office framework-runtime orchestration run-local --workspace-id
 
 The orchestration state is stored at `.ai/workspaces/<workspace-id>/runs/<run-id>/orchestrations/<goal-id>.json`. The state model is explicit: `planned -> running -> succeeded`, or `planned -> blocked` when validation finds blocked dependencies. Each local dispatch creates a deterministic run-local job using the task id as the job id, intakes a deterministic `local_worker_adapter_stub` result, advances the task to `accepted`, appends orchestration events, and records evidence refs for the task graph, orchestration state, jobs, worker results, and event log.
 
+
+WP6 Local Execution Loop V1 adds a stepwise local execution loop over the WP5 orchestration plan. It is still local/static only. `run-once` advances at most one planned dispatch, `loop` repeats `run-once` until complete or `--max-iterations` is reached, and `status` previews or reads the persisted execution-loop state. The loop writes local execution state, deterministic jobs, deterministic worker results, task graph acceptance, and runtime events. It does not call real Codex, Claude, providers, external adapters, daemons, background workers, message queues, or the network.
+
+```bash
+python3 -m agent_office framework-runtime execution status --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime execution run-once --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --json
+python3 -m agent_office framework-runtime execution loop --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --max-iterations 100 --json
+```
+
+The execution-loop state is stored at `.ai/workspaces/<workspace-id>/runs/<run-id>/execution_loops/<goal-id>.json`. Its explicit state model is `planned -> running -> succeeded`, or `planned -> blocked` when the orchestration plan is invalid. Each `run-once` creates or reuses one task-id-based local job, intakes a deterministic `local_worker_adapter_stub` result, advances that task to `accepted`, and records evidence refs for the task graph, execution-loop state, jobs, worker results, and event log.
+
 Baseline report index:
 
 - `AGENTOFFICE_FRAMEWORK_RUNTIME_TRUNK_BATCH_REPORT.md`: original trunk batch implementation report.
@@ -130,8 +141,9 @@ Baseline report index:
 - `FRAMEWORK_RUNTIME_WP3_LOCAL_EXECUTOR_LOOP_V1_REPORT.md`: WP3 local deterministic executor loop report.
 - `FRAMEWORK_RUNTIME_WP4_WORKER_ADAPTER_CONTRACT_RESULT_INTAKE_REPORT.md`: WP4 local worker adapter contract and deterministic result intake report.
 - `FRAMEWORK_RUNTIME_WP5_LOCAL_ORCHESTRATION_CONTRACT_V1_REPORT.md`: WP5 local deterministic orchestration contract report.
+- `FRAMEWORK_RUNTIME_WP6_LOCAL_EXECUTION_LOOP_V1_REPORT.md`: WP6 local deterministic execution loop report.
 
-After WP5, future Framework Runtime work packages should start from this local deterministic job/executor/worker-result/orchestration baseline and keep the safety boundary unless broader execution is explicitly authorized.
+After WP6, future Framework Runtime work packages should start from this local deterministic job/executor/worker-result/orchestration/execution-loop baseline and keep the safety boundary unless broader execution is explicitly authorized.
 
 ## Runtime Foundation Slice
 

@@ -81,6 +81,23 @@ def orchestration_args(root: str, action: str, *extra: str) -> list[str]:
     ]
 
 
+def execution_args(root: str, action: str, *extra: str) -> list[str]:
+    return [
+        "framework-runtime",
+        "execution",
+        action,
+        "--workspace-id",
+        "ws-demo",
+        "--run-id",
+        "run-demo",
+        "--goal-id",
+        "goal-demo",
+        "--root",
+        root,
+        *extra,
+    ]
+
+
 class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
     def test_baseline_dispatch_review_judge_happy_path_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,6 +189,10 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
             (["framework-runtime", "orchestration", "show", "--help"], "--goal-id"),
             (["framework-runtime", "orchestration", "validate", "--help"], "--goal-id"),
             (["framework-runtime", "orchestration", "run-local", "--help"], "--goal-id"),
+            (["framework-runtime", "execution", "--help"], "run-once"),
+            (["framework-runtime", "execution", "run-once", "--help"], "--goal-id"),
+            (["framework-runtime", "execution", "loop", "--help"], "--max-iterations"),
+            (["framework-runtime", "execution", "status", "--help"], "--goal-id"),
         ]
         for argv, expected in help_cases:
             stdout = io.StringIO()
@@ -857,6 +878,136 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
                 with redirect_stdout(stdout):
                     self.assertEqual(cli.cmd_framework_runtime(args), 0)
                 self.assertIn("agentoffice.framework_runtime_orchestration_plan", stdout.getvalue())
+
+
+    def test_execution_loop_run_once_progresses_one_dispatch_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_graph_run(tmp)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            preview = json.loads(stdout)
+            self.assertFalse(preview["persisted"])
+            self.assertEqual(preview["execution_loop"]["status"], "planned")
+            self.assertEqual(preview["execution_loop"]["dispatch_count"], 2)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "run-once", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            first = json.loads(stdout)
+            self.assertTrue(first["progressed"])
+            self.assertTrue(first["created"])
+            self.assertEqual(first["dispatch"]["task_id"], "task-a")
+            self.assertEqual(first["execution_loop"]["status"], "running")
+            self.assertEqual(first["execution_loop"]["completed_count"], 1)
+            self.assertEqual([item["status"] for item in first["execution_loop"]["dispatches"]], ["succeeded", "pending"])
+            self.assertFalse(first["provider_calls"])
+            self.assertFalse(first["network_calls"])
+            self.assertFalse(first["external_worker_calls"])
+            self.assertTrue((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "execution_loops" / "goal-demo.json").is_file())
+            self.assertTrue((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "jobs" / "task-a.json").is_file())
+            self.assertFalse((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "jobs" / "task-b.json").exists())
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            runtime_status = json.loads(stdout)
+            self.assertFalse(runtime_status["complete"])
+            self.assertEqual([task["status"] for task in runtime_status["tasks"]], ["accepted", "created"])
+            self.assertEqual(len(runtime_status["execution_loops"]), 1)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "run-once", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            second = json.loads(stdout)
+            self.assertTrue(second["progressed"])
+            self.assertEqual(second["dispatch"]["task_id"], "task-b")
+            self.assertEqual(second["execution_loop"]["status"], "succeeded")
+            self.assertEqual(second["execution_loop"]["completed_count"], 2)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "run-once", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            done = json.loads(stdout)
+            self.assertFalse(done["progressed"])
+            self.assertIn("already succeeded", done["reason"])
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "evidence", "--format", "json", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            evidence = json.loads(stdout)
+            self.assertEqual(len(evidence["bundle"]["status"]["execution_loops"]), 1)
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "replay", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            event_types = [event["event_type"] for event in json.loads(stdout)["events"]]
+            self.assertIn("execution_loop.planned", event_types)
+            self.assertIn("execution_loop.task_dispatched", event_types)
+            self.assertIn("execution_loop.task_succeeded", event_types)
+            self.assertIn("execution_loop.succeeded", event_types)
+
+    def test_execution_loop_drains_with_loop_and_rejects_bad_iteration_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            init_graph_run(tmp)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "loop", "--max-iterations", "1", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            first = json.loads(stdout)
+            self.assertEqual(first["kind"], "agentoffice.framework_runtime_execution_loop")
+            self.assertEqual(first["action_count"], 1)
+            self.assertFalse(first["complete"])
+            self.assertEqual(first["status"]["execution_loop"]["completed_count"], 1)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "loop", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            second = json.loads(stdout)
+            self.assertEqual(second["action_count"], 1)
+            self.assertTrue(second["complete"])
+            self.assertEqual(second["status"]["execution_loop"]["status"], "succeeded")
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "loop", "--max-iterations", "0", "--json"))
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stderr, "")
+            self.assertIn("max iterations", json.loads(stdout)["error"])
+
+    def test_execution_loop_blocks_invalid_plan_without_job_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_workspace(base, "ws-demo")
+            create_run(base, "ws-demo", "run-demo")
+            create_goal_graph(
+                base,
+                "ws-demo",
+                "goal-demo",
+                [{"task_id": "task-a", "title": "Task A", "status": "created", "depends_on": ["missing"], "role": "implementation_agent", "required_evidence": []}],
+            )
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "run-once", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertFalse(payload["progressed"])
+            self.assertEqual(payload["execution_loop"]["status"], "blocked")
+            self.assertFalse((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "jobs" / "task-a.json").exists())
+
+    def test_execution_loop_command_does_not_read_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            init_graph_run(tmp)
+            args = argparse.Namespace(
+                framework_runtime_action="execution",
+                framework_runtime_job_action=None,
+                framework_runtime_executor_action=None,
+                framework_runtime_worker_action=None,
+                framework_runtime_orchestration_action=None,
+                framework_runtime_execution_action="status",
+                workspace_id="ws-demo",
+                run_id="run-demo",
+                goal_id="goal-demo",
+                root=tmp,
+                json=True,
+            )
+            with patch.object(os, "environ", EnvGuard()), patch.object(cli.os, "environ", EnvGuard()):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(cli.cmd_framework_runtime(args), 0)
+                self.assertIn("agentoffice.framework_runtime_execution_loop_status", stdout.getvalue())
 
     def test_baseline_existing_slice_commands_and_legacy_packet_still_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
