@@ -193,6 +193,9 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
             (["framework-runtime", "execution", "run-once", "--help"], "--goal-id"),
             (["framework-runtime", "execution", "loop", "--help"], "--max-iterations"),
             (["framework-runtime", "execution", "status", "--help"], "--goal-id"),
+            (["framework-runtime", "policy", "--help"], "capabilities"),
+            (["framework-runtime", "policy", "capabilities", "--help"], "--json"),
+            (["framework-runtime", "policy", "check", "--help"], "--capability-id"),
         ]
         for argv, expected in help_cases:
             stdout = io.StringIO()
@@ -1008,6 +1011,117 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
                 with redirect_stdout(stdout):
                     self.assertEqual(cli.cmd_framework_runtime(args), 0)
                 self.assertIn("agentoffice.framework_runtime_execution_loop_status", stdout.getvalue())
+
+
+    def test_policy_capability_contract_and_check_cli_json_and_text(self) -> None:
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "policy", "capabilities", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        contract = json.loads(stdout)
+        self.assertEqual(contract["kind"], "agentoffice.framework_runtime_capability_contract")
+        by_id = {item["capability_id"]: item for item in contract["capabilities"]}
+        self.assertEqual(by_id["local.execution.dispatch"]["status"], "local-only")
+        self.assertTrue(by_id["local.execution.dispatch"]["allowed"])
+        self.assertEqual(by_id["external.provider.execute"]["status"], "forbidden")
+        self.assertFalse(by_id["real.codex.execute"]["allowed"])
+        self.assertFalse(contract["provider_calls"])
+        self.assertFalse(contract["network_calls"])
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "policy", "check", "--capability-id", "local.execution.dispatch", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        allowed = json.loads(stdout)["decision"]
+        self.assertTrue(allowed["allowed"])
+        self.assertEqual(allowed["reason_code"], "LOCAL_ONLY_ALLOWED")
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "policy", "check", "--capability-id", "external.provider.execute"])
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("allowed=false", stdout)
+        self.assertIn("FORBIDDEN_CAPABILITY", stdout)
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "policy", "check", "--capability-id", "bad/value", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        unknown = json.loads(stdout)["decision"]
+        self.assertFalse(unknown["allowed"])
+        self.assertEqual(unknown["reason_code"], "UNKNOWN_CAPABILITY")
+
+    def test_execution_loop_policy_allow_records_decision_and_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_graph_run(tmp)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "run-once", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertTrue(payload["progressed"])
+            self.assertTrue(payload["policy_decision"]["allowed"])
+            self.assertEqual(payload["policy_decision"]["capability_id"], "local.execution.dispatch")
+            self.assertEqual(payload["dispatch"]["policy_decision"]["reason_code"], "LOCAL_ONLY_ALLOWED")
+            self.assertTrue((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "policy_decisions" / "task-a.json").is_file())
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            status = json.loads(stdout)
+            self.assertEqual(len(status["policy_decisions"]), 1)
+            self.assertTrue(status["policy_decisions"][0]["allowed"])
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "evidence", "--format", "json", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            evidence = json.loads(stdout)
+            self.assertEqual(len(evidence["bundle"]["status"]["policy_decisions"]), 1)
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "replay", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            event_types = [event["event_type"] for event in json.loads(stdout)["events"]]
+            self.assertIn("policy.allowed", event_types)
+            self.assertIn("execution_loop.task_dispatched", event_types)
+
+    def test_execution_loop_policy_deny_fails_job_without_worker_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            init_graph_run(tmp)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "run-once", "--capability-id", "external.provider.execute", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertFalse(payload["progressed"])
+            self.assertEqual(payload["policy_decision"]["reason_code"], "FORBIDDEN_CAPABILITY")
+            self.assertEqual(payload["execution_loop"]["status"], "blocked")
+            self.assertEqual(payload["dispatch"]["status"], "policy_denied")
+            self.assertEqual(payload["job"]["status"], "failed")
+            self.assertIsNone(payload["worker_result"])
+            self.assertTrue((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "jobs" / "task-a.json").is_file())
+            self.assertTrue((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "policy_decisions" / "task-a.json").is_file())
+            self.assertFalse((base / ".ai" / "workspaces" / "ws-demo" / "runs" / "run-demo" / "worker_results" / "task-a.json").exists())
+
+            exit_code, stdout, stderr = run_cli(runtime_args(tmp, "status", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            status = json.loads(stdout)
+            self.assertEqual([task["status"] for task in status["tasks"]], ["rejected", "created"])
+            self.assertEqual(len(status["worker_results"]), 0)
+            self.assertEqual(status["jobs"][0]["metadata"]["policy_decision"], "denied")
+            self.assertEqual(status["policy_decisions"][0]["reason_code"], "FORBIDDEN_CAPABILITY")
+
+            exit_code, stdout, stderr = run_cli([
+                "framework-runtime", "replay", "--workspace-id", "ws-demo", "--run-id", "run-demo", "--root", tmp, "--json"
+            ])
+            self.assertEqual(exit_code, 0, stderr)
+            event_types = [event["event_type"] for event in json.loads(stdout)["events"]]
+            self.assertIn("policy.denied", event_types)
+            self.assertIn("execution_loop.policy_denied", event_types)
+            self.assertNotIn("execution_loop.task_dispatched", event_types)
+            self.assertNotIn("worker_result.received", event_types)
+
+    def test_execution_loop_unknown_capability_denies_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            init_graph_run(tmp)
+
+            exit_code, stdout, stderr = run_cli(execution_args(tmp, "run-once", "--capability-id", "missing.capability", "--json"))
+            self.assertEqual(exit_code, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertFalse(payload["progressed"])
+            self.assertEqual(payload["policy_decision"]["reason_code"], "UNKNOWN_CAPABILITY")
+            self.assertNotIn("Traceback", stdout + stderr)
 
     def test_baseline_existing_slice_commands_and_legacy_packet_still_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

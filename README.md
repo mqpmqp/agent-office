@@ -132,6 +132,19 @@ python3 -m agent_office framework-runtime execution loop --workspace-id ws-demo 
 
 The execution-loop state is stored at `.ai/workspaces/<workspace-id>/runs/<run-id>/execution_loops/<goal-id>.json`. Its explicit state model is `planned -> running -> succeeded`, or `planned -> blocked` when the orchestration plan is invalid. Each `run-once` creates or reuses one task-id-based local job, intakes a deterministic `local_worker_adapter_stub` result, advances that task to `accepted`, and records evidence refs for the task graph, execution-loop state, jobs, worker results, and event log.
 
+
+WP7 Execution Policy + Capability Boundary V1 adds a deterministic local policy gate in front of execution-loop dispatch. Capabilities are declared as simple local/static records with worker, action, status, and allowed fields. `local.execution.dispatch` is allowed for the local execution loop; real provider, Codex, and Claude execution capabilities are forbidden. Unknown capabilities are denied deterministically.
+
+```bash
+python3 -m agent_office framework-runtime policy capabilities --json
+python3 -m agent_office framework-runtime policy check --capability-id local.execution.dispatch --json
+python3 -m agent_office framework-runtime policy check --capability-id external.provider.execute
+python3 -m agent_office framework-runtime execution run-once --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --capability-id local.execution.dispatch --json
+python3 -m agent_office framework-runtime execution run-once --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --capability-id external.provider.execute --json
+```
+
+Allowed execution writes a policy decision, `policy.allowed` event, local job, deterministic worker result, and normal execution-loop evidence. Denied execution writes a policy decision, `policy.denied` and `execution_loop.policy_denied` events, creates a failed local job, marks the task `rejected`, and does not create a worker result or dispatch a worker. Policy decisions are stored at `.ai/workspaces/<workspace-id>/runs/<run-id>/policy_decisions/<job-id>.json` and are included in framework runtime status/evidence output.
+
 Baseline report index:
 
 - `AGENTOFFICE_FRAMEWORK_RUNTIME_TRUNK_BATCH_REPORT.md`: original trunk batch implementation report.
@@ -142,8 +155,9 @@ Baseline report index:
 - `FRAMEWORK_RUNTIME_WP4_WORKER_ADAPTER_CONTRACT_RESULT_INTAKE_REPORT.md`: WP4 local worker adapter contract and deterministic result intake report.
 - `FRAMEWORK_RUNTIME_WP5_LOCAL_ORCHESTRATION_CONTRACT_V1_REPORT.md`: WP5 local deterministic orchestration contract report.
 - `FRAMEWORK_RUNTIME_WP6_LOCAL_EXECUTION_LOOP_V1_REPORT.md`: WP6 local deterministic execution loop report.
+- `FRAMEWORK_RUNTIME_WP7_EXECUTION_POLICY_CAPABILITY_BOUNDARY_V1_REPORT.md`: WP7 local policy/capability boundary report.
 
-After WP6, future Framework Runtime work packages should start from this local deterministic job/executor/worker-result/orchestration/execution-loop baseline and keep the safety boundary unless broader execution is explicitly authorized.
+After WP7, future Framework Runtime work packages should start from this local deterministic job/executor/worker-result/orchestration/execution-loop/policy baseline and keep the safety boundary unless broader execution is explicitly authorized.
 
 ## Runtime Foundation Slice
 
