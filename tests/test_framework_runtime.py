@@ -168,6 +168,7 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
         help_cases = [
             (["--help"], "framework-runtime"),
             (["framework-runtime", "--help"], "job"),
+            (["framework-runtime", "contract", "--help"], "WP9"),
             (["framework-runtime", "resume", "--help"], "--workspace-id"),
             (["framework-runtime", "evidence", "--help"], "--format"),
             (["framework-runtime", "job", "--help"], "cancel"),
@@ -1175,6 +1176,134 @@ class FrameworkRuntimeTrunkBaselineTest(unittest.TestCase):
                 with redirect_stdout(stdout):
                     self.assertEqual(cli.cmd_framework_runtime(args), 0)
                 self.assertIn("agentoffice.framework_runtime_dispatch", stdout.getvalue())
+
+
+class FrameworkRuntimeWP9ContractSurfaceTest(unittest.TestCase):
+    def test_contract_surface_json_and_text_are_local_static_read_only(self) -> None:
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "contract", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["kind"], "agentoffice.framework_runtime_contract_surface")
+        self.assertEqual(payload["contract_version"], "framework_runtime_wp9_contract_surface_v1")
+        self.assertTrue(payload["read_only"])
+        self.assertTrue(payload["local_static"])
+        self.assertFalse(payload["provider_calls"])
+        self.assertFalse(payload["network_calls"])
+        self.assertFalse(payload["env_reads"])
+        self.assertFalse(payload["external_worker_calls"])
+        self.assertFalse(payload["daemon_started"])
+        self.assertFalse(payload["background_worker_started"])
+        self.assertEqual(payload["baseline"]["mainline_head"], "1f85fa8063f96756bb55cef254ee464b1806bd2b")
+        self.assertEqual(payload["baseline"]["wp8_runtime_baseline"], "a1eea368b853459f2ed05d194524e589cb21f8fd")
+
+        surfaces = {item["surface_id"]: item for item in payload["surfaces"]}
+        self.assertIn("orchestration", surfaces)
+        self.assertIn("execution_loop", surfaces)
+        self.assertIn("policy_decision", surfaces)
+        self.assertIn("worker_result", surfaces)
+        self.assertIn("scheduler", surfaces)
+        self.assertEqual(surfaces["scheduler"]["kind"], "agentoffice.framework_runtime_scheduler_state")
+        self.assertIn("retry_scheduled", surfaces["scheduler"]["canonical_statuses"])
+        self.assertIn("local.execution.dispatch", surfaces["policy_decision"]["allowed_capabilities"])
+
+        relationships = {(item["from"], item["to"]): item["contract"] for item in payload["relationships"]}
+        self.assertIn(("scheduler", "policy_decision"), relationships)
+        self.assertIn("goal-namespaced", relationships[("scheduler", "policy_decision")])
+        self.assertIn(("scheduler", "worker_result"), relationships)
+        self.assertIn("no .env reads or environment variable printing", payload["inherited_invariants"])
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "contract"])
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("contract framework_runtime_wp9_contract_surface_v1", stdout)
+        self.assertIn("external_behavior=false", stdout)
+
+    def test_contract_surface_command_does_not_read_environment(self) -> None:
+        args = argparse.Namespace(
+            framework_runtime_action="contract",
+            framework_runtime_job_action=None,
+            framework_runtime_executor_action=None,
+            framework_runtime_worker_action=None,
+            framework_runtime_orchestration_action=None,
+            framework_runtime_execution_action=None,
+            framework_runtime_policy_action=None,
+            framework_runtime_scheduler_action=None,
+            section="all",
+            surface_id=None,
+            json=True,
+        )
+        with patch.object(os, "environ", EnvGuard()), patch.object(cli.os, "environ", EnvGuard()):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(cli.cmd_framework_runtime(args), 0)
+            self.assertIn("agentoffice.framework_runtime_contract_surface", stdout.getvalue())
+
+    def test_contract_surface_sections_are_deterministic_and_text_rendered(self) -> None:
+        argv = ["framework-runtime", "contract", "--section", "summary", "--json"]
+        exit_code, first_stdout, stderr = run_cli(argv)
+        self.assertEqual(exit_code, 0, stderr)
+        exit_code, second_stdout, stderr = run_cli(argv)
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(first_stdout, second_stdout)
+
+        summary = json.loads(first_stdout)
+        self.assertEqual(summary["kind"], "agentoffice.framework_runtime_contract_surface_section")
+        self.assertEqual(summary["section"], "summary")
+        self.assertEqual(summary["data"]["surface_count"], 8)
+        self.assertIn("scheduler", summary["data"]["surface_ids"])
+        self.assertTrue(summary["safety"]["read_only"])
+        self.assertFalse(summary["safety"]["provider_calls"])
+        self.assertFalse(summary["safety"]["env_reads"])
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "contract", "--section", "summary"])
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("section=summary", stdout)
+        self.assertIn("read_only=true", stdout)
+
+    def test_contract_surface_single_surface_and_safety_sections(self) -> None:
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "contract", "--section", "surfaces", "--surface-id", "scheduler", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        scheduler = json.loads(stdout)
+        self.assertEqual(scheduler["section"], "surfaces")
+        self.assertEqual(scheduler["data"]["surface_id"], "scheduler")
+        self.assertEqual(scheduler["data"]["surface"]["kind"], "agentoffice.framework_runtime_scheduler_state")
+        self.assertIn("retry_scheduled", scheduler["data"]["surface"]["canonical_statuses"])
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "contract", "--surface-id", "scheduler"])
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("surface=scheduler", stdout)
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "contract", "--section", "safety", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        safety = json.loads(stdout)["data"]["safety"]
+        self.assertTrue(safety["local_static"])
+        self.assertTrue(safety["deterministic"])
+        self.assertFalse(safety["network_calls"])
+        self.assertFalse(safety["external_worker_calls"])
+
+    def test_contract_surface_invalid_selection_returns_json_error_envelope(self) -> None:
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "contract", "--section", "unknown", "--json"])
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        error = json.loads(stdout)
+        self.assertEqual(error["kind"], "agentoffice.framework_runtime_job_error")
+        self.assertEqual(error["action"], "contract")
+        self.assertIn("Unsupported contract section", error["error"])
+        self.assertFalse(error["provider_calls"])
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "contract", "--section", "safety", "--surface-id", "scheduler", "--json"])
+        self.assertEqual(exit_code, 2)
+        error = json.loads(stdout)
+        self.assertIn("--surface-id can only be used", error["error"])
+
+    def test_contract_surface_sections_do_not_write_runtime_state(self) -> None:
+        with patch("agent_office.framework_runtime.write_json_atomic", side_effect=AssertionError("unexpected write")), patch(
+            "agent_office.framework_runtime.append_event", side_effect=AssertionError("unexpected event")
+        ):
+            exit_code, stdout, stderr = run_cli(["framework-runtime", "contract", "--section", "relationships", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["section"], "relationships")
+        self.assertFalse(payload["provider_calls"])
 
 
 class FrameworkRuntimeWP8SchedulerKernelTest(unittest.TestCase):

@@ -169,6 +169,12 @@ State vocabulary for scheduler planning:
 | Execution loop | `planned`, `running`, `succeeded`, `blocked`, `failed` | WP8 ticks should advance this state machine through bounded local `run-once` behavior. |
 | Older `runtime` namespace | `pending`, `completed`, `failed`, `blocked` and older job states | Non-canonical for Framework Runtime WP8 scheduler; keep it separate unless a later architecture review defines migration. |
 
+WP9 Contract Surface V1 adds a read-only local/static contract map for the Framework Runtime stack. `framework-runtime contract` reports how task graphs, orchestration, execution loops, policy decisions, jobs, worker results, scheduler state, and event logs relate. It does not read workspace state, write `.ai/` files, dispatch work, start a daemon, call providers, connect external adapters, or read environment variables.
+
+```bash
+python3 -m agent_office framework-runtime contract --json
+```
+
 Baseline report index:
 
 - `AGENTOFFICE_FRAMEWORK_RUNTIME_TRUNK_BATCH_REPORT.md`: original trunk batch implementation report.
@@ -1497,6 +1503,19 @@ python3 -m agent_office runtime parallel --workspace .ai/local-runtime/demo --ma
 python3 -m agent_office runtime orchestrate --workspace .ai/local-runtime/demo --objective "ship local runtime" --json
 python3 -m agent_office runtime orchestrate --workspace .ai/local-runtime/demo --resume --json
 ```
+
+### Framework Runtime WP9 contract inspection
+
+WP9 exposes a deterministic read-only contract surface for reviewing framework-runtime boundaries without reading `.env`, printing environment variables, dispatching providers, starting workers, or mutating runtime state.
+
+```bash
+python3 -m agent_office framework-runtime contract --json
+python3 -m agent_office framework-runtime contract --section summary --json
+python3 -m agent_office framework-runtime contract --section surfaces --surface-id scheduler --json
+python3 -m agent_office framework-runtime contract --section safety
+```
+
+Supported sections are `all`, `summary`, `surfaces`, `relationships`, `invariants`, `validation`, and `safety`. Invalid JSON requests return a structured Framework Runtime error envelope instead of a traceback.
 
 Operator flow:
 
