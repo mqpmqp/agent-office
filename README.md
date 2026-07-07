@@ -145,6 +145,18 @@ python3 -m agent_office framework-runtime execution run-once --workspace-id ws-d
 
 Allowed execution writes a policy decision, `policy.allowed` event, local job, deterministic worker result, and normal execution-loop evidence. Denied execution writes a policy decision, `policy.denied` and `execution_loop.policy_denied` events, creates a failed local job, marks the task `rejected`, and does not create a worker result or dispatch a worker. Policy decisions are stored at `.ai/workspaces/<workspace-id>/runs/<run-id>/policy_decisions/<job-id>.json` and are included in framework runtime status/evidence output.
 
+WP8 scheduler boundary: Framework Runtime scheduler work must build on the WP6/WP7 `framework-runtime execution` surface only. The scheduler must not use legacy `framework-runtime executor`, `framework-runtime dispatch`, or `framework-runtime resume` as an execution backend; those commands remain local-only compatibility surfaces for older trunk behavior. Scheduler-intended dispatch must produce a policy decision before job creation or worker-result intake, and denied capabilities must not create worker results or call workers.
+
+State vocabulary for scheduler planning:
+
+| Layer | Canonical WP6/WP7 states | Scheduler guidance |
+| --- | --- | --- |
+| Task graph | `created`, `accepted`, `rejected`, `skipped` as terminal states for Framework Runtime status | Use `accepted` / `rejected` outcomes from the execution loop; do not map these to older `completed` semantics implicitly. |
+| Job lifecycle | `pending`, `running`, `succeeded`, `failed`, `cancelled` | Jobs are run-local execution records; policy denial moves the job to `failed`. |
+| Orchestration | `planned`, `running`, `succeeded`, `blocked`, `failed` | Treat WP5 orchestration as the deterministic plan source, not a provider executor. |
+| Execution loop | `planned`, `running`, `succeeded`, `blocked`, `failed` | WP8 ticks should advance this state machine through bounded local `run-once` behavior. |
+| Older `runtime` namespace | `pending`, `completed`, `failed`, `blocked` and older job states | Non-canonical for Framework Runtime WP8 scheduler; keep it separate unless a later architecture review defines migration. |
+
 Baseline report index:
 
 - `AGENTOFFICE_FRAMEWORK_RUNTIME_TRUNK_BATCH_REPORT.md`: original trunk batch implementation report.
