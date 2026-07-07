@@ -76,16 +76,20 @@ def normalize_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         required_evidence = task.get("required_evidence", [])
         if not isinstance(required_evidence, list):
             raise TaskGraphError(f"Task {task_id} required_evidence must be a list")
-        normalized.append(
-            {
-                "task_id": task_id,
-                "title": str(task.get("title", task_id)),
-                "status": str(task.get("status", "created")),
-                "depends_on": dependencies,
-                "role": str(task.get("role", "implementation_agent")),
-                "required_evidence": list(required_evidence),
-            }
-        )
+        normalized_task = {
+            "task_id": task_id,
+            "title": str(task.get("title", task_id)),
+            "status": str(task.get("status", "created")),
+            "depends_on": dependencies,
+            "role": str(task.get("role", "implementation_agent")),
+            "required_evidence": list(required_evidence),
+        }
+        if "priority" in task:
+            try:
+                normalized_task["priority"] = int(task["priority"])
+            except (TypeError, ValueError) as exc:
+                raise TaskGraphError(f"Task {task_id} priority must be an integer") from exc
+        normalized.append(normalized_task)
     return normalized
 
 

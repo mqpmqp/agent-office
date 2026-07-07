@@ -32,6 +32,18 @@ TERMINAL_TASK_STATUSES = {"accepted", "rejected", "skipped"}
 JOB_STATUSES = {"pending", "running", "succeeded", "failed", "cancelled"}
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
 WORKER_RESULT_STATUSES = {"succeeded", "failed"}
+SCHEDULER_TASK_STATUSES = {
+    "pending",
+    "selected",
+    "dispatched",
+    "waiting_result",
+    "completed",
+    "failed",
+    "paused",
+    "blocked",
+    "retry_scheduled",
+}
+TERMINAL_SCHEDULER_TASK_STATUSES = {"completed", "failed"}
 LOCAL_WORKER_ADAPTER_ID = "local_worker_adapter_stub"
 LOCAL_EXECUTOR_NAME = "local_executor_stub"
 LOCAL_WORKER_NAME = "local_echo_worker"
@@ -1681,6 +1693,515 @@ def execution_loop_payload(root: Path, workspace_id: str, run_id: str, goal_id: 
     }
 
 
+
+
+def scheduler_states_dir(root: Path, workspace_id: str, run_id: str) -> Path:
+    return ensure_runtime_run(root, workspace_id, run_id) / "scheduler_states"
+
+
+def scheduler_state_path(root: Path, workspace_id: str, run_id: str, goal_id: str) -> Path:
+    return scheduler_states_dir(root, workspace_id, run_id) / f"{orchestration_id_for_goal(goal_id)}.json"
+
+
+def scheduler_state_ref(workspace_id: str, run_id: str, goal_id: str) -> str:
+    return f".ai/workspaces/{workspace_id}/runs/{run_id}/scheduler_states/{orchestration_id_for_goal(goal_id)}.json"
+
+
+def scheduler_transition_entry(sequence: int, action: str, from_status: str | None, to_status: str, reason: str) -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "stamp": f"scheduler-transition-{sequence:04d}",
+        "action": action,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+    }
+
+
+def append_scheduler_transition(payload: dict[str, Any], action: str, new_status: str, reason: str) -> dict[str, Any]:
+    old_status = str(payload.get("status", "")) or None
+    log = list(payload.get("transition_log", []))
+    transition = scheduler_transition_entry(len(log) + 1, action, old_status, new_status, reason)
+    log.append(transition)
+    payload["status"] = new_status
+    payload["updated_at"] = transition["stamp"]
+    payload["transition_log"] = log
+    return payload
+
+
+def scheduler_task_transition_entry(sequence: int, action: str, from_status: str | None, to_status: str, reason: str) -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "stamp": f"scheduler-task-transition-{sequence:04d}",
+        "action": action,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+    }
+
+
+def append_scheduler_task_transition(task: dict[str, Any], action: str, new_status: str, reason: str) -> dict[str, Any]:
+    if new_status not in SCHEDULER_TASK_STATUSES:
+        raise FrameworkRuntimeError(f"Unsupported scheduler task status: {new_status}")
+    old_status = str(task.get("status", "")) or None
+    log = list(task.get("transition_log", []))
+    transition = scheduler_task_transition_entry(len(log) + 1, action, old_status, new_status, reason)
+    log.append(transition)
+    task["status"] = new_status
+    task["updated_at"] = transition["stamp"]
+    task["transition_log"] = log
+    return task
+
+
+def scheduler_priority(task: dict[str, Any]) -> int:
+    raw = task.get("priority", task.get("metadata", {}).get("priority", 0) if isinstance(task.get("metadata"), dict) else 0)
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise FrameworkRuntimeError(f"Task priority must be an integer for task {task.get('task_id')}: {raw}") from exc
+
+
+def scheduler_dependency_reasons(task: dict[str, Any], by_task_id: dict[str, dict[str, Any]]) -> list[str]:
+    reasons: list[str] = []
+    for dependency in task.get("depends_on", []):
+        dependency_task = by_task_id.get(str(dependency))
+        if dependency_task is None:
+            reasons.append(f"unknown_dependency:{dependency}")
+        elif dependency_task.get("status") != "accepted":
+            reasons.append(f"dependency_not_accepted:{dependency}")
+    return reasons
+
+
+def initial_scheduler_state(root: Path, workspace_id: str, run_id: str, goal_id: str, trigger: str, max_retries: int) -> dict[str, Any]:
+    if max_retries < 0:
+        raise FrameworkRuntimeError("Scheduler max retries must be zero or greater.")
+    graph = load_runtime_graph(root, workspace_id, goal_id)
+    tasks = graph["tasks"]
+    by_task_id = {task["task_id"]: task for task in tasks}
+    scheduler_tasks: list[dict[str, Any]] = []
+    for index, task in enumerate(tasks, start=1):
+        task_status = str(task.get("status", "created"))
+        reasons: list[str] = []
+        if task_status in TERMINAL_TASK_STATUSES:
+            initial_status = "completed" if task_status == "accepted" else "failed"
+            reasons.append(f"task_terminal:{task_status}")
+        elif task_status != "created":
+            initial_status = "blocked"
+            reasons.append(f"task_status:{task_status}")
+        else:
+            reasons = scheduler_dependency_reasons(task, by_task_id)
+            initial_status = "blocked" if reasons else "pending"
+        transition = scheduler_task_transition_entry(1, "request", None, initial_status, ";".join(reasons) or f"scheduler request trigger={trigger}")
+        scheduler_tasks.append(
+            {
+                "sequence": index,
+                "task_id": task["task_id"],
+                "title": task["title"],
+                "priority": scheduler_priority(task),
+                "depends_on": list(task.get("depends_on", [])),
+                "status": initial_status,
+                "blocked_reasons": reasons,
+                "retry_count": 0,
+                "max_retries": max_retries,
+                "job_id": None,
+                "job_ref": None,
+                "worker_assignment": None,
+                "worker_result_ref": None,
+                "updated_at": transition["stamp"],
+                "transition_log": [transition],
+            }
+        )
+    transition = scheduler_transition_entry(1, "request", None, "pending", f"scheduler request trigger={trigger}")
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_scheduler_state",
+        "contract_version": "framework_runtime_wp8_scheduler_kernel_v1",
+        "workspace_id": validate_runtime_id(workspace_id, "workspace_id"),
+        "run_id": validate_runtime_id(run_id, "run_id"),
+        "goal_id": validate_runtime_id(goal_id, "goal_id"),
+        "scheduler_id": orchestration_id_for_goal(goal_id),
+        "status": "pending",
+        "trigger": trigger,
+        "created_at": transition["stamp"],
+        "updated_at": transition["stamp"],
+        "tasks": scheduler_tasks,
+        "task_count": len(scheduler_tasks),
+        "selected_task_id": None,
+        "completed_count": sum(1 for item in scheduler_tasks if item["status"] == "completed"),
+        "failed_count": sum(1 for item in scheduler_tasks if item["status"] == "failed"),
+        "blocked_count": sum(1 for item in scheduler_tasks if item["status"] == "blocked"),
+        "evidence_refs": [task_graph_ref(workspace_id, goal_id), scheduler_state_ref(workspace_id, run_id, goal_id)],
+        "transition_log": [transition],
+        "local_static": True,
+        "deterministic": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+        "daemon_started": False,
+        "background_worker_started": False,
+        "legacy_runtime_backend": False,
+    }
+
+
+def refresh_scheduler_counts(state: dict[str, Any], append_transitions: bool = True) -> dict[str, Any]:
+    tasks = list(state.get("tasks", []))
+    state["task_count"] = len(tasks)
+    state["completed_count"] = sum(1 for item in tasks if item.get("status") == "completed")
+    state["failed_count"] = sum(1 for item in tasks if item.get("status") == "failed")
+    state["blocked_count"] = sum(1 for item in tasks if item.get("status") == "blocked")
+    if append_transitions and tasks and all(item.get("status") in TERMINAL_SCHEDULER_TASK_STATUSES for item in tasks):
+        if state["failed_count"] and state.get("status") != "failed":
+            append_scheduler_transition(state, "fail", "failed", "one or more scheduler tasks failed")
+        elif not state["failed_count"] and state.get("status") != "completed":
+            append_scheduler_transition(state, "complete", "completed", "all scheduler tasks completed")
+    return state
+
+
+def write_scheduler_state(root: Path, workspace_id: str, run_id: str, goal_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    refresh_scheduler_counts(state)
+    write_json_atomic(scheduler_state_path(root, workspace_id, run_id, goal_id), state)
+    return state
+
+
+def read_scheduler_state(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    path = scheduler_state_path(root, workspace_id, run_id, goal_id)
+    if not path.exists():
+        raise FrameworkRuntimeError(f"Scheduler state not found: {goal_id}")
+    return read_runtime_json_child(path.parent, path)
+
+
+def scheduler_task_by_id(state: dict[str, Any], task_id: str) -> dict[str, Any]:
+    for task in state.get("tasks", []):
+        if str(task.get("task_id")) == task_id:
+            return task
+    raise FrameworkRuntimeError(f"Scheduler task not found: {task_id}")
+
+
+def scheduler_request_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, trigger: str = "manual", max_retries: int = 1, reset: bool = False) -> dict[str, Any]:
+    root = safe_root(root)
+    if trigger not in {"manual", "dependency-ready", "retry", "resume"}:
+        raise FrameworkRuntimeError(f"Unsupported scheduler trigger: {trigger}")
+    path = scheduler_state_path(root, workspace_id, run_id, goal_id)
+    if path.exists() and not reset:
+        state = read_runtime_json_child(path.parent, path)
+        created = False
+    else:
+        state = initial_scheduler_state(root, workspace_id, run_id, goal_id, trigger, max_retries)
+        write_scheduler_state(root, workspace_id, run_id, goal_id, state)
+        append_runtime_event(root, workspace_id, run_id, "scheduler.requested", LOCAL_EXECUTION_LOOP_NAME)
+        created = True
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_scheduler_request",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "created": created,
+        "scheduler": state,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def scheduler_status_payload(root: Path, workspace_id: str, run_id: str, goal_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    path = scheduler_state_path(root, workspace_id, run_id, goal_id)
+    if path.exists():
+        state = read_runtime_json_child(path.parent, path)
+        persisted = True
+    else:
+        state = initial_scheduler_state(root, workspace_id, run_id, goal_id, "manual", 1)
+        persisted = False
+    refresh_scheduler_counts(state, append_transitions=persisted)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_scheduler_status",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "persisted": persisted,
+        "scheduler": state,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def scheduler_dependency_ready(task: dict[str, Any], state: dict[str, Any]) -> tuple[bool, list[str]]:
+    by_task_id = {item["task_id"]: item for item in state.get("tasks", [])}
+    reasons: list[str] = []
+    for dependency in task.get("depends_on", []):
+        dependency_task = by_task_id.get(str(dependency))
+        if dependency_task is None:
+            reasons.append(f"unknown_dependency:{dependency}")
+        elif dependency_task.get("status") != "completed":
+            reasons.append(f"dependency_not_completed:{dependency}")
+    return not reasons, reasons
+
+
+def has_scheduler_task_status_block(task: dict[str, Any]) -> bool:
+    return any(str(reason).startswith(("task_status:", "task_terminal:")) for reason in task.get("blocked_reasons", []))
+
+
+def refresh_scheduler_eligibility(state: dict[str, Any]) -> None:
+    for task in state.get("tasks", []):
+        status = str(task.get("status", ""))
+        if status in {"paused", "waiting_result", "selected", "dispatched"} | TERMINAL_SCHEDULER_TASK_STATUSES:
+            continue
+        if has_scheduler_task_status_block(task):
+            if status != "blocked":
+                append_scheduler_task_transition(task, "block", "blocked", ";".join(str(reason) for reason in task.get("blocked_reasons", [])))
+            continue
+        ready, reasons = scheduler_dependency_ready(task, state)
+        if ready and status == "blocked":
+            task["blocked_reasons"] = []
+            append_scheduler_task_transition(task, "dependency-ready", "pending", "scheduler dependencies satisfied")
+        elif not ready and status in {"pending", "retry_scheduled", "blocked"}:
+            task["blocked_reasons"] = reasons
+            if status != "blocked":
+                append_scheduler_task_transition(task, "block", "blocked", ";".join(reasons))
+
+
+def scheduler_next_task(state: dict[str, Any]) -> dict[str, Any] | None:
+    refresh_scheduler_eligibility(state)
+    candidates = [
+        task for task in state.get("tasks", [])
+        if task.get("status") in {"pending", "retry_scheduled"} and not task.get("blocked_reasons")
+    ]
+    candidates.sort(key=lambda item: (-int(item.get("priority", 0)), int(item.get("sequence", 0)), str(item.get("task_id", ""))))
+    return candidates[0] if candidates else None
+
+
+def scheduler_run_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, capability_id: str = LOCAL_EXECUTION_CAPABILITY_ID) -> dict[str, Any]:
+    root = safe_root(root)
+    state = read_scheduler_state(root, workspace_id, run_id, goal_id)
+    if state.get("status") in {"completed", "failed", "paused"}:
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_scheduler_run",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "progressed": False,
+            "reason": f"scheduler already {state.get('status')}",
+            "scheduler": state,
+            "dispatch": None,
+            "local_static": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+            "external_worker_calls": False,
+        }
+    task = scheduler_next_task(state)
+    if task is None:
+        write_scheduler_state(root, workspace_id, run_id, goal_id, state)
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_scheduler_run",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "progressed": False,
+            "reason": "no eligible scheduler task",
+            "scheduler": state,
+            "dispatch": None,
+            "local_static": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+            "external_worker_calls": False,
+        }
+    if state.get("status") == "pending":
+        append_scheduler_transition(state, "start", "selected", "scheduler selected first task")
+    task_id = str(task["task_id"])
+    retry_suffix = f"-r{int(task.get('retry_count', 0))}" if int(task.get("retry_count", 0)) else ""
+    job_id = f"sched-{goal_id}-{task_id}{retry_suffix}"
+    append_scheduler_task_transition(task, "select", "selected", "scheduler selected task by priority")
+    decision = write_policy_decision(
+        root,
+        workspace_id,
+        run_id,
+        job_id,
+        policy_decision_payload(
+            capability_id,
+            LOCAL_EXECUTION_LOOP_NAME,
+            "dispatch",
+            {"workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "task_id": task_id, "job_id": job_id, "scheduler_id": str(state["scheduler_id"])},
+        ),
+    )
+    if not decision["allowed"]:
+        job = fail_job_for_policy_denial(root, workspace_id, run_id, goal_id, job_id, task_id, str(task["title"]), {"execution_id": state["scheduler_id"], "cursor": task["sequence"]}, decision)
+        append_scheduler_task_transition(task, "policy_denied", "failed", str(decision["reason"]))
+        append_scheduler_transition(state, "policy_denied", "blocked", str(decision["reason"]))
+        write_scheduler_state(root, workspace_id, run_id, goal_id, state)
+        append_runtime_event(root, workspace_id, run_id, "scheduler.policy_denied", LOCAL_EXECUTION_LOOP_NAME)
+        return {
+            "schema_version": 1,
+            "kind": "agentoffice.framework_runtime_scheduler_run",
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "progressed": False,
+            "reason": str(decision["reason"]),
+            "scheduler": state,
+            "dispatch": task,
+            "job": job,
+            "policy_decision": decision,
+            "worker_assignment": None,
+            "local_static": True,
+            "provider_calls": False,
+            "network_calls": False,
+            "env_reads": False,
+            "external_worker_calls": False,
+        }
+    if job_path(root, workspace_id, run_id, job_id).exists():
+        job = read_job_payload(root, workspace_id, run_id, job_id)
+        metadata = job.get("metadata", {}) if isinstance(job.get("metadata"), dict) else {}
+        if str(metadata.get("goal_id", "")) != goal_id or str(metadata.get("task_id", "")) != task_id:
+            raise FrameworkRuntimeError(f"Scheduler job id collision for goal/task: {job_id}")
+    else:
+        job = create_job_payload(
+            root,
+            workspace_id,
+            run_id,
+            job_id,
+            f"scheduler task {task_id}: {task['title']}",
+            {
+                "scheduler_id": str(state["scheduler_id"]),
+                "goal_id": goal_id,
+                "task_id": task_id,
+                "priority": str(task["priority"]),
+                "retry_count": str(task.get("retry_count", 0)),
+                "capability_id": str(decision["capability_id"]),
+            },
+            [task_graph_ref(workspace_id, goal_id), scheduler_state_ref(workspace_id, run_id, goal_id), policy_decision_ref(workspace_id, run_id, job_id)],
+        )
+    worker_assignment = {
+        "worker": LOCAL_EXECUTION_LOOP_NAME,
+        "adapter_id": LOCAL_WORKER_ADAPTER_ID,
+        "capability_id": str(decision["capability_id"]),
+        "capability_allowed": True,
+        "assignment_mode": "local_static_capability_boundary",
+        "provider_calls": False,
+        "network_calls": False,
+        "external_worker_calls": False,
+    }
+    task["job_id"] = job_id
+    task["job_ref"] = orchestration_job_ref(workspace_id, run_id, job_id)
+    task["worker_assignment"] = worker_assignment
+    append_scheduler_task_transition(task, "dispatch", "dispatched", "scheduler created local framework-runtime job")
+    append_scheduler_task_transition(task, "wait", "waiting_result", "scheduler waiting for deterministic worker result intake")
+    state["selected_task_id"] = task_id
+    state["evidence_refs"] = normalize_evidence_refs(list(state.get("evidence_refs", [])) + [orchestration_job_ref(workspace_id, run_id, job_id), policy_decision_ref(workspace_id, run_id, job_id)])
+    append_scheduler_transition(state, "dispatch", "waiting_result", f"scheduler dispatched task {task_id}")
+    write_scheduler_state(root, workspace_id, run_id, goal_id, state)
+    append_runtime_event(root, workspace_id, run_id, "scheduler.task_dispatched", LOCAL_EXECUTION_LOOP_NAME)
+    return {
+        "schema_version": 1,
+        "kind": "agentoffice.framework_runtime_scheduler_run",
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "goal_id": goal_id,
+        "progressed": True,
+        "reason": "scheduler dispatched one task",
+        "scheduler": state,
+        "dispatch": task,
+        "job": job,
+        "policy_decision": decision,
+        "worker_assignment": worker_assignment,
+        "local_static": True,
+        "provider_calls": False,
+        "network_calls": False,
+        "env_reads": False,
+        "external_worker_calls": False,
+    }
+
+
+def scheduler_pause_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, task_id: str | None = None) -> dict[str, Any]:
+    root = safe_root(root)
+    state = read_scheduler_state(root, workspace_id, run_id, goal_id)
+    targets = [scheduler_task_by_id(state, task_id)] if task_id else [task for task in state.get("tasks", []) if task.get("status") not in TERMINAL_SCHEDULER_TASK_STATUSES]
+    for task in targets:
+        if task.get("status") != "paused":
+            task["previous_status"] = task.get("status")
+            append_scheduler_task_transition(task, "pause", "paused", "operator paused scheduler task")
+    if task_id:
+        append_scheduler_transition(state, "pause-task", "pending", f"operator paused scheduler task {task_id}")
+    else:
+        append_scheduler_transition(state, "pause", "paused", "operator paused scheduler")
+    write_scheduler_state(root, workspace_id, run_id, goal_id, state)
+    append_runtime_event(root, workspace_id, run_id, "scheduler.paused", LOCAL_EXECUTION_LOOP_NAME)
+    return {"schema_version": 1, "kind": "agentoffice.framework_runtime_scheduler_pause", "workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "scheduler": state, "local_static": True, "provider_calls": False, "network_calls": False, "env_reads": False, "external_worker_calls": False}
+
+
+def scheduler_resume_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, task_id: str | None = None) -> dict[str, Any]:
+    root = safe_root(root)
+    state = read_scheduler_state(root, workspace_id, run_id, goal_id)
+    targets = [scheduler_task_by_id(state, task_id)] if task_id else [task for task in state.get("tasks", []) if task.get("status") == "paused"]
+    for task in targets:
+        if task.get("status") == "paused":
+            task.pop("previous_status", None)
+            append_scheduler_task_transition(task, "resume", "pending", "operator resumed scheduler task")
+    append_scheduler_transition(state, "resume", "pending", "operator resumed scheduler")
+    refresh_scheduler_eligibility(state)
+    write_scheduler_state(root, workspace_id, run_id, goal_id, state)
+    append_runtime_event(root, workspace_id, run_id, "scheduler.resumed", LOCAL_EXECUTION_LOOP_NAME)
+    return {"schema_version": 1, "kind": "agentoffice.framework_runtime_scheduler_resume", "workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "scheduler": state, "local_static": True, "provider_calls": False, "network_calls": False, "env_reads": False, "external_worker_calls": False}
+
+
+def scheduler_retry_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, task_id: str) -> dict[str, Any]:
+    root = safe_root(root)
+    state = read_scheduler_state(root, workspace_id, run_id, goal_id)
+    task = scheduler_task_by_id(state, task_id)
+    retry_count = int(task.get("retry_count", 0))
+    max_retries = int(task.get("max_retries", 0))
+    if task.get("status") != "failed":
+        raise FrameworkRuntimeError(f"Scheduler task is not failed and cannot be retried: {task_id}")
+    if retry_count >= max_retries:
+        refresh_scheduler_counts(state)
+        return {"schema_version": 1, "kind": "agentoffice.framework_runtime_scheduler_retry", "workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "task": task, "scheduler": state, "local_static": True, "provider_calls": False, "network_calls": False, "env_reads": False, "external_worker_calls": False}
+    task["retry_count"] = retry_count + 1
+    task["job_id"] = None
+    task["job_ref"] = None
+    task["worker_assignment"] = None
+    task["worker_result_ref"] = None
+    append_scheduler_task_transition(task, "retry", "retry_scheduled", "scheduler retry scheduled")
+    append_scheduler_transition(state, "retry", "retry_scheduled", f"scheduler retry scheduled for task {task_id}")
+    write_scheduler_state(root, workspace_id, run_id, goal_id, state)
+    append_runtime_event(root, workspace_id, run_id, "scheduler.retry", LOCAL_EXECUTION_LOOP_NAME)
+    return {"schema_version": 1, "kind": "agentoffice.framework_runtime_scheduler_retry", "workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "task": task, "scheduler": state, "local_static": True, "provider_calls": False, "network_calls": False, "env_reads": False, "external_worker_calls": False}
+
+
+def scheduler_result_intake_payload(root: Path, workspace_id: str, run_id: str, goal_id: str, task_id: str, status: str, summary: str) -> dict[str, Any]:
+    root = safe_root(root)
+    state = read_scheduler_state(root, workspace_id, run_id, goal_id)
+    task = scheduler_task_by_id(state, task_id)
+    if task.get("status") != "waiting_result":
+        raise FrameworkRuntimeError(f"Scheduler task is not waiting for result: {task_id}")
+    job_id = str(task.get("job_id") or "")
+    if not job_id:
+        raise FrameworkRuntimeError(f"Scheduler task has no job: {task_id}")
+    intake = intake_worker_result_payload(root, workspace_id, run_id, job_id, LOCAL_WORKER_ADAPTER_ID, status, summary, [scheduler_state_ref(workspace_id, run_id, goal_id)])
+    if status == "succeeded":
+        set_task_status(root, workspace_id, run_id, goal_id, task_id, "accepted")
+        append_scheduler_task_transition(task, "result-intake", "completed", "scheduler result succeeded")
+        append_runtime_event(root, workspace_id, run_id, "scheduler.task_completed", LOCAL_EXECUTION_LOOP_NAME)
+    else:
+        append_scheduler_task_transition(task, "result-intake", "failed", "scheduler result failed")
+        append_runtime_event(root, workspace_id, run_id, "scheduler.task_failed", LOCAL_EXECUTION_LOOP_NAME)
+    task["worker_result_ref"] = worker_result_ref(workspace_id, run_id, job_id)
+    state["evidence_refs"] = normalize_evidence_refs(list(state.get("evidence_refs", [])) + [worker_result_ref(workspace_id, run_id, job_id), executor_event_log_ref(workspace_id, run_id)])
+    append_scheduler_transition(state, "result-intake", "pending", f"scheduler intook result for task {task_id}")
+    refresh_scheduler_eligibility(state)
+    write_scheduler_state(root, workspace_id, run_id, goal_id, state)
+    return {"schema_version": 1, "kind": "agentoffice.framework_runtime_scheduler_result_intake", "workspace_id": workspace_id, "run_id": run_id, "goal_id": goal_id, "task": task, "scheduler": state, "job": intake["job"], "worker_result": intake["worker_result"], "local_static": True, "provider_calls": False, "network_calls": False, "env_reads": False, "external_worker_calls": False}
+
 def job_error_payload(message: str, action: str | None = None) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -2155,6 +2676,19 @@ def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
     if kind == "agentoffice.framework_runtime_execution_loop_status":
         state = payload["execution_loop"]
         return f"execution status {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} persisted={str(payload['persisted']).lower()} status={state['status']} completed={state['completed_count']}/{state['dispatch_count']} local_static=true"
+    if kind in {"agentoffice.framework_runtime_scheduler_request", "agentoffice.framework_runtime_scheduler_status", "agentoffice.framework_runtime_scheduler_pause", "agentoffice.framework_runtime_scheduler_resume"}:
+        scheduler = payload["scheduler"]
+        return f"scheduler {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} status={scheduler['status']} tasks={scheduler['task_count']} completed={scheduler['completed_count']} failed={scheduler['failed_count']} blocked={scheduler['blocked_count']} local_static=true"
+    if kind == "agentoffice.framework_runtime_scheduler_run":
+        dispatch = payload.get("dispatch")
+        task = dispatch.get("task_id") if dispatch else "none"
+        return f"scheduler run {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} progressed={str(payload['progressed']).lower()} task={task} reason={payload['reason']} local_static=true"
+    if kind == "agentoffice.framework_runtime_scheduler_retry":
+        task = payload["task"]
+        return f"scheduler retry {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} task={task['task_id']} status={task['status']} retry={task['retry_count']}/{task['max_retries']} local_static=true"
+    if kind == "agentoffice.framework_runtime_scheduler_result_intake":
+        task = payload["task"]
+        return f"scheduler result-intake {payload['workspace_id']}/{payload['run_id']}/{payload['goal_id']} task={task['task_id']} status={task['status']} job={task['job_id']} local_static=true"
     if kind == "agentoffice.framework_runtime_worker_result_intake":
         result = payload["worker_result"]
         return f"worker result-intake {payload['workspace_id']}/{payload['run_id']} job={result['job_id']} status={result['status']} adapter={result['adapter_id']} local_static=true"

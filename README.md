@@ -147,6 +147,18 @@ Allowed execution writes a policy decision, `policy.allowed` event, local job, d
 
 WP8 scheduler boundary: Framework Runtime scheduler work must build on the WP6/WP7 `framework-runtime execution` surface only. The scheduler must not use legacy `framework-runtime executor`, `framework-runtime dispatch`, or `framework-runtime resume` as an execution backend; those commands remain local-only compatibility surfaces for older trunk behavior. Scheduler-intended dispatch must produce a policy decision before job creation or worker-result intake, and denied capabilities must not create worker results or call workers.
 
+WP8 Scheduler Kernel V1 adds a deterministic, command-driven scheduler over framework-runtime execution/task/job state. It persists scheduler state at `.ai/workspaces/<workspace-id>/runs/<run-id>/scheduler_states/<goal-id>.json`, selects eligible tasks by priority with stable task-graph order as the tie-breaker, records blocked dependency reasons, supports bounded retries, and exposes pause/resume state through the CLI. It does not start daemons, background loops, real providers, external adapters, or network behavior. Scheduler job creation writes a WP7 policy decision before creating a local framework-runtime job and assigns only the local static worker capability boundary. Result intake uses the existing deterministic worker-result lifecycle and updates scheduler/task state. Legacy `runtime`, `framework-runtime executor`, `framework-runtime dispatch`, and `framework-runtime resume` remain compatibility surfaces, not the WP8 scheduler backend.
+
+```bash
+python3 -m agent_office framework-runtime scheduler request --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --trigger manual --json
+python3 -m agent_office framework-runtime scheduler status --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke
+python3 -m agent_office framework-runtime scheduler run --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --capability-id local.execution.dispatch --json
+python3 -m agent_office framework-runtime scheduler result-intake --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --task-id task-a --status succeeded --summary "local deterministic scheduler result" --json
+python3 -m agent_office framework-runtime scheduler pause --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --task-id task-b --json
+python3 -m agent_office framework-runtime scheduler resume --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --task-id task-b --json
+python3 -m agent_office framework-runtime scheduler retry --workspace-id ws-demo --run-id run-demo --goal-id goal-demo --root /tmp/agentoffice-runtime-trunk-smoke --task-id task-a --json
+```
+
 State vocabulary for scheduler planning:
 
 | Layer | Canonical WP6/WP7 states | Scheduler guidance |
@@ -168,6 +180,7 @@ Baseline report index:
 - `FRAMEWORK_RUNTIME_WP5_LOCAL_ORCHESTRATION_CONTRACT_V1_REPORT.md`: WP5 local deterministic orchestration contract report.
 - `FRAMEWORK_RUNTIME_WP6_LOCAL_EXECUTION_LOOP_V1_REPORT.md`: WP6 local deterministic execution loop report.
 - `FRAMEWORK_RUNTIME_WP7_EXECUTION_POLICY_CAPABILITY_BOUNDARY_V1_REPORT.md`: WP7 local policy/capability boundary report.
+- `FRAMEWORK_RUNTIME_WP8_SCHEDULER_KERNEL_V1_REPORT.md`: WP8 deterministic scheduler kernel report.
 
 After WP7, future Framework Runtime work packages should start from this local deterministic job/executor/worker-result/orchestration/execution-loop/policy baseline and keep the safety boundary unless broader execution is explicitly authorized.
 
