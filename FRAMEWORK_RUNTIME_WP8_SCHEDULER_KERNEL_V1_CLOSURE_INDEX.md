@@ -4,12 +4,13 @@ Marker: FRAMEWORK_RUNTIME_WP8_SCHEDULER_KERNEL_V1_CLOSURE_INDEX_COMPLETE
 
 Status: closed on `phase6/mainline`
 
-Clean baseline for WP9/WP10:
+Clean implementation baseline for WP9/WP10:
 - branch: `phase6/mainline`
-- mainline commit: `a1eea368b853459f2ed05d194524e589cb21f8fd`
-- origin readback: `a1eea368b853459f2ed05d194524e589cb21f8fd`
+- WP8 merge commit: `a1eea368b853459f2ed05d194524e589cb21f8fd`
+- WP8 merge commit origin readback before closure-index publication: `a1eea368b853459f2ed05d194524e589cb21f8fd`
 - merge commit subject: `Merge WP8 scheduler kernel v1`
 - merge parents: `a099334e9103f1f875e5eeee36f4c8945d7f07a5` + `a3f87090e8637602d65b569d460a2e71b3beedb5`
+- closure-index commits after `a1eea368b853459f2ed05d194524e589cb21f8fd` are archive/readback-only documentation and do not change the WP8 implementation baseline.
 
 ## Scope
 
@@ -36,8 +37,9 @@ It gathers the implementation report, initial review evidence, review-fix report
 - review-fix code commit: `23b3ad47c4c92c70b133718c9a0378e25d44b10a`
 - source head merged, including gate artifacts: `a3f87090e8637602d65b569d460a2e71b3beedb5`
 - target before merge: `a099334e9103f1f875e5eeee36f4c8945d7f07a5`
-- target after merge: `a1eea368b853459f2ed05d194524e589cb21f8fd`
-- origin target readback after push: `a1eea368b853459f2ed05d194524e589cb21f8fd`
+- target after WP8 merge: `a1eea368b853459f2ed05d194524e589cb21f8fd`
+- origin target readback after WP8 merge push: `a1eea368b853459f2ed05d194524e589cb21f8fd`
+- first closure-index commit on mainline: `d338fb7db053e4a5d37ad390df3d4a39972c9564`
 
 ## Initial Review Findings Closure
 
@@ -87,4 +89,4 @@ Mainline post-merge validation before push:
 
 ## Handoff Baseline
 
-WP9/WP10 should treat `phase6/mainline` at `a1eea368b853459f2ed05d194524e589cb21f8fd` as the clean Framework Runtime baseline after WP8 Scheduler Kernel V1 closure.
+WP9/WP10 should treat `phase6/mainline` at `a1eea368b853459f2ed05d194524e589cb21f8fd` as the clean Framework Runtime implementation baseline after WP8 Scheduler Kernel V1 closure. Later closure-index commits are documentation-only archive/readback records.
