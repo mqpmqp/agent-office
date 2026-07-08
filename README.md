@@ -53,6 +53,15 @@ Available CLI surfaces:
 
 Safety boundary: Framework Runtime trunk commands are local/static only unless a future work package explicitly authorizes a broader mode. The current baseline must not read `.env`, print environment variables, call providers or models, make network requests, connect to real Codex/Claude/provider workers, or execute external adapters.
 
+WP10 Coordinator/Planner V1 adds a static Worker Capability Registry and deterministic planner dry-run under `framework-runtime planner`. This is a Fugu-like entry layer only in shape: it exposes local, auditable capability declarations and a task-graph-compatible DAG preview, not a black-box coordinator. `codex`, `claude`, `gemini`, `grok`, and `local` are static capability records; Claude/Gemini/Grok are declared-only entries and no API/provider call is made. The planner commands are read-only and do not execute tasks, read `.env`, print environment variables, start daemons, or call provider/runtime/adapter paths.
+
+```bash
+python3 -m agent_office framework-runtime planner capabilities
+python3 -m agent_office framework-runtime planner capabilities --json
+python3 -m agent_office framework-runtime planner plan --objective "Review local evidence"
+python3 -m agent_office framework-runtime planner plan --objective "Review local evidence" --json
+```
+
 Minimal baseline smoke path:
 
 ```bash
