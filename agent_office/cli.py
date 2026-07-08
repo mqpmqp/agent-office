@@ -156,6 +156,8 @@ from .framework_runtime import (
     intake_worker_result_payload as framework_runtime_intake_worker_result_payload,
     inspect_payload as framework_runtime_inspect_payload,
     policy_check_payload as framework_runtime_policy_check_payload,
+    planner_capabilities_payload as framework_runtime_planner_capabilities_payload,
+    planner_plan_payload as framework_runtime_planner_plan_payload,
     orchestration_plan_payload as framework_runtime_orchestration_plan_payload,
     orchestration_run_local_payload as framework_runtime_orchestration_run_local_payload,
     orchestration_show_payload as framework_runtime_orchestration_show_payload,
@@ -1330,6 +1332,7 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
     orchestration_action = getattr(args, "framework_runtime_orchestration_action", None)
     execution_action = getattr(args, "framework_runtime_execution_action", None)
     policy_action = getattr(args, "framework_runtime_policy_action", None)
+    planner_action = getattr(args, "framework_runtime_planner_action", None)
     scheduler_action = getattr(args, "framework_runtime_scheduler_action", None)
     try:
         if action == "workers":
@@ -1383,6 +1386,13 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
                 payload = framework_runtime_policy_check_payload(args.capability_id, args.worker, args.action_name)
             else:
                 raise AgentOfficeError("framework-runtime policy requires a supported action.")
+        elif action == "planner":
+            if planner_action == "capabilities":
+                payload = framework_runtime_planner_capabilities_payload()
+            elif planner_action == "plan":
+                payload = framework_runtime_planner_plan_payload(args.objective)
+            else:
+                raise AgentOfficeError("framework-runtime planner requires a supported action.")
         elif action == "scheduler":
             if scheduler_action == "request":
                 payload = framework_runtime_scheduler_request_payload(Path(args.root), args.workspace_id, args.run_id, args.goal_id, args.trigger, args.max_retries, args.reset)
@@ -1449,8 +1459,8 @@ def cmd_framework_runtime(args: argparse.Namespace) -> int:
         else:
             raise AgentOfficeError("framework-runtime requires a supported action.")
     except FrameworkRuntimeError as exc:
-        if action in {"contract", "job", "executor", "worker", "orchestration", "execution", "policy", "scheduler"} and getattr(args, "json", False):
-            error_action = "contract" if action == "contract" else job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action if action == "orchestration" else execution_action if action == "execution" else policy_action if action == "policy" else scheduler_action
+        if action in {"contract", "job", "executor", "worker", "orchestration", "execution", "policy", "planner", "scheduler"} and getattr(args, "json", False):
+            error_action = "contract" if action == "contract" else job_action if action == "job" else executor_action if action == "executor" else worker_action if action == "worker" else orchestration_action if action == "orchestration" else execution_action if action == "execution" else policy_action if action == "policy" else planner_action if action == "planner" else scheduler_action
             print(json.dumps(framework_runtime_job_error_payload(str(exc), error_action), indent=2, ensure_ascii=False))
             return 2
         raise AgentOfficeError(str(exc)) from exc
@@ -2424,6 +2434,16 @@ def build_parser() -> argparse.ArgumentParser:
     framework_runtime_contract.add_argument("--surface-id", help="Read-only contract surface id to inspect when section is all or surfaces.")
     framework_runtime_contract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     framework_runtime_contract.set_defaults(func=cmd_framework_runtime)
+
+    framework_runtime_planner = framework_runtime_sub.add_parser("planner", help="Inspect static coordinator planner capabilities and dry-run plans.")
+    framework_runtime_planner_sub = framework_runtime_planner.add_subparsers(dest="framework_runtime_planner_action", required=True)
+    framework_runtime_planner_capabilities = framework_runtime_planner_sub.add_parser("capabilities", help="List static worker capability declarations without provider calls.")
+    framework_runtime_planner_capabilities.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    framework_runtime_planner_capabilities.set_defaults(func=cmd_framework_runtime)
+    framework_runtime_planner_plan = framework_runtime_planner_sub.add_parser("plan", help="Create a deterministic local dry-run task graph for an objective.")
+    framework_runtime_planner_plan.add_argument("--objective", required=True, help="Objective text to plan without model/provider calls.")
+    framework_runtime_planner_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    framework_runtime_planner_plan.set_defaults(func=cmd_framework_runtime)
 
     def add_framework_runtime_run_args(parser: argparse.ArgumentParser, *, goal: bool = True) -> None:
         parser.add_argument("--workspace-id", required=True, help="Stable workspace id.")

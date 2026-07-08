@@ -1306,6 +1306,80 @@ class FrameworkRuntimeWP9ContractSurfaceTest(unittest.TestCase):
         self.assertFalse(payload["provider_calls"])
 
 
+class FrameworkRuntimeWP10PlannerTest(unittest.TestCase):
+    def test_planner_capabilities_json_and_text_contract(self) -> None:
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "planner", "capabilities", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["kind"], "agentoffice.framework_runtime_planner_capabilities")
+        self.assertEqual(payload["worker_ids"], ["codex", "claude", "gemini", "grok", "local"])
+        self.assertEqual(payload["available_worker_ids"], ["codex", "local"])
+        self.assertEqual(payload["declared_only_worker_ids"], ["claude", "gemini", "grok"])
+        self.assertTrue(payload["safety"]["read_only"])
+        self.assertFalse(payload["safety"]["provider_calls"])
+        self.assertFalse(payload["safety"]["env_reads"])
+
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "planner", "capabilities"])
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("worker codex status=available", stdout)
+        self.assertIn("worker claude status=declared_only", stdout)
+        self.assertIn("planning=true", stdout)
+
+    def test_planner_plan_is_deterministic_task_graph_dag(self) -> None:
+        args = ["framework-runtime", "planner", "plan", "--objective", "Add WP10 static planner", "--json"]
+        first = run_cli(args)
+        second = run_cli(args)
+        self.assertEqual(first, second)
+        exit_code, stdout, stderr = first
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["kind"], "agentoffice.framework_runtime_planner_plan")
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertFalse(payload["execution_enabled"])
+        self.assertFalse(payload["safety"]["provider_calls"])
+        graph = payload["task_graph"]
+        self.assertEqual(graph["kind"], "agentoffice.static_task_graph_dag")
+        self.assertEqual([node["task_id"] for node in graph["nodes"]], ["scope", "implement", "review", "validate"])
+        self.assertEqual(graph["edges"], [{"from": "scope", "to": "implement"}, {"from": "implement", "to": "review"}, {"from": "review", "to": "validate"}])
+        self.assertEqual(payload["worker_assignments"]["implement"], "codex")
+
+    def test_planner_plan_text_contract(self) -> None:
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "planner", "plan", "--objective", "Review local evidence"])
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("planner dry-run objective=Review local evidence tasks=4 edges=3", stdout)
+        self.assertIn("execution_enabled=false provider_calls=false", stdout)
+        self.assertIn("task validate worker=local depends_on=review status=created", stdout)
+
+    def test_planner_unavailable_worker_falls_back_without_provider_call(self) -> None:
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "planner", "plan", "--objective", "Ask claude to review then validate locally", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["worker_assignments"]["review"], "local")
+        self.assertEqual(payload["fallbacks"][0]["requested_worker"], "claude")
+        self.assertEqual(payload["fallbacks"][0]["fallback_worker"], "local")
+        self.assertFalse(payload["safety"]["external_worker_calls"])
+
+    def test_planner_empty_objective_returns_json_error_without_traceback(self) -> None:
+        exit_code, stdout, stderr = run_cli(["framework-runtime", "planner", "plan", "--objective", "   ", "--json"])
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["kind"], "agentoffice.framework_runtime_job_error")
+        self.assertEqual(payload["action"], "plan")
+        self.assertIn("objective", payload["error"])
+        self.assertFalse(payload["provider_calls"])
+
+    def test_planner_capabilities_do_not_write_runtime_state(self) -> None:
+        with patch("agent_office.framework_runtime.write_json_atomic", side_effect=AssertionError("unexpected write")), patch(
+            "agent_office.framework_runtime.append_event", side_effect=AssertionError("unexpected event")
+        ):
+            exit_code, stdout, stderr = run_cli(["framework-runtime", "planner", "capabilities", "--json"])
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["safety"]["read_only"])
+
+
+
 class FrameworkRuntimeWP8SchedulerKernelTest(unittest.TestCase):
     def scheduler_args(self, root: str, action: str, *extra: str) -> list[str]:
         return [

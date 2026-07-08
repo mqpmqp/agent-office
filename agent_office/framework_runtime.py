@@ -64,6 +64,76 @@ CONTRACT_SAFETY_FLAG_KEYS = (
     "daemon_started",
     "background_worker_started",
 )
+PLANNER_CAPABILITY_SCHEMA_VERSION = 1
+PLANNER_PLAN_SCHEMA_VERSION = 1
+WORKER_CAPABILITIES = (
+    {
+        "id": "codex",
+        "kind": "local_cli_static",
+        "status": "available",
+        "strengths": ["code_changes", "tests", "local_verification"],
+        "max_context_tokens": 128000,
+        "cost_tier": "medium",
+        "supports_code": True,
+        "supports_review": True,
+        "supports_planning": True,
+    },
+    {
+        "id": "claude",
+        "kind": "provider_static_description",
+        "status": "declared_only",
+        "strengths": ["long_context_review", "architecture_reasoning", "handoff_review"],
+        "max_context_tokens": 200000,
+        "cost_tier": "high",
+        "supports_code": True,
+        "supports_review": True,
+        "supports_planning": True,
+    },
+    {
+        "id": "gemini",
+        "kind": "provider_static_description",
+        "status": "declared_only",
+        "strengths": ["large_context_scan", "planning", "summarization"],
+        "max_context_tokens": 1000000,
+        "cost_tier": "low",
+        "supports_code": False,
+        "supports_review": True,
+        "supports_planning": True,
+    },
+    {
+        "id": "grok",
+        "kind": "provider_static_description",
+        "status": "declared_only",
+        "strengths": ["plan_review", "risk_review", "contrarian_review"],
+        "max_context_tokens": 128000,
+        "cost_tier": "medium",
+        "supports_code": False,
+        "supports_review": True,
+        "supports_planning": True,
+    },
+    {
+        "id": "local",
+        "kind": "local_static",
+        "status": "available",
+        "strengths": ["deterministic_fallback", "local_validation", "read_only_inspection"],
+        "max_context_tokens": 32000,
+        "cost_tier": "none",
+        "supports_code": False,
+        "supports_review": True,
+        "supports_planning": True,
+    },
+)
+PLANNER_SAFETY = {
+    "local_static": True,
+    "deterministic": True,
+    "read_only": True,
+    "provider_calls": False,
+    "network_calls": False,
+    "env_reads": False,
+    "external_worker_calls": False,
+    "daemon_started": False,
+    "background_worker_started": False,
+}
 
 
 class FrameworkRuntimeError(ValueError):
@@ -301,6 +371,132 @@ def capability_declarations() -> list[dict[str, Any]]:
             "external_worker_calls": True,
         },
     ]
+
+
+def planner_capabilities_payload() -> dict[str, Any]:
+    capabilities = [dict(item) for item in WORKER_CAPABILITIES]
+    return {
+        "schema_version": PLANNER_CAPABILITY_SCHEMA_VERSION,
+        "kind": "agentoffice.framework_runtime_planner_capabilities",
+        "contract_version": "framework_runtime_wp10_coordinator_capability_registry_v1",
+        "workers": capabilities,
+        "worker_ids": [item["id"] for item in capabilities],
+        "available_worker_ids": [item["id"] for item in capabilities if item["status"] == "available"],
+        "declared_only_worker_ids": [item["id"] for item in capabilities if item["status"] == "declared_only"],
+        "safety": dict(PLANNER_SAFETY),
+    }
+
+
+def planner_plan_payload(objective: str) -> dict[str, Any]:
+    normalized_objective = " ".join(objective.split())
+    if not normalized_objective:
+        raise FrameworkRuntimeError("Planner objective must not be empty.")
+
+    capabilities = planner_capabilities_payload()
+    capability_by_id = {item["id"]: item for item in capabilities["workers"]}
+    requested_workers = _planner_requested_workers(normalized_objective)
+    unavailable_requested = [worker for worker in requested_workers if capability_by_id[worker]["status"] != "available"]
+    implementation_worker = "codex"
+    review_worker = "local" if unavailable_requested else "codex"
+    planning_worker = "local"
+    tasks = [
+        _planner_task(
+            "scope",
+            "Scope objective and boundaries",
+            planning_worker,
+            [],
+            "planning",
+            ["objective", "safety_boundaries"],
+        ),
+        _planner_task(
+            "implement",
+            "Prepare local implementation patch",
+            implementation_worker,
+            ["scope"],
+            "implementation",
+            ["diff", "tests"],
+        ),
+        _planner_task(
+            "review",
+            "Review static artifacts and safety boundaries",
+            review_worker,
+            ["implement"],
+            "review",
+            ["review_report", "validation_evidence"],
+        ),
+        _planner_task(
+            "validate",
+            "Run local deterministic validation commands",
+            "local",
+            ["review"],
+            "validation",
+            ["validation_log"],
+        ),
+    ]
+    return {
+        "schema_version": PLANNER_PLAN_SCHEMA_VERSION,
+        "kind": "agentoffice.framework_runtime_planner_plan",
+        "contract_version": "framework_runtime_wp10_coordinator_capability_registry_v1",
+        "objective": normalized_objective,
+        "mode": "dry_run",
+        "execution_enabled": False,
+        "task_graph": {
+            "kind": "agentoffice.static_task_graph_dag",
+            "schema_version": 1,
+            "nodes": tasks,
+            "edges": _planner_edges(tasks),
+            "entry_task_ids": ["scope"],
+            "terminal_task_ids": ["validate"],
+        },
+        "worker_assignments": {task["task_id"]: task["worker_id"] for task in tasks},
+        "fallbacks": [
+            {
+                "requested_worker": worker,
+                "status": capability_by_id[worker]["status"],
+                "fallback_worker": "local",
+                "reason": "worker is a static declaration only; no provider/API call is allowed",
+            }
+            for worker in unavailable_requested
+        ],
+        "safety": dict(PLANNER_SAFETY),
+        "capabilities": capabilities,
+        "validation_commands": [
+            "python3 -m compileall agent_office tests",
+            "python3 -m unittest",
+            "python3 -m unittest discover -s tests -p 'test_*.py'",
+            "python3 -m agent_office doctor --adapters",
+            "./scripts/verify.sh",
+            "./scripts/smoke-test.sh P6-PROFILES",
+            "python3 -m agent_office run-staged P6-PROFILES --dry-run --reset",
+        ],
+    }
+
+
+def _planner_requested_workers(objective: str) -> list[str]:
+    lower = objective.lower()
+    return [item["id"] for item in WORKER_CAPABILITIES if item["id"] in lower]
+
+
+def _planner_task(task_id: str, title: str, worker_id: str, depends_on: list[str], role: str, evidence: list[str]) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "title": title,
+        "status": "created",
+        "depends_on": depends_on,
+        "role": role,
+        "worker_id": worker_id,
+        "required_evidence": evidence,
+        "priority": {"scope": 100, "implement": 80, "review": 60, "validate": 40}[task_id],
+        "execution_enabled": False,
+    }
+
+
+def _planner_edges(tasks: list[dict[str, Any]]) -> list[dict[str, str]]:
+    edges: list[dict[str, str]] = []
+    for task in tasks:
+        for dependency in task["depends_on"]:
+            edges.append({"from": str(dependency), "to": str(task["task_id"])})
+    return edges
 
 
 def capability_contract_payload() -> dict[str, Any]:
@@ -2771,6 +2967,22 @@ def format_framework_runtime_payload(payload: dict[str, Any]) -> str:
             f"capability {item['capability_id']} worker={item['worker']} action={item['action']} status={item['status']} allowed={str(item['allowed']).lower()}"
             for item in payload["capabilities"]
         )
+    if kind == "agentoffice.framework_runtime_planner_capabilities":
+        return "\n".join(
+            f"worker {item['id']} status={item['status']} kind={item['kind']} code={str(item['supports_code']).lower()} review={str(item['supports_review']).lower()} planning={str(item['supports_planning']).lower()}"
+            for item in payload["workers"]
+        )
+    if kind == "agentoffice.framework_runtime_planner_plan":
+        graph = payload["task_graph"]
+        fallback_count = len(payload["fallbacks"])
+        lines = [
+            f"planner dry-run objective={payload['objective']} tasks={len(graph['nodes'])} edges={len(graph['edges'])} execution_enabled=false provider_calls=false",
+            f"fallbacks={fallback_count}",
+        ]
+        for task in graph["nodes"]:
+            dependencies = ",".join(task["depends_on"]) or "none"
+            lines.append(f"task {task['task_id']} worker={task['worker_id']} depends_on={dependencies} status={task['status']}")
+        return "\n".join(lines)
     if kind == "agentoffice.framework_runtime_policy_check":
         decision = payload["decision"]
         return f"policy check capability={decision['capability_id']} allowed={str(decision['allowed']).lower()} code={decision['reason_code']} local_static=true"
